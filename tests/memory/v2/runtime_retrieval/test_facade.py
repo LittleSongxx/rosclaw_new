@@ -332,3 +332,52 @@ def test_memory_interface_falls_back_to_legacy_when_facade_empty() -> None:
     results = memory.find_similar_experiences("legacytag calibration", limit=3)
     assert results  # legacy experience_graph path still serves
     assert results[0].get("source") != "memory_v2_active"
+
+
+def test_how_intervention_boosts_recovery_hint_memories() -> None:
+    """v4 §7.2 actionability: on the intervention path, memories carrying
+    recovery guidance outrank unactionable near-duplicates — they are the
+    only candidates the selective pipeline can turn into a patch (live
+    finding, EVO-3 Exp1 pilot / self-evolution demo 2026-07-24)."""
+    rows = [_failure_row(f"mem_dup_{i}", "rh56_right_01", "middle") for i in range(3)]
+    hinted = _failure_row("mem_recovery", "rh56_right_01", "middle")
+    hinted["metadata"] = '{"recovery_hint": "增加回合间冷却"}'
+    rows.append(hinted)  # hinted LAST in fusion order
+    store = FakeNativeStore(
+        collections={PHYSICAL: rows},
+        registry_rows=_pointer_and_build_rows(physical=PHYSICAL),
+    )
+    facade = build_retrieval_facade(native_store=store, provider_resolver=_resolver())
+    response = facade.retrieve(
+        MemoryQuery(text="右手 middle joint_not_reached 失败 恢复", limit=5),
+        purpose=RetrievalPurpose.HOW_INTERVENTION,
+    )
+    assert response.candidates[0].memory_id == "mem_recovery"
+    # HUMAN_SEARCH: no boost — fusion order preserved (hinted stays last).
+    response2 = facade.retrieve(
+        MemoryQuery(text="右手 middle joint_not_reached 失败 恢复", limit=5),
+        purpose=RetrievalPurpose.HUMAN_SEARCH,
+    )
+    assert response2.candidates[-1].memory_id == "mem_recovery"
+
+
+def test_how_intervention_widens_candidate_window() -> None:
+    """The intervention path scans a wider pool so recovery-bearing memories
+    reach re-ranking even inside corpora full of near-duplicate failures."""
+    store = FakeNativeStore(
+        collections={PHYSICAL: [_failure_row("m1", "rh56_right_01", "middle")]},
+        registry_rows=_pointer_and_build_rows(physical=PHYSICAL),
+    )
+    facade = build_retrieval_facade(native_store=store, provider_resolver=_resolver())
+    facade.retrieve(
+        MemoryQuery(text="右手 middle joint_not_reached", limit=5),
+        purpose=RetrievalPurpose.HOW_INTERVENTION,
+    )
+    facade.retrieve(
+        MemoryQuery(text="右手 middle joint_not_reached", limit=5),
+        purpose=RetrievalPurpose.HUMAN_SEARCH,
+    )
+    assert store.hybrid_calls[0]["limit"] >= 50
+    assert store.hybrid_calls[0]["candidate_window"] >= 50
+    assert store.hybrid_calls[1]["limit"] == 20
+    assert store.hybrid_calls[1]["candidate_window"] == 20

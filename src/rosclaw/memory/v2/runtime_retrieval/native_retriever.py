@@ -21,6 +21,7 @@ experience.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -36,6 +37,7 @@ from .result import (
     CROSS_BODY_FORBID,
     PurposePolicy,
     RetrievalCandidate,
+    RetrievalPurpose,
 )
 
 logger = logging.getLogger("rosclaw.memory.v2.runtime_retrieval.native_retriever")
@@ -108,6 +110,36 @@ def _entity_matches(row: dict[str, Any], exact: dict[str, list[str]]) -> dict[st
     }
 
 
+INTERVENTION_WINDOW_MIN = 50
+INTERVENTION_ACTIONABILITY_BOOST = 3.0
+
+
+def _actionability_multiplier(row: dict[str, Any], policy: PurposePolicy) -> float:
+    """HOW_INTERVENTION actionability boost (v4 §7.2).
+
+    Only memories carrying recovery guidance can drive a patch — the
+    selective pipeline reads ``metadata.recovery_hint``.  A ranking that
+    fills the intervention path's candidates with unactionable near-
+    duplicate failure records while recovery-bearing memories starve
+    defeats the path's purpose (observed live in the EVO-3 Exp1 pilot and
+    the self-evolution demo, 2026-07-24: ~50 near-identical session
+    memories crowded out every seeded campaign memory).  The boost only
+    re-orders; applicability is still decided downstream by the regime
+    matcher, so safety semantics are unchanged.
+    """
+    if policy.purpose is not RetrievalPurpose.HOW_INTERVENTION:
+        return 1.0
+    metadata = row.get("metadata")
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (json.JSONDecodeError, ValueError):
+            metadata = {}
+    if isinstance(metadata, dict) and str(metadata.get("recovery_hint") or "").strip():
+        return INTERVENTION_ACTIONABILITY_BOOST
+    return 1.0
+
+
 class VersionedNativeRetriever:
     """Hybrid retrieval against one ACTIVE physical collection."""
 
@@ -128,14 +160,26 @@ class VersionedNativeRetriever:
         exact = extract_exact_terms(text)
         filters = _hard_filters(query)
         limit = max(1, query.limit)
-        window = max(20, limit * 4)
+        # The intervention path scans a wider pool so recovery-bearing
+        # memories reach the actionability re-ranking below even when the
+        # corpus holds many near-duplicate failure records.
+        window = (
+            max(INTERVENTION_WINDOW_MIN, limit * 10)
+            if policy.purpose is RetrievalPurpose.HOW_INTERVENTION
+            else max(20, limit * 4)
+        )
         hands = exact.get("hands") or []
 
         notes: dict[str, Any] = {
             "vector": provider is not None,
             "cross_body_retry": "not_needed",
             "reranker_applied": False,
+            "candidate_window": window,
         }
+        if policy.purpose is RetrievalPurpose.HOW_INTERVENTION:
+            notes["intervention_actionability_boost"] = (
+                f"recovery_hint x{INTERVENTION_ACTIONABILITY_BOOST}"
+            )
 
         constrained = False
         if len(hands) == 1 and "body_id" not in filters:
@@ -212,10 +256,17 @@ class VersionedNativeRetriever:
         policy: PurposePolicy,
     ) -> list[RetrievalCandidate]:
         semantics = SCORE_SEMANTICS_HYBRID if provider is not None else SCORE_SEMANTICS_BM25
-        if exact:
+        # Exact-entity multipliers (§6.3) and, on the intervention path, the
+        # actionability boost re-order the fused pool; original rank breaks
+        # ties so the fusion order is preserved within equal multipliers.
+        if exact or policy.purpose is RetrievalPurpose.HOW_INTERVENTION:
             rows = sorted(
                 enumerate(rows),
-                key=lambda pair: (_exact_row_multiplier(pair[1], exact), -pair[0]),
+                key=lambda pair: (
+                    _exact_row_multiplier(pair[1], exact)
+                    * _actionability_multiplier(pair[1], policy),
+                    -pair[0],
+                ),
                 reverse=True,
             )
             ordered = [row for _, row in rows]
