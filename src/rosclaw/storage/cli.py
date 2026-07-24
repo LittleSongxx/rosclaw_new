@@ -373,6 +373,29 @@ def cmd_db_status(args: argparse.Namespace) -> int:
     return 0 if ping.get("connected") else 1
 
 
+def _versioned_dimension_faults(dimensions: dict[str, Any]) -> dict[str, tuple[Any, int]]:
+    """Collections whose actual vector dimension contradicts the embedding
+    profile encoded in their versioned name (``<logical>__<profile>__<analyzer>``).
+
+    Mixed dimensions ACROSS profiles are by design (PR-SDB-2/MEM-5); only a
+    mismatch with the collection's own declared profile is a fault.  Legacy
+    (non-versioned) collections carry no per-collection expectation.
+    """
+    from rosclaw.embedding.profile import PROFILES
+
+    faults: dict[str, tuple[Any, int]] = {}
+    for name, dim in dimensions.items():
+        if dim is None:
+            continue
+        parts = str(name).split("__")
+        if len(parts) < 3:
+            continue
+        profile = PROFILES.get(parts[1])
+        if profile is not None and dim != profile.dimension:
+            faults[str(name)] = (dim, profile.dimension)
+    return faults
+
+
 def _native_seekdb_checks(
     client: Any,
     backend: str,
@@ -423,6 +446,15 @@ def _native_seekdb_checks(
             dimensions[name] = None
             models[name] = None
             issues.append(f"embedding_info({name}) failed: {exc}")
+        # Versioned collections carry their profile in the name; the store's
+        # global embedder label is stale for them (PR-SDB-2).
+        parts = name.split("__")
+        if len(parts) >= 3:
+            from rosclaw.embedding.profile import PROFILES
+
+            profile = PROFILES.get(parts[1])
+            if profile is not None:
+                models[name] = profile.profile_id
     result["seekdb"]["collections"] = {
         name: {
             "count": counts.get(name),
@@ -432,16 +464,39 @@ def _native_seekdb_checks(
         for name in collections
     }
     dim_set = {d for d in dimensions.values() if d is not None}
-    dim_ok = len(dim_set) <= 1
+    # Versioned physical collections (<logical>__<profile>__<analyzer>) are
+    # validated against their declared embedding profile — mixed dimensions
+    # ACROSS profiles are by design (PR-SDB-2/MEM-5); only a mismatch with
+    # the collection's own profile, or with the ACTIVE descriptor, is a fault.
+    mismatched = _versioned_dimension_faults(dimensions)
+    active_dim_fault: str | None = None
+    try:
+        from rosclaw.memory.v2.runtime_retrieval.active_resolver import (
+            ActiveCollectionResolver,
+        )
+
+        descriptor = ActiveCollectionResolver(client).resolve("memory_items")
+        active_dim = dimensions.get(descriptor.physical_collection)
+        if active_dim is not None and active_dim != descriptor.dimension:
+            active_dim_fault = (
+                f"ACTIVE {descriptor.physical_collection} dim {active_dim} "
+                f"!= descriptor {descriptor.dimension}"
+            )
+    except Exception:  # noqa: BLE001 - no ACTIVE pointer is a state, not a fault
+        descriptor = None
+    dim_ok = not mismatched and active_dim_fault is None
     checks.append(
         (
             "vector dimension",
-            f"{sorted(dim_set) if dim_set else 'n/a'} across {len(dimensions)} collections",
+            f"{sorted(dim_set) if dim_set else 'n/a'} across {len(dimensions)} collections"
+            + ("" if dim_ok else f" mismatched={mismatched}"),
             dim_ok,
         )
     )
-    if not dim_ok:
-        issues.append(f"Mixed vector dimensions across collections: {dimensions}")
+    for name, (dim, expected) in mismatched.items():
+        issues.append(f"Collection {name} dimension {dim} != profile dimension {expected}")
+    if active_dim_fault:
+        issues.append(active_dim_fault)
     model_set = {m for m in models.values() if m}
     checks.append(
         (

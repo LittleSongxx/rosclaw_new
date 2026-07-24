@@ -3124,12 +3124,25 @@ def _print_practice_validate(args: argparse.Namespace, result: dict[str, Any]) -
     print("=" * 60)
 
 
+def normalize_practice_id(practice_id: str) -> str:
+    """Accept a session directory path as well as a bare practice id.
+
+    The catalog keys on the id (the directory name), so an existing
+    directory path must normalize to its basename; anything else passes
+    through unchanged.
+    """
+    candidate = Path(practice_id).expanduser()
+    if candidate.is_dir():
+        return candidate.resolve().name
+    return practice_id
+
+
 def cmd_practice_verify(args: argparse.Namespace) -> int:
     """Verify closed-loop integrity of a practice session."""
     from rosclaw.practice.verifier import PracticeVerifier, format_report
 
     data_root = resolve_practice_data_root(getattr(args, "data_root", None))
-    practice_id = args.practice_id
+    practice_id = normalize_practice_id(args.practice_id)
     strict = getattr(args, "strict", False)
 
     verifier = PracticeVerifier(data_root)

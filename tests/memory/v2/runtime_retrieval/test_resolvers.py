@@ -130,7 +130,13 @@ class FakeNativeStore:
         if self.search_error is not None:
             raise self.search_error
         self.hybrid_calls.append(
-            {"table": table, "filters": filters, "query_embedding": query_embedding}
+            {
+                "table": table,
+                "filters": filters,
+                "query_embedding": query_embedding,
+                "limit": limit,
+                "candidate_window": candidate_window,
+            }
         )
         return self._filtered(table, filters, limit)
 

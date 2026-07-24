@@ -135,3 +135,24 @@ def test_doctor_rejects_unknown_backend_still(tmp_path: Path, capsys) -> None:
     payload = _doctor_payload(capsys)
     assert rc == 1
     assert any("Unknown backend" in issue for issue in payload["issues"])
+
+
+def test_versioned_dimension_faults_only_on_profile_mismatch() -> None:
+    """Mixed dimensions across versioned profiles are by design; only a
+    mismatch with the collection's OWN profile is a fault (PR-SDB-2/MEM-5)."""
+    from rosclaw.storage.cli import _versioned_dimension_faults
+
+    # The live server layout: each versioned collection matches its profile.
+    healthy = {
+        "memory_items": 384,
+        "memory_items__qwen3_06b_1024_v1__ik": 1024,
+        "memory_bench__qwen3_06b_512_v1__ngram": 512,
+        "memory_bench__gte_multi_768_v1__ngram": 768,
+    }
+    assert _versioned_dimension_faults(healthy) == {}
+    # A collection whose dimension contradicts its declared profile is faulted.
+    broken = {**healthy, "memory_items__qwen3_06b_1024_v1__ik": 384}
+    faults = _versioned_dimension_faults(broken)
+    assert faults == {"memory_items__qwen3_06b_1024_v1__ik": (384, 1024)}
+    # Unknown profiles and non-versioned names carry no expectation.
+    assert _versioned_dimension_faults({"legacy__unknown_profile__xx": 128, "plain": 96}) == {}
