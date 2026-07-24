@@ -809,3 +809,16 @@ class TestBodyUpdateStateFromProviderHealth:
         captured = capsys.readouterr()
         assert code == 0
         assert "Updated body state" in captured.out
+
+
+def test_normalize_practice_id_accepts_dir_path(tmp_path):
+    """practice verify must accept a session directory path as well as an id."""
+    from rosclaw.cli import normalize_practice_id
+
+    session = tmp_path / "sessions" / "prac_20260724T000000Z_abc123"
+    session.mkdir(parents=True)
+    assert normalize_practice_id(str(session)) == "prac_20260724T000000Z_abc123"
+    # Bare ids and non-existent paths pass through unchanged.
+    assert normalize_practice_id("prac_20260724T000000Z_abc123") == "prac_20260724T000000Z_abc123"
+    missing = tmp_path / "sessions" / "prac_missing"
+    assert normalize_practice_id(str(missing)) == str(missing)
