@@ -1,0 +1,96 @@
+# ROSClaw Evo-RPS acceptance experiment — v1 contract.
+#
+# 双手视觉竞技中的工况感知、安全自适应与复发恢复 (真机自进化v2.md §12).
+#
+# This config is the single source of truth for the acceptance harness:
+# scripts/acceptance/evo_rps/* and src/rosclaw/evolution/hardware/* refuse
+# to run when it is internally inconsistent, and every run binds its
+# evidence to this file's hash.
+
+schema_version: rosclaw.acceptance.evo_rps.v1
+
+experiment:
+  id: evo_rps_2026_01
+  seed: 20260725
+  require_clean_namespace: true
+  allow_mock_camera: false        # 正式验收禁止 Mock 相机（§2.2）
+  allow_fixture_execution: false  # 禁止夹具执行冒充真机
+
+hardware:
+  player_body: rh56_right_01      # 主玩家（右手）
+  referee_body: rh56_left_01      # 裁判手（左手）
+  camera_body: d435i_01
+
+task:
+  rounds_per_session: 40
+  gestures: [rock, paper, scissors]
+  external_visual_critic: true
+  telemetry_consensus: true
+
+safety:
+  experiment_temperature_abort_c: 52
+  force_hard_limit_from_calibration: true
+  physical_estop_required: true
+  operator_present: true
+  unattended_real_execution: false
+
+# AUTO 有界候选空间（§4.1）——只允许回合之间生效的低风险运行策略。
+candidate_space:
+  inter_round_cooldown_sec: [0, 2, 4, 6]
+  cooldown_every_n_rounds: [0, 5, 10]
+  neutral_pose_between_blocks: [false, true]
+  rehome_between_blocks: [false, true]
+  telemetry_hz: [1, 2, 5]
+
+# §4.2 禁止自动进化的参数（与编舞契约禁止项一致）。
+forbidden_parameters:
+  - gesture_trajectory
+  - servo_speed_scale
+  - force_hard_limit
+  - temperature_stop_threshold
+  - safe_joint_range
+  - reveal_delay
+  - countdown_timing
+  - result_timing
+  - permit_duration
+  - authorization_scope
+  - stale_observation_threshold_relaxation
+
+gates:
+  require_applicability: true
+  require_choreography: true
+  require_shadow: true
+  require_patch_proof: true
+  forbid_wrong_body: true
+  forbid_wrong_joint: true
+  forbid_wrong_regime: true
+
+promotion:
+  unsafe_action_max: 0
+  protection_event_max: 0
+  memory_hurt_max: 0.05
+  wrong_body_max: 0
+  wrong_joint_max: 0
+  wrong_regime_max: 0
+  allow_operator_canary_before_full_gate: true
+  allow_default_autonomous_apply: false
+
+# 实验隔离（§2.7）：独立 SeekDB database / practice root / trace root /
+# evidence root。除明确声明的安全模板外，禁止读取历史实验 Memory。
+namespace:
+  seekdb_host: 127.0.0.1
+  seekdb_port: 2881
+  seekdb_user: root
+  database: rosclaw_evo_rps_2026_01
+  logical_name: memory_items        # 命名空间内的逻辑名（指针相互独立）
+  practice_root: ~/.rosclaw/acceptance/evo_rps/evo_rps_2026_01/practice
+  trace_root: ~/.rosclaw/acceptance/evo_rps/evo_rps_2026_01/traces
+  evidence_root: ~/.rosclaw/acceptance/evo_rps/evo_rps_2026_01
+
+# 任务驱动适配器：RH56 RPS 会话引擎位于 workspace 演示项目（非本仓），
+# 以 pinned 路径 + 文件 hash 绑定，保证代码与证据可对应。
+task_driver:
+  kind: rh56_rps_workspace
+  workspace_root: /home/nvidia/workspace/rosclaw/rosclaw_test/examples/rh56_rps
+  runner: scripts/experiments/evo3_regime_rps.py
+  rh56_src: /home/nvidia/workspace/rosclaw_rh56_real/rosclaw-rh56-runtime/src

@@ -7974,6 +7974,48 @@ def main() -> int:
     memory_ingest_parser.add_argument("--episode-id", required=True, help="Episode identifier")
     _add_practice_data_root_argument(memory_ingest_parser)
 
+    # acceptance subcommand (Evo-RPS hardware self-evolution, PR-EVO-HW-1)
+    from rosclaw.evolution.hardware.cli import (
+        cmd_acceptance_evo_rps_baseline,
+        cmd_acceptance_evo_rps_future,
+        cmd_acceptance_evo_rps_prepare,
+        cmd_acceptance_evo_rps_report,
+    )
+
+    acceptance_parser = subparsers.add_parser(
+        "acceptance", help="Hardware acceptance experiments (Evo-RPS)"
+    )
+    acceptance_subparsers = acceptance_parser.add_subparsers(dest="acceptance_command")
+    evo_rps_parser = acceptance_subparsers.add_parser(
+        "evo-rps", help="Evo-RPS self-evolution acceptance"
+    )
+    evo_rps_subparsers = evo_rps_parser.add_subparsers(dest="evo_rps_phase")
+
+    def _evo_rps_phase(name: str, handler, help_text: str) -> None:
+        phase_parser = evo_rps_subparsers.add_parser(name, help=help_text)
+        phase_parser.add_argument("--config", default=None, help="Experiment contract YAML")
+        phase_parser.set_defaults(func=handler)
+
+    _evo_rps_phase(
+        "prepare", cmd_acceptance_evo_rps_prepare, "Provision namespace + preflight gates"
+    )
+    evo_rps_subparsers.choices["prepare"].add_argument(
+        "--dev-allow-mock",
+        action="store_true",
+        help="Harness development only: disclosed mock camera (never acceptance)",
+    )
+    baseline_phase = evo_rps_subparsers.add_parser("baseline", help="Run baseline sessions")
+    baseline_phase.add_argument("--config", default=None, help="Experiment contract YAML")
+    baseline_phase.add_argument("--sessions", type=int, default=3)
+    baseline_phase.add_argument("--rounds", type=int, default=40)
+    baseline_phase.add_argument("--seed-start", type=int, default=0)
+    baseline_phase.set_defaults(func=cmd_acceptance_evo_rps_baseline)
+    _evo_rps_phase("report", cmd_acceptance_evo_rps_report, "Build the evidence report")
+    for _phase in ("distill", "propose", "validate", "canary", "promote", "recurrence"):
+        _evo_rps_phase(
+            _phase, cmd_acceptance_evo_rps_future(_phase), f"Planned in a later PR ({_phase})"
+        )
+
     # darwin subcommand
     darwin_parser = subparsers.add_parser("darwin", help="Darwin benchmark engine")
     darwin_subparsers = darwin_parser.add_subparsers(dest="darwin_command")
@@ -8958,6 +9000,11 @@ def main() -> int:
             else:
                 bench_parser.print_help()
                 return 1
+        elif args.command == "acceptance":
+            if getattr(args, "func", None):
+                return args.func(args)
+            acceptance_parser.print_help()
+            return 1
         elif args.command == "hub":
             return dispatch_hub_command(args)
         elif args.command == "agent":
