@@ -89,3 +89,35 @@ def test_serial_absent_blocks() -> None:
         store_probe=lambda: STORE_OK,
     )
     assert "BLOCKED: RH56_SERIAL_UNAVAILABLE" in report.blocked
+
+
+def test_camera_env_subprocess_probe_used_when_in_process_missing(monkeypatch) -> None:
+    """The acceptance CLI may run in an interpreter without pyrealsense2;
+    the probe must fall back to the camera-capable task env before ever
+    declaring perception unavailable (live finding 2026-07-25)."""
+    import json
+    import subprocess as sp
+
+    import rosclaw.evolution.hardware.preflight as pf
+
+    monkeypatch.setitem(__import__("sys").modules, "pyrealsense2", None)
+    monkeypatch.setattr(pf, "CAMERA_ENV_PY", __import__("sys").executable)
+    completed = sp.CompletedProcess(
+        args=[], returncode=0,
+        stdout=json.dumps([{"name": "D435I", "serial": "x", "firmware": "f"}]) + "\n",
+        stderr="",
+    )
+    monkeypatch.setattr(sp, "run", lambda *a, **k: completed)
+    probe = pf._subprocess_camera_probe()
+    assert probe["available"] is True
+    assert probe["via"] == "camera_env"
+    assert probe["devices"][0]["serial"] == "x"
+
+
+def test_camera_env_probe_honest_when_env_missing(monkeypatch) -> None:
+    import rosclaw.evolution.hardware.preflight as pf
+
+    monkeypatch.setattr(pf, "CAMERA_ENV_PY", "/nonexistent/python")
+    probe = pf._subprocess_camera_probe()
+    assert probe["available"] is False
+    assert "pyrealsense2_not_installed" in probe["reason"]
