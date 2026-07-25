@@ -7977,9 +7977,12 @@ def main() -> int:
     # acceptance subcommand (Evo-RPS hardware self-evolution, PR-EVO-HW-1)
     from rosclaw.evolution.hardware.cli import (
         cmd_acceptance_evo_rps_baseline,
+        cmd_acceptance_evo_rps_distill,
         cmd_acceptance_evo_rps_future,
         cmd_acceptance_evo_rps_prepare,
+        cmd_acceptance_evo_rps_propose,
         cmd_acceptance_evo_rps_report,
+        cmd_acceptance_evo_rps_validate,
     )
 
     acceptance_parser = subparsers.add_parser(
@@ -8011,7 +8014,22 @@ def main() -> int:
     baseline_phase.add_argument("--seed-start", type=int, default=0)
     baseline_phase.set_defaults(func=cmd_acceptance_evo_rps_baseline)
     _evo_rps_phase("report", cmd_acceptance_evo_rps_report, "Build the evidence report")
-    for _phase in ("distill", "propose", "validate", "canary", "promote", "recurrence"):
+    _evo_rps_phase(
+        "distill", cmd_acceptance_evo_rps_distill, "Distill baseline sessions into the namespace"
+    )
+    propose_phase = evo_rps_subparsers.add_parser(
+        "propose", help="Generate bounded candidates (AUTO v1)"
+    )
+    propose_phase.add_argument("--config", default=None)
+    propose_phase.add_argument("--max-candidates", type=int, default=8)
+    propose_phase.set_defaults(func=cmd_acceptance_evo_rps_propose)
+    validate_phase = evo_rps_subparsers.add_parser(
+        "validate", help="Run the full candidate gate pipeline (L1/L2 sandbox)"
+    )
+    validate_phase.add_argument("--config", default=None)
+    validate_phase.add_argument("--shadow-rounds", type=int, default=12)
+    validate_phase.set_defaults(func=cmd_acceptance_evo_rps_validate)
+    for _phase in ("canary", "promote", "recurrence"):
         _evo_rps_phase(
             _phase, cmd_acceptance_evo_rps_future(_phase), f"Planned in a later PR ({_phase})"
         )

@@ -182,6 +182,19 @@ def main() -> int:
             json.dumps(memory, sort_keys=True, default=str).encode()
         ).hexdigest()[:16]
     store.insert("memory_items", record)
+    # Evidence chain (memory verify requires ≥1 evidence row per memory).
+    from rosclaw.memory.v2.models import MemoryEvidence
+
+    store.insert(
+        "memory_evidence",
+        MemoryEvidence(
+            memory_id=record["id"],
+            evidence_type="camera_recovery_run",
+            source_event_id=memory["evidence_refs"][0],
+            artifact_uri=str(artifacts_dir),
+            confidence=1.0 if result.recovered else 0.6,
+        ).to_record(),
+    )
 
     entry = manifest.record(
         "camera_recovery",

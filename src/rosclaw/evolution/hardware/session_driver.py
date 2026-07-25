@@ -119,6 +119,80 @@ class Rh56RpsWorkspaceDriver:
             log_path=log_path,
         )
 
+    def run_shadow(
+        self,
+        *,
+        candidate_id: str,
+        candidate_params: dict[str, Any],
+        seed: int,
+        rounds: int,
+        out_dir: Path,
+        timeout_s: int | None = None,
+    ) -> dict[str, Any]:
+        """L2 shadow: the candidate runs the REAL task code path with mock
+        executors — zero hardware actions by construction (§7.14).
+
+        Shadow uses mock hands + mock camera BY DESIGN: it validates the
+        candidate parameter lifecycle and timing, and makes no perception
+        or hardware claims.  Formal acceptance runs never use mocks.
+        """
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_json = out_dir / f"shadow_{candidate_id}.json"
+        log_path = out_dir / f"shadow_{candidate_id}.log"
+        env = {
+            **os.environ,
+            "RPS_RH56_SRC": self._rh56_src,
+            "RPS_PRACTICE_DATA_ROOT": str(self._practice_root),
+            "PYTHONPATH": (
+                f"{self._workspace}/scripts:{self._workspace}/scripts/experiments:"
+                f"{self._workspace}/src:"
+                f"/home/nvidia/workspace/rosclaw/rosclaw_test/rosclaw/src:"
+                f"{self._rh56_src}"
+            ),
+        }
+        cmd = [
+            VENV_PY,
+            str(self._runner),
+            "--group", "candidate_shadow",
+            "--seed", str(seed),
+            "--rounds", str(rounds),
+            "--camera-source", "mock",
+            "--mock-hands",
+            "--candidate-params", json.dumps(candidate_params),
+            "--out", str(out_json),
+        ]
+        with open(log_path, "w", encoding="utf-8") as log:
+            proc = subprocess.run(
+                cmd,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                env=env,
+                cwd=str(self._workspace),
+                timeout=timeout_s or (60 * (rounds + 12)),
+            )
+        summary: dict[str, Any] = {}
+        if out_json.is_file():
+            summary = json.loads(out_json.read_text())
+        if proc.returncode != 0:
+            return {
+                "hardware_actions_executed": None,
+                "rounds_completed": 0,
+                "error": f"shadow exited rc={proc.returncode}; see {log_path}",
+                "log": str(log_path),
+            }
+        return {
+            "hardware_actions_executed": summary.get("hardware_actions_executed"),
+            "rounds_completed": summary.get("rounds", 0),
+            "candidate_lifecycle": summary.get("candidate_lifecycle") or {},
+            "runtime_s": summary.get("runtime_s"),
+            "executor": summary.get("executor"),
+            "disclosure": (
+                "L2 shadow: mock hands + mock camera BY DESIGN (no "
+                "perception/hardware claims; lifecycle + timing only)"
+            ),
+            "log": str(log_path),
+        }
+
     def _latest_practice_id(self) -> str | None:
         sessions = self._practice_root / "sessions"
         if not sessions.is_dir():
