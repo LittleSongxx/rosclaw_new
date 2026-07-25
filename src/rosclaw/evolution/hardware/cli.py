@@ -42,6 +42,29 @@ def cmd_acceptance_evo_rps_report(args: argparse.Namespace) -> int:
     return _emit(orchestrator.report())
 
 
+def cmd_acceptance_evo_rps_distill(args: argparse.Namespace) -> int:
+    orchestrator = orchestrator_for(getattr(args, "config", None) or DEFAULT_CONFIG)
+    return _emit(orchestrator.distill())
+
+
+def cmd_acceptance_evo_rps_propose(args: argparse.Namespace) -> int:
+    orchestrator = orchestrator_for(getattr(args, "config", None) or DEFAULT_CONFIG)
+    try:
+        result = orchestrator.propose(max_candidates=int(getattr(args, "max_candidates", 8)))
+    except OrchestratorError as exc:
+        return _emit({"ok": False, "blocked": str(exc)})
+    return _emit(result)
+
+
+def cmd_acceptance_evo_rps_validate(args: argparse.Namespace) -> int:
+    orchestrator = orchestrator_for(getattr(args, "config", None) or DEFAULT_CONFIG)
+    try:
+        result = orchestrator.validate(shadow_rounds=int(getattr(args, "shadow_rounds", 12)))
+    except OrchestratorError as exc:
+        return _emit({"ok": False, "blocked": str(exc)})
+    return _emit(result)
+
+
 def cmd_acceptance_evo_rps_future(phase: str):
     def handler(args: argparse.Namespace) -> int:
         return _emit(phase_not_implemented(phase))
