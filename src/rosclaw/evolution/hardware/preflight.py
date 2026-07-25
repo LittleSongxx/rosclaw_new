@@ -29,11 +29,18 @@ def default_camera_probe() -> dict[str, Any]:
     Never starts a pipeline and never issues a hardware_reset here —
     preflight is observation-only (see field notes: a wedge/reset at the
     wrong moment can drop the device off the bus).
+
+    The acceptance CLI itself may run in an interpreter WITHOUT
+    pyrealsense2 (the repo venv); the camera work runs in the
+    camera-capable task env (the workspace venv).  When the in-process
+    import fails, the probe retries the same observation in the task
+    env — the one that will actually run sessions — before declaring
+    perception unavailable.
     """
     try:
         import pyrealsense2 as rs
     except ImportError:
-        return {"available": False, "reason": "pyrealsense2_not_installed"}
+        return _subprocess_camera_probe()
     try:
         devices = rs.context().query_devices()
     except Exception as exc:  # noqa: BLE001
@@ -52,7 +59,50 @@ def default_camera_probe() -> dict[str, Any]:
             )
         except Exception:  # noqa: BLE001
             info.append({"name": "unreadable"})
-    return {"available": True, "devices": info}
+    return {"available": True, "devices": info, "via": "in_process"}
+
+
+CAMERA_ENV_PY = "/home/nvidia/workspace/rosclaw/rosclaw_test/.venv/bin/python"
+
+
+def _subprocess_camera_probe() -> dict[str, Any]:
+    """Enumerate via the camera-capable task env (observation-only)."""
+    import json
+    import subprocess
+    from pathlib import Path
+
+    if not Path(CAMERA_ENV_PY).is_file():
+        return {
+            "available": False,
+            "reason": "pyrealsense2_not_installed (and no camera task env at "
+            f"{CAMERA_ENV_PY})",
+        }
+    code = (
+        "import json, pyrealsense2 as rs\n"
+        "devs = rs.context().query_devices()\n"
+        "print(json.dumps([{'name': d.get_info(rs.camera_info.name),"
+        " 'serial': d.get_info(rs.camera_info.serial_number),"
+        " 'firmware': d.get_info(rs.camera_info.firmware_version)} for d in devs]))"
+    )
+    try:
+        proc = subprocess.run(
+            [CAMERA_ENV_PY, "-c", code], capture_output=True, text=True, timeout=30
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        return {"available": False, "reason": f"camera env probe failed: {exc}"}
+    if proc.returncode != 0:
+        return {
+            "available": False,
+            "reason": f"camera env pyrealsense2 unusable: {proc.stderr.strip()[-160:]}",
+        }
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            devices = json.loads(line)
+            if devices:
+                return {"available": True, "devices": devices, "via": "camera_env"}
+            return {"available": False, "reason": "no_device_enumerated", "via": "camera_env"}
+    return {"available": False, "reason": "camera env probe returned no device list"}
 
 
 def default_serial_probe() -> dict[str, Any]:
