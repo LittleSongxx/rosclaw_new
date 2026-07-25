@@ -28,6 +28,8 @@ class CandidateState(StrEnum):
     SHADOW = "SHADOW"
     VALIDATED = "VALIDATED"
     REJECTED = "REJECTED"
+    PROMOTED = "PROMOTED"
+    ROLLED_BACK = "ROLLED_BACK"
 
 
 ORDER = (
@@ -71,6 +73,23 @@ class CandidateRecord:
             self.failed_gate = evaluation.failed_gate
             last = evaluation.verdicts[-1]
             self.rejection_reason = last.detail
+        return self.state
+
+    def promote(self) -> CandidateState:
+        """VALIDATED → PROMOTED (operator-approved recurrence scope only)."""
+        if self.state is not CandidateState.VALIDATED:
+            raise RuntimeError(
+                f"only VALIDATED candidates can be promoted (state={self.state})"
+            )
+        self.state = CandidateState.PROMOTED
+        self.updated_at = time.time()
+        return self.state
+
+    def rollback(self, reason: str) -> CandidateState:
+        """Any state → ROLLED_BACK (terminal; never selectable again)."""
+        self.state = CandidateState.ROLLED_BACK
+        self.rejection_reason = reason
+        self.updated_at = time.time()
         return self.state
 
     def to_record(self) -> dict[str, Any]:

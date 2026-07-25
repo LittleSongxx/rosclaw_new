@@ -65,6 +65,27 @@ def cmd_acceptance_evo_rps_validate(args: argparse.Namespace) -> int:
     return _emit(result)
 
 
+def cmd_acceptance_evo_rps_canary(args: argparse.Namespace) -> int:
+    orchestrator = orchestrator_for(getattr(args, "config", None) or DEFAULT_CONFIG)
+    try:
+        result = orchestrator.canary(
+            blocks=int(getattr(args, "blocks", 3)),
+            rounds=int(getattr(args, "rounds", 40)),
+        )
+    except OrchestratorError as exc:
+        return _emit({"ok": False, "blocked": str(exc)})
+    return _emit(result)
+
+
+def cmd_acceptance_evo_rps_promote(args: argparse.Namespace) -> int:
+    orchestrator = orchestrator_for(getattr(args, "config", None) or DEFAULT_CONFIG)
+    try:
+        result = orchestrator.promote()
+    except OrchestratorError as exc:
+        return _emit({"ok": False, "blocked": str(exc)})
+    return _emit(result)
+
+
 def cmd_acceptance_evo_rps_future(phase: str):
     def handler(args: argparse.Namespace) -> int:
         return _emit(phase_not_implemented(phase))
