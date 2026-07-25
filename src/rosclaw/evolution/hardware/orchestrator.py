@@ -671,6 +671,14 @@ class EvoRpsOrchestrator:
             source_failure=str(candidate_row.get("source_failure") or ""),
             current_regime=str(candidate_row.get("current_regime") or ""),
         )
+        # Preserve the validate-phase gate verdicts from the existing row —
+        # upsert replaces the row, and the registry must keep the full
+        # evaluation history, not just the terminal state.
+        prior_verdicts = candidate_row.get("gate_verdicts")
+        if isinstance(prior_verdicts, str):
+            prior_verdicts = json.loads(prior_verdicts)
+        if prior_verdicts:
+            record.gate_verdicts = list(prior_verdicts)
         if gate.decision is PromotionDecision.PROMOTED:
             record.state = CandidateState.VALIDATED
             record.promote()
@@ -697,6 +705,109 @@ class EvoRpsOrchestrator:
             "scope": gate.scope,
             "checks": [{"name": c.name, "passed": c.passed, "detail": c.detail} for c in gate.checks],
             "stats": gate.stats,
+        }
+
+    # ------------------------------------------------------------------
+    # PR-EVO-HW-5: recurrence
+    # ------------------------------------------------------------------
+
+    def recurrence(self, *, rounds: int = 40) -> dict[str, Any]:
+        """Phase 8 recurrence: restart on baseline conditions; the promoted
+        rule is auto-retrieved, hash-checked, re-validated by the
+        choreography contract, applied between rounds, and judged by the
+        critic.  No promoted rule → honest BLOCKED evidence."""
+        from .promotion import CandidateRegistry
+        from .promotion_gate import COLLECTION as RULES_COLLECTION  # noqa: F401
+        from .recurrence import RecurrenceBlockedError, evaluate_recurrence, plan_recurrence
+
+        manifest = self._open_manifest()
+        preflight = run_preflight(self.config)
+        if not preflight.ok:
+            manifest.record("recurrence_blocked", blocked=preflight.blocked)
+            raise OrchestratorError("; ".join(preflight.blocked))
+        store = self.namespace.knowledge_store()
+        self.namespace.assert_store_isolated(store)
+        registry = CandidateRegistry(store)
+        try:
+            rules = store.query(RULES_COLLECTION, filters={"status": "active"}, limit=2)
+            registry_row = (
+                registry.get(str(rules[0]["candidate_id"])) if rules else None
+            )
+            plan = plan_recurrence(store, registry_row)
+        except RecurrenceBlockedError as exc:
+            manifest.record("recurrence_blocked", reason=str(exc))
+            return {"ok": False, "blocked": str(exc)}
+
+        # Choreography re-validation of the promoted rule's changes before
+        # any real application (§Phase 8: Choreography 通过).
+        from rosclaw.how.choreography import ChoreographyValidator, load_contract
+        from rosclaw.how.choreography.timing import build_timing_model
+
+        contract = load_contract(str(REPO_ROOT / "configs" / "choreography" / "rh56_rps_v1.yaml"))
+        choreography = ChoreographyValidator(contract).validate(
+            plan.changes, build_timing_model(contract, [])
+        )
+        if not choreography.allowed:
+            manifest.record(
+                "recurrence_blocked",
+                reason="promoted rule no longer passes the choreography contract",
+                violations=choreography.violations,
+            )
+            return {
+                "ok": False,
+                "blocked": "choreography re-validation failed",
+                "violations": choreography.violations,
+            }
+
+        manifest.record(
+            "recurrence_plan",
+            rule_id=plan.rule_id,
+            candidate_id=plan.candidate_id,
+            changes=plan.changes,
+            rule_hash=plan.rule_hash,
+            choreography_allowed=True,
+            note="runtime restarted: new practice session + trace; old permits dead",
+        )
+        driver = Rh56RpsWorkspaceDriver(self.config, self.namespace.practice_root)
+        out_dir = self.namespace.evidence_root / "recurrence" / plan.rule_id
+        started = time.time()
+        result = driver.run_canary(
+            candidate_id=plan.rule_id,
+            candidate_params=plan.changes,
+            seed=self.config.seed + 2000,
+            rounds=rounds,
+            out_dir=out_dir,
+        )
+        verify = self._verify(result.practice_id)
+        baseline_sessions = manifest.by_kind("baseline_session")
+        baseline_invalid = (
+            baseline_sessions[-1].get("invalid_rate") if baseline_sessions else None
+        )
+        proof = evaluate_recurrence(
+            plan=plan,
+            session_summary=result.summary,
+            baseline_invalid=baseline_invalid,
+        )
+        manifest.record(
+            "recurrence_session",
+            rule_id=plan.rule_id,
+            practice_id=result.practice_id,
+            rounds=result.rounds,
+            invalid_rate=result.summary.get("invalid_rate"),
+            verified_rate=result.summary.get("verified_rate"),
+            peak_temperature=result.summary.get("peak_temperature"),
+            runtime_s=round(time.time() - started, 1),
+            verify=verify,
+            proof=proof.to_record(),
+        )
+        return {
+            "ok": bool(proof.hash_match and proof.improved) and verify.get("rc") == 0,
+            "rule_id": plan.rule_id,
+            "hash_match": proof.hash_match,
+            "improved": proof.improved,
+            "before": proof.before_metrics,
+            "after": proof.after_metrics,
+            "verify_rc": verify.get("rc"),
         }
 
     # ------------------------------------------------------------------

@@ -7979,10 +7979,10 @@ def main() -> int:
         cmd_acceptance_evo_rps_baseline,
         cmd_acceptance_evo_rps_canary,
         cmd_acceptance_evo_rps_distill,
-        cmd_acceptance_evo_rps_future,
         cmd_acceptance_evo_rps_prepare,
         cmd_acceptance_evo_rps_promote,
         cmd_acceptance_evo_rps_propose,
+        cmd_acceptance_evo_rps_recurrence,
         cmd_acceptance_evo_rps_report,
         cmd_acceptance_evo_rps_validate,
     )
@@ -8041,10 +8041,12 @@ def main() -> int:
     _evo_rps_phase(
         "promote", cmd_acceptance_evo_rps_promote, "Evaluate the promotion gate (Phase 7)"
     )
-    for _phase in ("recurrence",):
-        _evo_rps_phase(
-            _phase, cmd_acceptance_evo_rps_future(_phase), f"Planned in a later PR ({_phase})"
-        )
+    recurrence_phase = evo_rps_subparsers.add_parser(
+        "recurrence", help="Phase 8: auto-apply the promoted rule on recurrence"
+    )
+    recurrence_phase.add_argument("--config", default=None)
+    recurrence_phase.add_argument("--rounds", type=int, default=40)
+    recurrence_phase.set_defaults(func=cmd_acceptance_evo_rps_recurrence)
 
     # darwin subcommand
     darwin_parser = subparsers.add_parser("darwin", help="Darwin benchmark engine")
