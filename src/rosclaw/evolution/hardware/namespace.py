@@ -107,9 +107,17 @@ class ExperimentNamespace:
 
     def assert_store_isolated(self, store: Any) -> None:
         """Fail loudly if a store points anywhere but this namespace."""
-        dsn = getattr(store, "_dsn", None) or getattr(store, "dsn", None) or ""
-        if self.database not in str(dsn):
+        database = ""
+        deployment = getattr(store, "deployment_info", None)
+        if callable(deployment):
+            try:
+                database = str(deployment().get("database") or "")
+            except Exception:  # noqa: BLE001
+                database = ""
+        if not database:
+            database = str(getattr(store, "_dsn", None) or getattr(store, "dsn", None) or "")
+        if self.database not in database:
             raise NamespaceError(
-                f"knowledge store DSN {dsn!r} is outside the experiment "
+                f"knowledge store database/DSN {database!r} is outside the experiment "
                 f"namespace {self.database!r} (§2.7)"
             )
