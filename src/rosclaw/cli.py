@@ -7977,9 +7977,11 @@ def main() -> int:
     # acceptance subcommand (Evo-RPS hardware self-evolution, PR-EVO-HW-1)
     from rosclaw.evolution.hardware.cli import (
         cmd_acceptance_evo_rps_baseline,
+        cmd_acceptance_evo_rps_canary,
         cmd_acceptance_evo_rps_distill,
         cmd_acceptance_evo_rps_future,
         cmd_acceptance_evo_rps_prepare,
+        cmd_acceptance_evo_rps_promote,
         cmd_acceptance_evo_rps_propose,
         cmd_acceptance_evo_rps_report,
         cmd_acceptance_evo_rps_validate,
@@ -8029,7 +8031,17 @@ def main() -> int:
     validate_phase.add_argument("--config", default=None)
     validate_phase.add_argument("--shadow-rounds", type=int, default=12)
     validate_phase.set_defaults(func=cmd_acceptance_evo_rps_validate)
-    for _phase in ("canary", "promote", "recurrence"):
+    canary_phase = evo_rps_subparsers.add_parser(
+        "canary", help="A/B/C real-machine canary (interleaved arms)"
+    )
+    canary_phase.add_argument("--config", default=None)
+    canary_phase.add_argument("--blocks", type=int, default=3)
+    canary_phase.add_argument("--rounds", type=int, default=40)
+    canary_phase.set_defaults(func=cmd_acceptance_evo_rps_canary)
+    _evo_rps_phase(
+        "promote", cmd_acceptance_evo_rps_promote, "Evaluate the promotion gate (Phase 7)"
+    )
+    for _phase in ("recurrence",):
         _evo_rps_phase(
             _phase, cmd_acceptance_evo_rps_future(_phase), f"Planned in a later PR ({_phase})"
         )

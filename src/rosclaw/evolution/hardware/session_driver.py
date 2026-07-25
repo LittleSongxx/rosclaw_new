@@ -119,6 +119,65 @@ class Rh56RpsWorkspaceDriver:
             log_path=log_path,
         )
 
+    def run_canary(
+        self,
+        *,
+        candidate_id: str,
+        candidate_params: dict[str, Any],
+        seed: int,
+        rounds: int,
+        out_dir: Path,
+        timeout_s: int | None = None,
+    ) -> DriverResult:
+        """Arm-C canary: the candidate applied mechanically on REAL hardware
+        (§Phase 6/7 operator-approved canary).  Real camera, real hands."""
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_json = out_dir / f"canary_{candidate_id}_{seed}.json"
+        log_path = out_dir / f"canary_{candidate_id}_{seed}.log"
+        env = {
+            **os.environ,
+            "RPS_RH56_SRC": self._rh56_src,
+            "RPS_PRACTICE_DATA_ROOT": str(self._practice_root),
+            "PYTHONPATH": (
+                f"{self._workspace}/scripts:{self._workspace}/scripts/experiments:"
+                f"{self._workspace}/src:"
+                f"/home/nvidia/workspace/rosclaw/rosclaw_test/rosclaw/src:"
+                f"{self._rh56_src}"
+            ),
+        }
+        cmd = [
+            VENV_PY,
+            str(self._runner),
+            "--group", "candidate_canary",
+            "--seed", str(seed),
+            "--rounds", str(rounds),
+            "--camera-source", "realsense",
+            "--candidate-params", json.dumps(candidate_params),
+            "--out", str(out_json),
+        ]
+        with open(log_path, "w", encoding="utf-8") as log:
+            proc = subprocess.run(
+                cmd,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                env=env,
+                cwd=str(self._workspace),
+                timeout=timeout_s or (60 * (rounds + 15)),
+            )
+        summary: dict[str, Any] = {}
+        if out_json.is_file():
+            summary = json.loads(out_json.read_text())
+        if proc.returncode != 0:
+            raise DriverError(
+                f"canary session seed={seed} exited rc={proc.returncode}; see {log_path}"
+            )
+        return DriverResult(
+            practice_id=self._latest_practice_id(),
+            rounds=int(summary.get("rounds", 0)),
+            summary=summary,
+            log_path=log_path,
+        )
+
     def run_shadow(
         self,
         *,

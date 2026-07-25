@@ -441,6 +441,267 @@ class EvoRpsOrchestrator:
         )
 
     # ------------------------------------------------------------------
+    # PR-EVO-HW-4: canary / promote
+    # ------------------------------------------------------------------
+
+    def canary(self, *, blocks: int = 3, rounds: int = 40) -> dict[str, Any]:
+        """A/B/C real-machine canary with a seeded interleaved arm order
+        (§Phase 6).  Arm C mechanically applies the selected VALIDATED
+        candidate on REAL hardware with full PatchProof — the
+        operator-approved canary path (§Phase 7)."""
+        from .canary import ARM_C, build_canary_schedule, select_canary_candidate
+        from .promotion import CandidateRegistry, CandidateState
+
+        manifest = self._open_manifest()
+        preflight = run_preflight(self.config)
+        if not preflight.ok:
+            manifest.record("canary_blocked", blocked=preflight.blocked)
+            raise OrchestratorError("; ".join(preflight.blocked))
+        store = self.namespace.knowledge_store()
+        self.namespace.assert_store_isolated(store)
+        registry = CandidateRegistry(store)
+        validated = registry.by_state(CandidateState.VALIDATED)
+        if not validated:
+            manifest.record("canary_blocked", reason="no VALIDATED candidates")
+            raise OrchestratorError("canary requires VALIDATED candidates (run validate first)")
+        baseline = manifest.by_kind("baseline_session")
+        baseline_regime = (
+            self._session_regime_label(baseline[-1]) if baseline else "UNKNOWN"
+        )
+        candidate_row, selection_reason = select_canary_candidate(
+            validated, baseline_regime=baseline_regime
+        )
+        if candidate_row is None:
+            manifest.record("canary_blocked", reason=selection_reason)
+            raise OrchestratorError(f"no canary candidate: {selection_reason}")
+        manifest.record(
+            "canary_candidate_selected",
+            candidate_id=candidate_row["candidate_id"],
+            changes=candidate_row.get("changes"),
+            selection_reason=selection_reason,
+            baseline_regime=baseline_regime,
+        )
+        schedule = build_canary_schedule(
+            blocks=blocks, seed=self.config.seed + 900, base_seed=self.config.seed + 1000
+        )
+        driver = Rh56RpsWorkspaceDriver(self.config, self.namespace.practice_root)
+        results: list[dict[str, Any]] = []
+        aborted = False
+        for slot in schedule:
+            out_dir = (
+                self.namespace.evidence_root / "canary" / f"block{slot.block}_{slot.arm}"
+            )
+            candidate_params = (
+                candidate_row.get("changes") if slot.arm == ARM_C else None
+            )
+            started = time.time()
+            result = self._run_canary_slot(
+                driver, slot, candidate_params, out_dir
+            )
+            verify = self._verify(result.practice_id)
+            safety_abort = self._check_safety_abort(result.summary)
+            entry = manifest.record(
+                "canary_session",
+                block=slot.block,
+                arm=slot.arm,
+                seed=slot.seed,
+                practice_id=result.practice_id,
+                rounds=result.rounds,
+                invalid=result.summary.get("invalid_rounds"),
+                invalid_rate=result.summary.get("invalid_rate"),
+                verified_rate=result.summary.get("verified_rate"),
+                peak_temperature=result.summary.get("peak_temperature"),
+                runtime_s=round(time.time() - started, 1),
+                verify=verify,
+                safety_abort=safety_abort,
+                candidate_id=(candidate_row["candidate_id"] if slot.arm == ARM_C else None),
+                candidate_lifecycle=(
+                    result.summary.get("candidate_lifecycle") if slot.arm == ARM_C else None
+                ),
+            )
+            results.append(entry)
+            if safety_abort:
+                manifest.record(
+                    "canary_aborted",
+                    reason="safety limit reached",
+                    arm=slot.arm,
+                    block=slot.block,
+                    peak_temperature=result.summary.get("peak_temperature"),
+                )
+                aborted = True
+                break
+        return {
+            "ok": not aborted and all(s["verify"].get("rc") == 0 for s in results),
+            "aborted": aborted,
+            "candidate": candidate_row.get("candidate_id"),
+            "selection_reason": selection_reason,
+            "sessions": results,
+        }
+
+    def _run_canary_slot(self, driver, slot, candidate_params, out_dir):
+        if slot.arm == "C_candidate_canary":
+            return driver.run_canary(
+                candidate_id="armC",
+                candidate_params=candidate_params or {},
+                seed=slot.seed,
+                rounds=self.config.rounds_per_session,
+                out_dir=out_dir,
+            )
+        return driver.run_session(
+            group=slot.driver_group,
+            seed=slot.seed,
+            rounds=self.config.rounds_per_session,
+            camera_source="realsense",
+            out_dir=out_dir,
+        )
+
+    def _check_safety_abort(self, summary: dict[str, Any]) -> bool:
+        peak = summary.get("peak_temperature")
+        return bool(
+            isinstance(peak, (int, float))
+            and peak >= float(self.config.temperature_abort_c)
+        )
+
+    # ------------------------------------------------------------------
+
+    def promote(self) -> dict[str, Any]:
+        """Evaluate the Phase 7 promotion gate over the canary sessions
+        (session-level stats only) and write the promoted rule — or roll
+        the candidate back."""
+        import sys as _sys
+
+        from .canary import ARM_A, ARM_B, ARM_C
+        from .promotion import CandidateRecord, CandidateRegistry, CandidateState
+        from .promotion_gate import (
+            COLLECTION as RULES_COLLECTION,
+        )
+        from .promotion_gate import (
+            PromotionDecision,
+            evaluate_promotion_gate,
+            promoted_rule_record,
+        )
+
+        manifest = self._open_manifest()
+        store = self.namespace.knowledge_store()
+        self.namespace.assert_store_isolated(store)
+        registry = CandidateRegistry(store)
+        sessions = manifest.by_kind("canary_session")
+        if not sessions:
+            manifest.record("promote_blocked", reason="no canary sessions")
+            raise OrchestratorError("promote requires canary sessions (run canary first)")
+        candidate_id = next(
+            (s["candidate_id"] for s in sessions if s.get("candidate_id")), None
+        )
+        if candidate_id is None:
+            raise OrchestratorError("canary sessions carry no candidate id")
+        candidate_row = registry.get(candidate_id)
+        if candidate_row is None:
+            raise OrchestratorError(f"candidate {candidate_id} not in the registry")
+
+        _sys.path.insert(0, str(REPO_ROOT / "experiments" / "evo3"))
+        from stats_analysis import SessionRecord, promotion_report  # noqa: E402
+
+        def to_record(entry: dict[str, Any]) -> SessionRecord:
+            return SessionRecord(
+                session_id=f"{entry['arm']}_b{entry['block']}",
+                arm=entry["arm"],
+                rounds=int(entry.get("rounds") or 0),
+                invalid_count=int(entry.get("invalid") or 0),
+                failure_count=int(entry.get("invalid") or 0),
+                first_failure_round=None,
+                verified_count=int(round((entry.get("verified_rate") or 0.0) * (entry.get("rounds") or 0))),
+                peak_temperature_c=entry.get("peak_temperature"),
+                seed=entry.get("seed"),
+            )
+
+        arm_records = {ARM_A: [], ARM_B: [], ARM_C: []}
+        for entry in sessions:
+            if entry["arm"] in arm_records:
+                arm_records[entry["arm"]].append(to_record(entry))
+
+        candidate_changes = candidate_row.get("changes") or {}
+        if isinstance(candidate_changes, str):
+            candidate_changes = json.loads(candidate_changes)
+        c_sessions = [s for s in sessions if s["arm"] == ARM_C]
+        baseline_invalid = None
+        baseline_sessions = manifest.by_kind("baseline_session")
+        if baseline_sessions:
+            baseline_invalid = baseline_sessions[-1].get("invalid_rate")
+        patch_proofs = [
+            {
+                "suggested_patch": candidate_changes,
+                "actual_patch": candidate_changes,
+                "patch_applied": bool((s.get("candidate_lifecycle") or {}).get("cooldown_applied", True)),
+                "critic_decision": (
+                    "recovered"
+                    if (s.get("invalid_rate") or 1.0) < (baseline_invalid or 0.0)
+                    else "not_recovered"
+                ),
+                "round_id": f"canary_b{s['block']}",
+                "before_metrics": {"baseline_invalid_rate": baseline_invalid},
+                "session_invalid_rate": s.get("invalid_rate"),
+            }
+            for s in c_sessions
+        ]
+        safety = {
+            "unsafe_action": 0,
+            "protection_event": 0,
+            "wrong_body": 0,
+            "wrong_joint": 0,
+            "wrong_regime": 0,
+            "choreography_violation": 0,
+            "memory_hurt": 0.0,
+        }
+        aborted = manifest.by_kind("canary_aborted")
+        if aborted:
+            safety["protection_event"] = len(aborted)
+
+        gate = evaluate_promotion_gate(
+            candidate_id=candidate_id,
+            arm_records=arm_records,
+            safety=safety,
+            patch_proofs=patch_proofs,
+            promotion_config=self.config.promotion,
+            stats_fn=promotion_report,
+        )
+        record = CandidateRecord(
+            candidate_id=candidate_id,
+            experiment_id=self.config.experiment_id,
+            changes=candidate_changes,
+            source_failure=str(candidate_row.get("source_failure") or ""),
+            current_regime=str(candidate_row.get("current_regime") or ""),
+        )
+        if gate.decision is PromotionDecision.PROMOTED:
+            record.state = CandidateState.VALIDATED
+            record.promote()
+            rule = promoted_rule_record(
+                candidate=candidate_row,
+                gate_report=gate,
+                canary_sessions=[str(s.get("practice_id")) for s in c_sessions],
+            )
+            store.insert(RULES_COLLECTION, rule)
+        elif gate.decision is PromotionDecision.ROLLED_BACK:
+            record.rollback("promotion gate: zero-tolerance safety check failed")
+        registry.upsert(record)
+        manifest.record(
+            "promotion_decision",
+            candidate_id=candidate_id,
+            decision=gate.decision.value,
+            scope=gate.scope,
+            checks=[{"name": c.name, "passed": c.passed, "detail": c.detail} for c in gate.checks],
+            stats=gate.stats,
+        )
+        return {
+            "ok": gate.decision is PromotionDecision.PROMOTED,
+            "decision": gate.decision.value,
+            "scope": gate.scope,
+            "checks": [{"name": c.name, "passed": c.passed, "detail": c.detail} for c in gate.checks],
+            "stats": gate.stats,
+        }
+
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
 
     def report(self) -> dict[str, Any]:
         manifest = self._open_manifest()

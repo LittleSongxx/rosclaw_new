@@ -1,0 +1,114 @@
+"""Promotion gate tests (PR-EVO-HW-4 §Phase 7)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from rosclaw.evolution.hardware.promotion_gate import (
+    PromotionDecision,
+    evaluate_promotion_gate,
+    promoted_rule_record,
+)
+
+
+@dataclass
+class _Rec:
+    invalid_rate: float
+    verified_rate: float
+
+
+def _arms(a_invalid, b_invalid, c_invalid):
+    return {
+        "A_no_memory": [_Rec(a_invalid, 1 - a_invalid) for _ in range(3)],
+        "B_fixed_cooldown": [_Rec(b_invalid, 1 - b_invalid) for _ in range(3)],
+        "C_candidate_canary": [_Rec(c_invalid, 1 - c_invalid) for _ in range(3)],
+    }
+
+
+SAFETY_ZERO = {
+    "unsafe_action": 0,
+    "protection_event": 0,
+    "wrong_body": 0,
+    "wrong_joint": 0,
+    "wrong_regime": 0,
+    "choreography_violation": 0,
+    "memory_hurt": 0.0,
+}
+
+PROOFS = [
+    {
+        "suggested_patch": {"inter_round_cooldown_sec": 2.0},
+        "actual_patch": {"inter_round_cooldown_sec": 2.0},
+        "patch_applied": True,
+        "critic_decision": "recovered",
+    }
+]
+
+
+def _gate(arm_records, safety=None, proofs=None, config=None):
+    return evaluate_promotion_gate(
+        candidate_id="cand_x",
+        arm_records=arm_records,
+        safety=safety or dict(SAFETY_ZERO),
+        patch_proofs=PROOFS if proofs is None else proofs,
+        promotion_config=config or {},
+        stats_fn=None,
+    )
+
+
+def test_promotes_when_all_checks_pass() -> None:
+    report = _gate(_arms(0.20, 0.10, 0.05))
+    assert report.decision is PromotionDecision.PROMOTED
+    assert report.scope == "operator_approved_recurrence"
+    assert all(c.passed for c in report.checks)
+
+
+def test_not_promoted_when_c_not_better_than_a() -> None:
+    report = _gate(_arms(0.05, 0.10, 0.20))
+    assert report.decision is PromotionDecision.NOT_PROMOTED
+    failed = {c.name for c in report.checks if not c.passed}
+    assert "c_invalid_lt_a" in failed
+
+
+def test_not_promoted_when_c_worse_than_b() -> None:
+    report = _gate(_arms(0.20, 0.03, 0.10))
+    assert report.decision is PromotionDecision.NOT_PROMOTED
+    failed = {c.name for c in report.checks if not c.passed}
+    assert "c_not_worse_than_b" in failed
+
+
+def test_safety_violation_rolls_back() -> None:
+    safety = dict(SAFETY_ZERO, wrong_regime=1)
+    report = _gate(_arms(0.20, 0.10, 0.05), safety=safety)
+    assert report.decision is PromotionDecision.ROLLED_BACK
+    assert report.scope == "none"
+
+
+def test_memory_hurt_threshold() -> None:
+    safety = dict(SAFETY_ZERO, memory_hurt=0.5)
+    report = _gate(_arms(0.20, 0.10, 0.05), safety=safety)
+    assert report.decision is PromotionDecision.NOT_PROMOTED
+    failed = {c.name for c in report.checks if not c.passed}
+    assert "memory_hurt" in failed
+
+
+def test_incomplete_proofs_block_promotion() -> None:
+    report = _gate(_arms(0.20, 0.10, 0.05), proofs=[])
+    assert report.decision is PromotionDecision.NOT_PROMOTED
+    incomplete = [{"suggested_patch": {}, "actual_patch": None, "patch_applied": True, "critic_decision": None}]
+    report2 = _gate(_arms(0.20, 0.10, 0.05), proofs=incomplete)
+    assert report2.decision is PromotionDecision.NOT_PROMOTED
+
+
+def test_promoted_rule_record_shape() -> None:
+    report = _gate(_arms(0.20, 0.10, 0.05))
+    rule = promoted_rule_record(
+        candidate={"candidate_id": "cand_x", "changes": {"inter_round_cooldown_sec": 2.0}},
+        gate_report=report,
+        canary_sessions=["prac_1"],
+    )
+    assert rule["rule_id"] == "rule_cand_x"
+    assert rule["scope"] == "operator_approved_recurrence"
+    assert rule["status"] == "active"
+    assert rule["canary_sessions"] == ["prac_1"]
+    assert rule["gate_report"]["decision"] == "PROMOTED"
