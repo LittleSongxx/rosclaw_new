@@ -101,6 +101,7 @@ def test_camera_env_subprocess_probe_used_when_in_process_missing(monkeypatch) -
     import rosclaw.evolution.hardware.preflight as pf
 
     monkeypatch.setitem(__import__("sys").modules, "pyrealsense2", None)
+    monkeypatch.setattr(pf, "CAMERA_ENV_PY", __import__("sys").executable)
     completed = sp.CompletedProcess(
         args=[], returncode=0,
         stdout=json.dumps([{"name": "D435I", "serial": "x", "firmware": "f"}]) + "\n",
