@@ -522,6 +522,51 @@ class DashboardWebServer:
         async def snapshot() -> dict[str, Any]:
             return self.server.get_snapshot()
 
+        @self.app.get("/evolution/evo-rps/{experiment_id}")
+        async def evolution_evo_rps_page(experiment_id: str) -> Any:
+            from rosclaw.evolution.hardware.dashboard_data import (
+                render_evolution_page_html,
+            )
+
+            return HTMLResponse(render_evolution_page_html(experiment_id))
+
+        @self.app.get("/api/evolution/evo-rps/{experiment_id}")
+        async def api_evolution_evo_rps(experiment_id: str) -> Any:
+            from rosclaw.evolution.hardware.dashboard_data import (
+                assemble_evolution_page,
+            )
+
+            root = Path.home() / ".rosclaw" / "acceptance" / "evo_rps" / experiment_id
+            if not root.is_dir():
+                raise HTTPException(status_code=404, detail=f"unknown experiment {experiment_id}")
+            import json as _json
+
+            ns_meta = root / "namespace.json"
+            dsn = None
+            if ns_meta.is_file():
+                dsn = _json.loads(ns_meta.read_text()).get("dsn")
+            candidates: list[dict[str, Any]] = []
+            promoted_rules: list[dict[str, Any]] = []
+            if dsn:
+                try:
+                    from rosclaw.storage.factory import StorageFactory
+
+                    store = StorageFactory.create_knowledge_store(
+                        backend="seekdb_server", url=dsn
+                    )
+                    store.connect()
+                    candidates = store.query("evo_candidates", filters=None, limit=200)
+                    promoted_rules = store.query("evo_promoted_rules", filters=None, limit=20)
+                except Exception:  # noqa: BLE001 - the page degrades to manifest-only
+                    candidates = []
+                    promoted_rules = []
+            return assemble_evolution_page(
+                experiment_id=experiment_id,
+                evidence_root=root,
+                candidates=candidates,
+                promoted_rules=promoted_rules,
+            )
+
         @self.app.get("/evolution-arena")
         async def evolution_arena_page() -> Any:
             from rosclaw.simforge.evolution_arena import (
