@@ -485,9 +485,39 @@ class EvoRpsOrchestrator:
             blocks=blocks, seed=self.config.seed + 900, base_seed=self.config.seed + 1000
         )
         driver = Rh56RpsWorkspaceDriver(self.config, self.namespace.practice_root)
+        canary_cfg = self.config.raw.get("canary") or {}
+        start_max_temp = float(canary_cfg.get("start_max_temp_c", 46.0))
+        max_thermal_wait = float(canary_cfg.get("max_thermal_wait_s", 900.0))
         results: list[dict[str, Any]] = []
         aborted = False
         for slot in schedule:
+            # §Phase 6 相同初始温度区间: every slot starts inside the same
+            # thermal window — waiting is recorded, a timeout blocks the
+            # matrix honestly rather than running mismatched sessions.
+            from .thermal import wait_for_thermal_window
+
+            window = wait_for_thermal_window(
+                start_max_temp_c=start_max_temp,
+                max_wait_s=max_thermal_wait,
+            )
+            manifest.record(
+                "canary_thermal_gate",
+                block=slot.block,
+                arm=slot.arm,
+                ok=window.ok,
+                waited_s=round(window.waited_s, 1),
+                temps=window.temps,
+                reason=window.reason,
+            )
+            if not window.ok:
+                manifest.record(
+                    "canary_thermal_block",
+                    reason="start temperature window not reachable",
+                    waited_s=round(window.waited_s, 1),
+                    temps=window.temps,
+                )
+                aborted = True
+                break
             out_dir = (
                 self.namespace.evidence_root / "canary" / f"block{slot.block}_{slot.arm}"
             )
