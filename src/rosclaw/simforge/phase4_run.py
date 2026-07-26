@@ -821,6 +821,12 @@ def _practice_scenarios(generation: int) -> tuple[GoalForgeScenario, ...]:
     )
 
 
+def historical_goalforge_scenarios() -> tuple[GoalForgeScenario, ...]:
+    """Return the frozen Phase 4 practice scenario set for regression tests."""
+
+    return _practice_scenarios(10)
+
+
 def _context_patch(
     base: ShotParameters,
     context: dict[str, float],
@@ -937,6 +943,7 @@ def _p95_result(episodes: list[GoalForgeEpisode], field: str) -> float:
 __all__ = [
     "GoalForgeDemoResult",
     "GoalForgeFlywheelResult",
+    "historical_goalforge_scenarios",
     "run_goalforge_demo",
     "run_goalforge_practice_flywheel",
 ]

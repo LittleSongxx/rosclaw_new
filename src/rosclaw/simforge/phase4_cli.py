@@ -15,7 +15,10 @@ from rosclaw.robot_pack.g1.dds_adapter import run_unitree_dds_loopback
 from rosclaw.simforge.backends.unitree_mujoco_backend import qualify_g1_assets
 from rosclaw.simforge.g1_cpu_gpu_agreement import run_cpu_gpu_label_agreement
 from rosclaw.simforge.g1_doctor import doctor_goalforge, write_doctor_report
+from rosclaw.simforge.g1_feedback_holdout import run_g1_feedback_holdout
+from rosclaw.simforge.g1_feedback_validation import run_g1_feedback_validation
 from rosclaw.simforge.g1_four_gpu import run_goalforge_four_gpu
+from rosclaw.simforge.g1_ilc_validation import run_g1_ilc_validation
 from rosclaw.simforge.g1_memory_ablation import run_memory_ablation
 from rosclaw.simforge.g1_promotion_run import evaluate_goalforge_promotion
 from rosclaw.simforge.g1_proof_replay import replay_goalforge_proof_bundle
@@ -94,7 +97,13 @@ def _recovery_validation(argv: list[str]) -> int:
     parser.add_argument("name")
     parser.add_argument(
         "--profile",
-        choices=("recovery", "nominal-success"),
+        choices=(
+            "recovery",
+            "nominal-success",
+            "feedback-reflex",
+            "feedback-holdout",
+            "feedback-ilc",
+        ),
         default="recovery",
     )
     parser.add_argument("--pairs", type=int, default=100)
@@ -103,6 +112,30 @@ def _recovery_validation(argv: list[str]) -> int:
     parser.add_argument("--asset-root", type=Path, default=_default_robonaldo())
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.profile == "feedback-holdout":
+        result = run_g1_feedback_holdout(
+            asset_root=args.asset_root,
+            output_path=args.output,
+            source_checkout=_source_checkout(),
+        )
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        return 0 if result.passed else 2
+    if args.profile == "feedback-ilc":
+        result = run_g1_ilc_validation(
+            asset_root=args.asset_root,
+            output_path=args.output,
+            source_checkout=_source_checkout(),
+        )
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        return 0 if result.passed else 2
+    if args.profile == "feedback-reflex":
+        result = run_g1_feedback_validation(
+            asset_root=args.asset_root,
+            output_path=args.output,
+            source_checkout=_source_checkout(),
+        )
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        return 0 if result.passed else 2
     if args.profile == "nominal-success":
         result = run_nominal_success_validation(
             asset_root=args.asset_root,

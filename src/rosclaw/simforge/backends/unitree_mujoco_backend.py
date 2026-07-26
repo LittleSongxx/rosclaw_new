@@ -22,6 +22,10 @@ from typing import Any
 
 import numpy as np
 
+from rosclaw.feedback.contracts import FeedbackReceipt
+from rosclaw.feedback.ilc import ILCFeedforward
+from rosclaw.feedback.profiles.g1 import g1_joint_residual_limits
+from rosclaw.feedback.runtime import FeedbackRuntime
 from rosclaw.simforge.tasks.g1_goalforge.concepts import (
     G1_DDS_JOINT_NAMES,
     G1_HARD_TORQUE_LIMITS,
@@ -78,6 +82,8 @@ class GoalForgeEpisode:
     receipt: SimulationReceiptV4 | None
     artifact_root: Path | None
     trajectory: dict[str, np.ndarray]
+    feedback_receipt: FeedbackReceipt | None = None
+    feedforward_hash: str | None = None
 
     @property
     def result_hash(self) -> str:
@@ -203,7 +209,21 @@ class G1MuJoCoBackend:
         self,
         scenario: GoalForgeScenario,
         parameters: ShotParameters,
+        *,
+        feedback_runtime: FeedbackRuntime | None = None,
+        feedforward: ILCFeedforward | None = None,
     ) -> GoalForgeEpisode:
+        if (
+            feedback_runtime is not None
+            and feedback_runtime.spec.body_hash != self.qualification.body_hash
+        ):
+            raise ValueError("FeedbackLoopSpec body hash does not match qualified G1 assets")
+        if feedforward is not None:
+            feedforward.require_compatible(
+                body_hash=self.qualification.body_hash,
+                regime_hash=scenario.scenario_commitment,
+                joint_names=G1_DDS_JOINT_NAMES,
+            )
         if parameters.kick_foot != "right":
             return GoalForgeEpisode(
                 scenario=scenario,
@@ -222,7 +242,12 @@ class G1MuJoCoBackend:
                 artifact_root=None,
                 trajectory={},
             )
-        return self._run_physics(scenario, parameters)
+        return self._run_physics(
+            scenario,
+            parameters,
+            feedback_runtime=feedback_runtime,
+            feedforward=feedforward,
+        )
 
     def run_and_record(
         self,
@@ -305,12 +330,17 @@ class G1MuJoCoBackend:
             receipt=receipt,
             artifact_root=episode_root,
             trajectory=episode.trajectory,
+            feedback_receipt=episode.feedback_receipt,
+            feedforward_hash=episode.feedforward_hash,
         )
 
     def _run_physics(
         self,
         scenario: GoalForgeScenario,
         parameters: ShotParameters,
+        *,
+        feedback_runtime: FeedbackRuntime | None = None,
+        feedforward: ILCFeedforward | None = None,
     ) -> GoalForgeEpisode:
         import mujoco
 
@@ -319,6 +349,8 @@ class G1MuJoCoBackend:
         model = mujoco.MjModel.from_xml_path(str(root / _SCENE_REL))
         data = mujoco.MjData(model)
         model.opt.timestep = 0.002
+        if feedback_runtime is not None:
+            feedback_runtime.reset()
         _configure_scene(model, scenario)
         state = state_type(29)
         output = output_type(29)
@@ -393,6 +425,22 @@ class G1MuJoCoBackend:
             "contact_impulse": [],
             "goal_crossing": [],
         }
+        if feedback_runtime is not None:
+            trace.update(
+                {
+                    "feedback_residual": [],
+                    "feedback_error_rms": [],
+                    "feedback_active": [],
+                }
+            )
+        if feedforward is not None:
+            trace.update(
+                {
+                    "feedforward_residual": [],
+                    "combined_residual": [],
+                    "combined_residual_saturation": [],
+                }
+            )
         kick_support_anchor: np.ndarray | None = None
         peak_support_slip = 0.0
         com_margin_min = math.inf
@@ -423,9 +471,26 @@ class G1MuJoCoBackend:
             + max(0, phase_frames)
             + slowdown_frames
         )
+        if feedforward is not None and feedforward.values.shape[0] != total_control_frames:
+            raise ValueError(
+                "ILC feedforward frame count does not match the pinned GoalForge trajectory"
+            )
         last_target = data.qpos[7:36].copy()
+        feedback_residual = np.zeros(29, dtype=np.float64)
+        feedforward_residual = np.zeros(29, dtype=np.float64)
+        combined_residual = np.zeros(29, dtype=np.float64)
+        combined_residual_saturation = 0
+        combined_limits = np.asarray(
+            g1_joint_residual_limits(G1_DDS_JOINT_NAMES),
+            dtype=np.float64,
+        )
+        feedback_error_rms = math.nan
+        next_feedback_time = 0.0
+        latest_support_slip = 0.0
 
         for frame in range(total_control_frames):
+            if feedforward is not None:
+                feedforward_residual = feedforward.value_at(frame)
             _fill_state(state, model, data, ids)
             policy_frame = 0
             if frame < delay_frames:
@@ -484,7 +549,29 @@ class G1MuJoCoBackend:
             right_ground_force = 0.0
             ball_contact_point: np.ndarray = np.zeros(3, dtype=np.float64)
             for _ in range(10):
-                raw_torque = (delayed_target - data.qpos[7:36]) * kp - data.qvel[6:35] * kd
+                if feedback_runtime is not None and data.time + 1e-12 >= next_feedback_time:
+                    feedback_residual = _feedback_residual(
+                        runtime=feedback_runtime,
+                        timestamp_sec=float(data.time),
+                        phase=min(1.0, frame / max(1, total_control_frames - 1)),
+                        data=data,
+                        ids=ids,
+                        base_target=delayed_target,
+                        support_slip=latest_support_slip,
+                    )
+                    feedback_error_rms = feedback_runtime.records[-1].error_rms
+                    next_feedback_time += 1.0 / feedback_runtime.spec.rate_hz
+                raw_combined_residual = feedback_residual + feedforward_residual
+                combined_residual = np.clip(
+                    raw_combined_residual,
+                    -combined_limits,
+                    combined_limits,
+                )
+                combined_residual_saturation += int(
+                    np.count_nonzero(np.abs(raw_combined_residual - combined_residual) > 1e-12)
+                )
+                controlled_target = delayed_target + combined_residual
+                raw_torque = (controlled_target - data.qpos[7:36]) * kp - data.qvel[6:35] * kd
                 raw_scale = float(np.max(np.abs(raw_torque) / hard_limits))
                 peak_torque_scale = max(peak_torque_scale, min(raw_scale, self.torque_guard_scale))
                 frame_torque = np.clip(raw_torque, -guarded_limits, guarded_limits)
@@ -535,6 +622,7 @@ class G1MuJoCoBackend:
             elif contact_time is None:
                 kick_support_anchor = None
             peak_support_slip = max(peak_support_slip, support_slip)
+            latest_support_slip = support_slip
             com = data.subtree_com[ids.pelvis].copy()
             support_y = float(data.xpos[ids.left_ankle][1])
             com_margin = 0.11 - abs(float(com[1]) - support_y)
@@ -583,6 +671,11 @@ class G1MuJoCoBackend:
                     ball_contact_point=ball_contact_point,
                     contact_impulse=contact_impulse,
                     goal_crossed=goal_crossed,
+                    feedback_residual=feedback_residual,
+                    feedback_error_rms=feedback_error_rms,
+                    feedforward_residual=feedforward_residual,
+                    combined_residual=combined_residual,
+                    combined_residual_saturation=combined_residual_saturation,
                 )
             if not finite:
                 break
@@ -607,6 +700,11 @@ class G1MuJoCoBackend:
                 ball_contact_point=ball_contact_point,
                 contact_impulse=contact_impulse,
                 goal_crossed=goal_crossed,
+                feedback_residual=feedback_residual,
+                feedback_error_rms=feedback_error_rms,
+                feedforward_residual=feedforward_residual,
+                combined_residual=combined_residual,
+                combined_residual_saturation=combined_residual_saturation,
             )
         target_error = (
             math.hypot(crossing_y - scenario.target_y_m, crossing_z - scenario.target_z_m)
@@ -671,6 +769,15 @@ class G1MuJoCoBackend:
             robustness=robustness,
         )
         arrays = {name: np.asarray(values) for name, values in trace.items()}
+        feedback_receipt = (
+            feedback_runtime.build_receipt(
+                action_id=_episode_id(scenario, parameters) + ":feedback",
+                strict_replay=False,
+                evidence_domain="SIM",
+            )
+            if feedback_runtime is not None
+            else None
+        )
         return GoalForgeEpisode(
             scenario=scenario,
             parameters=parameters,
@@ -678,6 +785,8 @@ class G1MuJoCoBackend:
             receipt=None,
             artifact_root=None,
             trajectory=arrays,
+            feedback_receipt=feedback_receipt,
+            feedforward_hash=feedforward.trajectory_hash if feedforward is not None else None,
         )
 
 
@@ -931,6 +1040,11 @@ def _append_trace(
     ball_contact_point: np.ndarray,
     contact_impulse: float,
     goal_crossed: bool,
+    feedback_residual: np.ndarray | None = None,
+    feedback_error_rms: float = math.nan,
+    feedforward_residual: np.ndarray | None = None,
+    combined_residual: np.ndarray | None = None,
+    combined_residual_saturation: int = 0,
 ) -> None:
     trace["time"].append(time_sec)
     trace["joint_position"].append(data.qpos[7:36].copy())
@@ -950,6 +1064,67 @@ def _append_trace(
     trace["foot_ball_contact_point"].append(ball_contact_point.copy())
     trace["contact_impulse"].append(contact_impulse)
     trace["goal_crossing"].append(goal_crossed)
+    if "feedback_residual" in trace:
+        assert feedback_residual is not None
+        trace["feedback_residual"].append(feedback_residual.copy())
+        trace["feedback_error_rms"].append(feedback_error_rms)
+        trace["feedback_active"].append(bool(np.any(np.abs(feedback_residual) > 0.0)))
+    if "feedforward_residual" in trace:
+        assert feedforward_residual is not None
+        assert combined_residual is not None
+        trace["feedforward_residual"].append(feedforward_residual.copy())
+        trace["combined_residual"].append(combined_residual.copy())
+        trace["combined_residual_saturation"].append(combined_residual_saturation)
+
+
+def _feedback_residual(
+    *,
+    runtime: FeedbackRuntime,
+    timestamp_sec: float,
+    phase: float,
+    data: Any,
+    ids: _ModelIds,
+    base_target: np.ndarray,
+    support_slip: float,
+) -> np.ndarray:
+    """Run one feedback tick from MuJoCo state without crossing the EventBus."""
+
+    roll, pitch = _roll_pitch(data.xquat[ids.torso])
+    com = data.subtree_com[ids.pelvis]
+    support_y = float(data.xpos[ids.left_ankle][1])
+    actual: dict[str, float] = {
+        "torso_roll": roll,
+        "torso_pitch": pitch,
+        "com_y_relative": float(com[1]) - support_y,
+        "support_slip_m": support_slip,
+    }
+    actual.update(
+        {
+            joint_name: float(data.qpos[7 + index])
+            for index, joint_name in enumerate(G1_DDS_JOINT_NAMES)
+        }
+    )
+    reference = dict.fromkeys(runtime.spec.reference_signals, 0.0)
+    base_action = {
+        "joint:" + joint_name: float(base_target[index])
+        for index, joint_name in enumerate(G1_DDS_JOINT_NAMES)
+    }
+    timestamp_ns = int(round(timestamp_sec * 1_000_000_000.0))
+    command = runtime.tick(
+        timestamp_ns=timestamp_ns,
+        observation_timestamp_ns=timestamp_ns,
+        phase=phase,
+        reference=reference,
+        actual=actual,
+        base_action=base_action,
+    )
+    residual = np.zeros(29, dtype=np.float64)
+    joint_index = {name: index for index, name in enumerate(G1_DDS_JOINT_NAMES)}
+    for output, value in command.projected.items():
+        joint_name = output.removeprefix("joint:")
+        if joint_name in joint_index:
+            residual[joint_index[joint_name]] = value
+    return residual
 
 
 def _classify(
