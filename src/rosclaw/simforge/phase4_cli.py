@@ -15,6 +15,7 @@ from rosclaw.robot_pack.g1.dds_adapter import run_unitree_dds_loopback
 from rosclaw.simforge.backends.unitree_mujoco_backend import qualify_g1_assets
 from rosclaw.simforge.g1_cpu_gpu_agreement import run_cpu_gpu_label_agreement
 from rosclaw.simforge.g1_doctor import doctor_goalforge, write_doctor_report
+from rosclaw.simforge.g1_feedback_evolution import run_g1_feedback_evolution
 from rosclaw.simforge.g1_feedback_holdout import run_g1_feedback_holdout
 from rosclaw.simforge.g1_feedback_validation import run_g1_feedback_validation
 from rosclaw.simforge.g1_four_gpu import run_goalforge_four_gpu
@@ -103,6 +104,7 @@ def _recovery_validation(argv: list[str]) -> int:
             "feedback-reflex",
             "feedback-holdout",
             "feedback-ilc",
+            "feedback-evolution",
         ),
         default="recovery",
     )
@@ -110,8 +112,32 @@ def _recovery_validation(argv: list[str]) -> int:
     parser.add_argument("--max-attempts", type=int, default=400)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--asset-root", type=Path, default=_default_robonaldo())
+    parser.add_argument("--feedback-evidence", type=Path)
+    parser.add_argument("--holdout-evidence", type=Path)
+    parser.add_argument("--ilc-evidence", type=Path)
+    parser.add_argument("--chaos-evidence", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.profile == "feedback-evolution":
+        evidence_paths = {
+            "--feedback-evidence": args.feedback_evidence,
+            "--holdout-evidence": args.holdout_evidence,
+            "--ilc-evidence": args.ilc_evidence,
+            "--chaos-evidence": args.chaos_evidence,
+        }
+        missing = [name for name, path in evidence_paths.items() if path is None]
+        if missing:
+            parser.error("feedback-evolution requires " + ", ".join(missing))
+        result = run_g1_feedback_evolution(
+            feedback_path=args.feedback_evidence,
+            holdout_path=args.holdout_evidence,
+            ilc_path=args.ilc_evidence,
+            chaos_path=args.chaos_evidence,
+            output_path=args.output,
+            source_checkout=_source_checkout(),
+        )
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        return 0 if result.decision.value == "SIM_CHAMPION" else 2
     if args.profile == "feedback-holdout":
         result = run_g1_feedback_holdout(
             asset_root=args.asset_root,

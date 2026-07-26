@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -11,6 +14,7 @@ from typing import Any
 
 import numpy as np
 
+from rosclaw.feedback.contracts import canonical_hash
 from rosclaw.feedback.ilc import (
     BoundedTrajectoryILC,
     ILCFeedforward,
@@ -33,6 +37,7 @@ from rosclaw.simforge.tasks.g1_goalforge.scenario import generate_goalforge_scen
 _ILC_SECRET = b"rosclaw-phase6-ilc-validation"
 _DETERMINISTIC_LATENCY_NS = 100_000
 _CLOCK_CAPACITY = 4_000
+_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True)
@@ -75,6 +80,85 @@ class G1ILCTrial:
 
 
 @dataclass(frozen=True)
+class G1ILCFeedforwardCandidate:
+    """Reloadable, content-addressed output of the selected ILC lineage."""
+
+    trajectory_hash: str
+    body_hash: str
+    regime_hash: str
+    joint_names: tuple[str, ...]
+    shape: tuple[int, int]
+    residual_limit: float
+    residual_peak: float
+    trial: int
+    selected_campaign_trial: int
+    source_receipt_hashes: tuple[str, ...]
+    value_hash: str
+    artifact_path: str
+    artifact_hash: str
+    schema_version: str = "rosclaw.g1_ilc.feedforward_candidate.v1"
+
+    def __post_init__(self) -> None:
+        hashes = (
+            self.trajectory_hash,
+            self.body_hash,
+            self.regime_hash,
+            self.value_hash,
+            self.artifact_hash,
+            *self.source_receipt_hashes,
+        )
+        if not hashes or any(not _SHA256.fullmatch(value) for value in hashes):
+            raise ValueError("ILC candidate requires sha256 content hashes")
+        if not self.joint_names or len(set(self.joint_names)) != len(self.joint_names):
+            raise ValueError("ILC candidate joint names must be non-empty and unique")
+        if self.shape[0] <= 0 or self.shape[1] != len(self.joint_names):
+            raise ValueError("ILC candidate shape must match its joint order")
+        if (
+            not math.isfinite(self.residual_limit)
+            or not math.isfinite(self.residual_peak)
+            or self.residual_limit <= 0.0
+            or not 0.0 <= self.residual_peak <= self.residual_limit + 1e-12
+        ):
+            raise ValueError("ILC candidate residual bounds are invalid")
+        if self.trial < 1 or self.selected_campaign_trial < 1:
+            raise ValueError("ILC candidate trials must be positive")
+        if not self.source_receipt_hashes:
+            raise ValueError("ILC candidate requires source receipts")
+        if not self.artifact_path:
+            raise ValueError("ILC candidate artifact path must not be empty")
+
+    @property
+    def candidate_hash(self) -> str:
+        return canonical_hash(self._bound_content())
+
+    def _bound_content(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "trajectory_hash": self.trajectory_hash,
+            "body_hash": self.body_hash,
+            "regime_hash": self.regime_hash,
+            "joint_names": list(self.joint_names),
+            "shape": list(self.shape),
+            "residual_limit": self.residual_limit,
+            "residual_peak": self.residual_peak,
+            "trial": self.trial,
+            "selected_campaign_trial": self.selected_campaign_trial,
+            "source_receipt_hashes": list(self.source_receipt_hashes),
+            "value_hash": self.value_hash,
+            "artifact_hash": self.artifact_hash,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self._bound_content(),
+            "candidate_hash": self.candidate_hash,
+            # Location is deliberately excluded from candidate identity so an
+            # immutable artifact can be moved without relabelling its content.
+            "artifact_path": self.artifact_path,
+        }
+
+
+@dataclass(frozen=True)
 class G1ILCValidation:
     body_hash: str
     regime_hash: str
@@ -88,7 +172,8 @@ class G1ILCValidation:
     wrong_regime_rejected: bool
     probe_episode_count: int
     simulation_episode_count: int
-    schema_version: str = "rosclaw.g1_ilc.validation.v1"
+    candidate_feedforward: G1ILCFeedforwardCandidate | None
+    schema_version: str = "rosclaw.g1_ilc.validation.v2"
 
     @property
     def passed(self) -> bool:
@@ -100,6 +185,10 @@ class G1ILCValidation:
             and self.energy_within_limit
             and self.strict_replay
             and self.wrong_regime_rejected
+            and self.candidate_feedforward is not None
+            and self.candidate_feedforward.body_hash == self.body_hash
+            and self.candidate_feedforward.regime_hash == self.regime_hash
+            and self.candidate_feedforward.trajectory_hash == self.trials[-1].feedforward_hash
             and all(trial.success for trial in self.trials)
             and sum(trial.deadline_miss_count for trial in self.trials) == 0
         )
@@ -119,6 +208,9 @@ class G1ILCValidation:
             "wrong_regime_rejected": self.wrong_regime_rejected,
             "probe_episode_count": self.probe_episode_count,
             "simulation_episode_count": self.simulation_episode_count,
+            "candidate_feedforward": (
+                self.candidate_feedforward.to_dict() if self.candidate_feedforward else None
+            ),
             "passed": self.passed,
             "claims": {
                 "evidence_domain": "SIM",
@@ -293,6 +385,30 @@ def run_g1_ilc_validation(
         except ValueError as error:
             wrong_regime_rejected = "wrong-regime" in str(error)
 
+    candidate_feedforward = None
+    if feedforward is not None:
+        artifact_path = trial_root / "selected-feedforward.npz"
+        _atomic_npz(artifact_path, feedforward_residual=feedforward.values)
+        manifest = feedforward.to_manifest()
+        shape = tuple(int(value) for value in manifest["shape"])
+        if len(shape) != 2:
+            raise ValueError("selected ILC feedforward shape is not two-dimensional")
+        candidate_feedforward = G1ILCFeedforwardCandidate(
+            trajectory_hash=feedforward.trajectory_hash,
+            body_hash=feedforward.body_hash,
+            regime_hash=feedforward.regime_hash,
+            joint_names=feedforward.joint_names,
+            shape=(shape[0], shape[1]),
+            residual_limit=feedforward.residual_limit,
+            residual_peak=float(manifest["residual_peak"]),
+            trial=feedforward.trial,
+            selected_campaign_trial=trials[-1].trial,
+            source_receipt_hashes=feedforward.source_receipt_hashes,
+            value_hash=str(manifest["value_hash"]),
+            artifact_path=str(artifact_path),
+            artifact_hash=_sha256_file(artifact_path),
+        )
+
     result = G1ILCValidation(
         body_hash=backend.qualification.body_hash,
         regime_hash=scenario.scenario_commitment,
@@ -306,6 +422,7 @@ def run_g1_ilc_validation(
         wrong_regime_rejected=wrong_regime_rejected,
         probe_episode_count=probe_count,
         simulation_episode_count=1 + probe_count + 1,
+        candidate_feedforward=candidate_feedforward,
     )
     _atomic_json(destination, result.to_dict())
     return result
@@ -425,8 +542,17 @@ def _atomic_npz(path: Path, **arrays: np.ndarray) -> None:
         raise
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
 __all__ = [
     "G1ILCProbe",
+    "G1ILCFeedforwardCandidate",
     "G1ILCTrial",
     "G1ILCValidation",
     "run_g1_ilc_validation",

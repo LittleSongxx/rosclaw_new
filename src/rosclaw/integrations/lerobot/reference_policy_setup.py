@@ -15,6 +15,7 @@ Everything is local-path based — no dev-machine caches, no manual copies.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,35 @@ def _dataset_extras_importable(runtime_python: Path) -> bool:
 
 
 def _pip_install(runtime_python: Path, *targets: str) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        [str(runtime_python), "-m", "pip", "install", *targets],
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    if result.returncode == 0 or "No module named pip" not in (result.stderr or ""):
+        return result
+    # ``uv venv`` intentionally creates minimal runtimes without pip.  Prefer
+    # uv's interpreter-targeted installer so setup works without mutating the
+    # runtime merely to bootstrap another package manager.
+    uv = shutil.which("uv")
+    if uv is not None:
+        return subprocess.run(
+            [uv, "pip", "install", "--python", str(runtime_python), *targets],
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+    # Plain CPython environments normally retain ensurepip even when pip was
+    # omitted.  This is a final local fallback for systems without uv.
+    bootstrap = subprocess.run(
+        [str(runtime_python), "-m", "ensurepip", "--upgrade"],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if bootstrap.returncode != 0:
+        return result
     return subprocess.run(
         [str(runtime_python), "-m", "pip", "install", *targets],
         capture_output=True,

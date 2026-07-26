@@ -41,7 +41,11 @@ compatible; control-plane types are additive.
 - Body- and regime-bound ILC trajectory memory, bounded update rules, and
   convergence checks for monotonic error, safety interventions, and energy.
 - A transactional ten-trial G1 ILC campaign with raw error trajectories,
-  rollback, strict final replay, and wrong-regime rejection.
+  rollback, strict final replay, wrong-regime rejection, and a reloadable,
+  content-addressed selected feed-forward artifact.
+- An offline self-evolution evaluator that binds the current controller,
+  selected ILC artifact, A/B, multi-regime Holdout, historical replay, and DDS
+  chaos evidence into one candidate and evaluates F1-F15 without activating it.
 
 ## G1 reflex behavior
 
@@ -96,7 +100,22 @@ Additional profiles are available:
 .venv/bin/python -m rosclaw.entrypoint simforge validate g1-goalforge \
   --profile feedback-ilc --asset-root /path/to/RoboNaldo_Deploy \
   --output /tmp/rosclaw-ilc-validation.json
+
+# Reload the selected ILC artifact, build a candidate, and evaluate F1-F15
+.venv/bin/python -m rosclaw.entrypoint simforge validate g1-goalforge \
+  --profile feedback-evolution \
+  --feedback-evidence /tmp/rosclaw-feedback-validation.json \
+  --holdout-evidence /tmp/rosclaw-feedback-holdout.json \
+  --ilc-evidence /tmp/rosclaw-ilc-validation.json \
+  --chaos-evidence /tmp/rosclaw-goalforge-chaos.json \
+  --output /tmp/rosclaw-feedback-evolution.json
 ```
+
+`feedback-evolution` deliberately returns a non-zero status for
+`NEED_MORE_EVIDENCE` or `REJECTED`. A successfully constructed candidate is
+not the same as a promoted controller. Evaluation never writes the Registry,
+opens hardware transport, or activates a residual. The result records the
+parent snapshot as its rollback target.
 
 ## Safety and claim boundary
 
@@ -107,6 +126,9 @@ Additional profiles are available:
 - A `passed` A/B, Holdout, or ILC report is not hardware Controller Promotion.
   The reflex-local error gate, hard-real-time qualification, and a separately
   authorized real-body Canary remain incomplete.
+- The self-evolution evaluator has no caller-supplied `canary_passed` override.
+  F15 remains missing until a future candidate-bound, independently attested,
+  and explicitly authorized canary workflow exists.
 - The ten-trial ILC claim is MuJoCo physical simulation, not real hardware.
   Candidate step sizes are simulation probes and must not be copied to a real
   robot without digital-twin/shadow screening.

@@ -152,10 +152,12 @@ policy joint reference - MuJoCo actual joint position
 |---|---|
 | `/code/rosclaw/phase6_evidence/feedback-validation.json` | `7722f33efb96b4782a448c67cab00ef5ca6a172243c9d452b50f60728bdb9bf8` |
 | `/code/rosclaw/phase6_evidence/feedback-holdout.json` | `b207b53cf0f5031243c1399fd3c3b1cdd8c1faee7eef84fd87e7abb187d18649` |
-| `/code/rosclaw/phase6_evidence/ilc-validation.json` | `eba071200251141c091cd53145850c8231b936f60c982ce735db14cbd52dfca8` |
+| `/code/rosclaw/phase6_evidence/ilc-validation.json` | `75205d7d8eb4bc49de45883bd29370da231ac9ae25301267a4dbd1ccbf85c44c` |
 | `/code/rosclaw/phase6_evidence/dds-chaos-v2/goalforge-chaos.json` | `496b81885bdc6147b5cbf2389c3f2b27a67fc3f713ecece7b1d574cb7ac3d271` |
 
 所有 raw evidence 均在 source checkout 外。仓库只保留实现、测试和报告，不提交数百 MB 的轨迹或外部模型。
+
+注：ILC 摘要后来由自进化闭环升级为 schema v2，物理结果未变化；新增了可重新加载的 selected feed-forward artifact，因此本表使用升级后的文件哈希。完整的候选生成和 F1-F15 结果见 `ROSCLAW_PHASE6_SELF_EVOLUTION_REPORT.md`。
 
 ## 10. 复现命令
 
