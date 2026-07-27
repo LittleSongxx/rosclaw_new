@@ -24,31 +24,30 @@ from rosclaw.continual.contracts import (
     VersionedTrajectory,
 )
 from rosclaw.continual.experience import ContinualExperienceStore, ExperienceRecord
+from rosclaw.continual.g1_goalforge import (
+    G1_CONTINUAL_ACTION_LIMITS,
+    G1_CONTINUAL_ACTIONS,
+    G1_CONTINUAL_OBSERVATIONS,
+)
 from rosclaw.continual.learner import ConstrainedResidualSAC, ResidualSACConfig
+from rosclaw.continual.serde import experience_batch_from_dict
 
-OBSERVATIONS = (
-    "torso_roll",
-    "torso_pitch",
-    "com_y_relative",
-    "support_slip_m",
-    "ball_lateral_error_m",
-    "contact_phase",
-    "energy_margin",
-    "sensor_quality",
-)
-ACTIONS = (
-    "waist_roll_residual",
-    "right_hip_roll_residual",
-    "right_hip_yaw_residual",
-    "kick_phase_rate",
-)
-ACTION_LIMITS = (0.04, 0.08, 0.035, 0.08)
+OBSERVATIONS = G1_CONTINUAL_OBSERVATIONS
+ACTIONS = G1_CONTINUAL_ACTIONS
+ACTION_LIMITS = G1_CONTINUAL_ACTION_LIMITS
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--physical-gpu", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--experience-batch", type=Path)
+    parser.add_argument("--artifact-output", type=Path)
+    parser.add_argument(
+        "--input-domain",
+        choices=("synthetic_contract_fixture", "mujoco_goalforge"),
+        default="synthetic_contract_fixture",
+    )
     parser.add_argument("--updates", type=int, default=3)
     args = parser.parse_args()
     if args.physical_gpu not in range(4) or not 1 <= args.updates <= 20:
@@ -59,8 +58,16 @@ def main() -> int:
     if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
         raise SystemExit("continual CUDA worker requires exactly one visible GPU")
 
+    if args.input_domain == "mujoco_goalforge" and args.experience_batch is None:
+        raise SystemExit("MuJoCo worker input requires --experience-batch")
+    if args.experience_batch is not None:
+        batch = experience_batch_from_dict(
+            json.loads(args.experience_batch.read_text(encoding="utf-8"))
+        )
+        parent = _learner_parent(batch)
+    else:
+        parent, batch = _screening_batch(args.physical_gpu)
     gpu_uuid, pci_bus_id = _gpu_identity(args.physical_gpu)
-    parent, batch = _screening_batch(args.physical_gpu)
     learner = ConstrainedResidualSAC(
         ResidualSACConfig(
             observation_names=OBSERVATIONS,
@@ -74,23 +81,12 @@ def main() -> int:
     )
     started = time.perf_counter()
     updates = [learner.update(batch) for _ in range(args.updates)]
-    action = learner.action(
-        {
-            "torso_roll": 0.2,
-            "torso_pitch": -0.1,
-            "com_y_relative": 0.03,
-            "support_slip_m": 0.01,
-            "ball_lateral_error_m": 0.04,
-            "contact_phase": 0.4,
-            "energy_margin": 0.8,
-            "sensor_quality": 0.95,
-        }
-    )
-    reference = np.linspace(-0.2, 0.2, 64 * len(OBSERVATIONS), dtype=np.float32).reshape(
-        64, len(OBSERVATIONS)
-    )
+    action = learner.action(dict(batch.actor_records[0].trajectory.segments[0].observation))
+    reference = _reference_observations(batch)
     hidden = learner.hidden_activations(reference)
     candidate, artifact = learner.candidate_policy(parent=parent)
+    if args.artifact_output is not None:
+        args.artifact_output.write_bytes(artifact)
     torch.cuda.synchronize()
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     bounded = all(
@@ -110,6 +106,7 @@ def main() -> int:
         "parent_policy_hash": parent.version_hash,
         "candidate_policy_hash": candidate.version_hash,
         "candidate_artifact_hash": candidate.artifact_hash,
+        "candidate_policy": candidate.to_dict(),
         "candidate_version": candidate.version,
         "artifact_bytes": len(artifact),
         "update_count": len(updates),
@@ -132,7 +129,11 @@ def main() -> int:
         "elapsed_ms": elapsed_ms,
         "max_memory_allocated_bytes": torch.cuda.max_memory_allocated(),
         "claims": {
-            "synthetic_versioned_transition_screening": True,
+            "input_domain": args.input_domain,
+            "synthetic_versioned_transition_screening": (
+                args.input_domain == "synthetic_contract_fixture"
+            ),
+            "mujoco_physics_transitions": args.input_domain == "mujoco_goalforge",
             "g1_motion_effect_proven": False,
             "promotion_eligible": False,
             "hardware_authorized": False,
@@ -140,6 +141,31 @@ def main() -> int:
     }
     args.output.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return 0
+
+
+def _learner_parent(batch):
+    matches = {
+        record.trajectory.policy.version_hash: record.trajectory.policy
+        for record in batch.records
+        if record.trajectory.policy.version == batch.learner_version
+    }
+    if len(matches) != 1:
+        raise ValueError("physical replay must identify exactly one current learner parent")
+    return next(iter(matches.values()))
+
+
+def _reference_observations(batch) -> np.ndarray:
+    rows = [
+        [segment.observation[name] for name in OBSERVATIONS]
+        for record in batch.records
+        for segment in record.trajectory.segments
+    ]
+    if not rows:
+        raise ValueError("experience batch does not contain reference observations")
+    value = np.asarray(rows, dtype=np.float32)
+    if len(value) >= 64:
+        return value[:64]
+    return np.resize(value, (64, len(OBSERVATIONS)))
 
 
 def _screening_batch(gpu: int):

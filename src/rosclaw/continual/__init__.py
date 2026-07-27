@@ -17,6 +17,7 @@ from rosclaw.continual.experience import (
     ExperienceRecord,
     ReplayMix,
 )
+from rosclaw.continual.serde import experience_batch_from_dict, experience_batch_to_dict
 from rosclaw.continual.stability import (
     ContinualCandidateEvidence,
     ContinualDecision,
@@ -52,4 +53,6 @@ __all__ = [
     "TaskRetention",
     "WeightSlotReceipt",
     "WeightSlotState",
+    "experience_batch_from_dict",
+    "experience_batch_to_dict",
 ]

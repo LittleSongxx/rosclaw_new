@@ -95,3 +95,24 @@ def test_gate_rejects_catastrophic_forgetting_even_when_new_task_improves() -> N
     assert any(
         check.name == "critical_skill" and check.status.value == "FAIL" for check in report.checks
     )
+
+
+def test_unevaluated_candidate_is_missing_evidence_not_a_fabricated_pass() -> None:
+    evidence = replace(
+        _passing_evidence(),
+        task_retention=(),
+        plasticity=None,
+        self_core=None,
+        candidate_evaluation_complete=False,
+    )
+
+    report = StabilityPlasticityGate().evaluate(evidence)
+
+    assert report.decision is ContinualDecision.NEED_MORE_EVIDENCE
+    assert not report.activation_allowed
+    assert {check.name for check in report.checks if check.status.value == "MISSING"} >= {
+        "safety",
+        "historical_mean",
+        "critical_skill",
+        "anchor_drift",
+    }

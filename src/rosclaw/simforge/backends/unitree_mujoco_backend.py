@@ -418,6 +418,9 @@ class G1MuJoCoBackend:
             "right_foot_contact": [],
             "ground_reaction_force": [],
             "support_foot_slip": [],
+            "policy_phase": [],
+            "com_y_relative": [],
+            "ball_lateral_error_m": [],
             "ball_pose": [],
             "ball_velocity": [],
             "ball_angular_velocity": [],
@@ -434,12 +437,7 @@ class G1MuJoCoBackend:
                 }
             )
             if "skill:kick_phase_rate" in feedback_runtime.spec.output_limits:
-                trace.update(
-                    {
-                        "feedback_phase_rate": [],
-                        "policy_phase": [],
-                    }
-                )
+                trace["feedback_phase_rate"] = []
         if feedforward is not None:
             trace.update(
                 {
@@ -1097,6 +1095,11 @@ def _append_trace(
     trace["right_foot_contact"].append(right_contact)
     trace["ground_reaction_force"].append(ground_reaction_force)
     trace["support_foot_slip"].append(support_slip)
+    trace["policy_phase"].append(policy_phase)
+    trace["com_y_relative"].append(float(com[1]) - float(data.xpos[ids.left_ankle][1]))
+    trace["ball_lateral_error_m"].append(
+        float(data.qpos[ids.ball_qpos + 1]) - float(data.xpos[ids.right_ankle][1])
+    )
     trace["ball_pose"].append(data.qpos[ids.ball_qpos : ids.ball_qpos + 7].copy())
     trace["ball_velocity"].append(data.qvel[ids.ball_qvel : ids.ball_qvel + 3].copy())
     trace["ball_angular_velocity"].append(data.qvel[ids.ball_qvel + 3 : ids.ball_qvel + 6].copy())
@@ -1110,7 +1113,6 @@ def _append_trace(
         trace["feedback_active"].append(bool(np.any(np.abs(feedback_residual) > 0.0)))
     if "feedback_phase_rate" in trace:
         trace["feedback_phase_rate"].append(feedback_phase_rate)
-        trace["policy_phase"].append(policy_phase)
     if "feedforward_residual" in trace:
         assert feedforward_residual is not None
         assert combined_residual is not None

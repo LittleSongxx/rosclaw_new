@@ -6,7 +6,7 @@
 
 基线：Phase 6 分支提交 `d43c49c2fa40e54a4024e6d40a5625445b462ac8`
 
-证据域：MuJoCo `SIM` 与四卡 `CUDA_SCREENING`；没有真实机器人执行或授权
+证据域：MuJoCo `SIM`、四卡 `CUDA_SCREENING` 与 `SIM_TRAINING_FOUNDATION`；没有真实机器人执行或授权
 
 ## 1. 结论先行
 
@@ -28,7 +28,7 @@
 
 - 不能声称 ROSClaw 或 G1 具有主观意识；
 - 不能声称已经发现功能性 SelfCore；目前只生成“persistent subnetwork candidate”；
-- 不能声称四卡筛查已经改善 G1 动作；四卡输入仍是版本合同夹具，不是 MuJoCo rollout；
+- 不能声称四卡学习候选已经改善 G1 动作；真实 MuJoCo rollout 已进入四卡 learner，但候选尚未执行多种子动作评测；
 - 不能声称 L2 相位、瞄准和恢复调制已经晋级；探索性物理测试发现回归，因此默认关闭；
 - 不能声称达到 Phase 7 最终验收；多技能、多种子、移动球、身体变化、Agency 校准和真实 rollout 在线训练仍未完成。
 
@@ -102,6 +102,11 @@ Recent / Anchor / Boundary / Self replay
   - Recent 50%、Anchor 25%、Boundary 15%、Self 10%；
   - Anchor 必须绑定 champion；Boundary 必须有安全事件或近失效；Self 必须绑定身体变化；
   - 未来版本拒绝，过旧版本不能进入 actor。
+- `src/rosclaw/continual/g1_goalforge.py` 与 `serde.py`
+  - 将真实 MuJoCo trace 转成单一 policy version 下的连续运动片段；
+  - 明确记录 torso、COM、支撑脚滑移、球相对位置、policy phase、能量余量和传感质量；
+  - 每个片段绑定由本体状态构建的 `SelfStateSnapshot` 哈希；
+  - 完整 trajectory 去重传输，并逐层验证 trajectory、record 和 batch 内容哈希；JSON key 重排不会改变 observation/action 合同顺序。
 - `src/rosclaw/continual/learner.py`
   - 有界 Gaussian residual actor；
   - twin reward critic、twin fall critic、twin constraint critic；
@@ -190,7 +195,35 @@ Recent / Anchor / Boundary / Self replay
 
 汇总证据 SHA-256：`c1a58d73e2598a8449fc1a18eb7b736db30a64ae79364bfa04f2549740cb8963`
 
-### 5.3 软件验证
+### 5.3 真实 MuJoCo → 四卡 learner → 安全拒绝闭环
+
+正式命令：
+
+```bash
+.venv/bin/python -m rosclaw.entrypoint simforge validate g1-goalforge \
+  --profile continual-physical-foundation \
+  --asset-root /code/rosclaw/phase4_references/RoboNaldo/RoboNaldo_Deploy \
+  --output /code/rosclaw/phase7_evidence/physical-continual-v2
+```
+
+四个 replay 分区都来自真实 MuJoCo stepping，而非合成 transition：
+
+| 分区 | 工况 | 结果 | policy version | 物理步 | 严格重放 |
+|---|---|---|---:|---:|---|
+| Recent | 35N 横向扰动 | `SUCCESS` | 2 | 6520 | 通过 |
+| Anchor | nominal | `SUCCESS` | 0 | 6520 | 通过 |
+| Boundary | 80N 横向扰动 | `JOINT_LIMIT_EXCEEDED` | 2 | 6520 | 通过 |
+| Self | 0.02rad joint-zero bias | `SUCCESS` | 2 | 6520 | 通过 |
+
+四张 A6000 分别读取一个经完整序列化/反序列化验证的 batch。每卡 critic 使用 8384 条真实物理 transition；actor 只使用 6288 条 policy lag ≤ 1 的 transition；2096 条 v0 Anchor transition 只进入 critic/Self 路径。每卡完成 3 次 SAC 更新，loss 与 hidden activation 均为有限值，动作保持在 residual 上限内，CUDA 峰值分配约 21.25MB，四个 GPU UUID 均不同。
+
+GPU2 生成的 v3 candidate artifact 通过 checksum、body、parent 和 immutable safety identity 校验并进入候选槽。由于候选本身尚未完成 matched SIM rollout，门禁没有把“零个已知回归”伪装成安全通过，而是把 safety、historical retention、critical skill 和 anchor drift 明确标为 `MISSING`；plasticity 与 causal SelfCore 同样缺失。最终决定为 `NEED_MORE_EVIDENCE`，在 `PREPARE` 安全边界发起的激活仍被拒绝，slot 进入 `FROZEN`，active v2 未变化。
+
+这里的闭环成功标准是“真实物理经验可训练，而且不完整候选无法自我晋级”，不是“训练 loss 有限就算动作进步”。`g1_motion_effect_proven=false`、`candidate_activated=false`、`hardware_authorized=false` 均写入机器证据。
+
+汇总证据 SHA-256：`0e1ab01effe2b06f37d16bda32631981eedcb96f48fbab54cba96823abe14e0b`
+
+### 5.4 软件验证
 
 阶段性验证已经覆盖：
 
@@ -207,6 +240,8 @@ Recent / Anchor / Boundary / Self replay
 - 全仓首轮：5274 passed、67 skipped、27 deselected，4 个 LeRobot 集成失败；
 - 失败定位为测试隔离 home 中没有继承外部 LeRobot 路径；显式使用已安装的 `/code/rosclaw/phase6_runtime/lerobot-0.6.1/bin/python` 后，4 项全部通过；
 - 显式设置 `ROSCLAW_TEST_LEROBOT_PYTHON` 后最终全仓复跑：5286 passed、59 skipped、27 deselected、26 warnings，耗时 17m03s，无失败。
+- 本次真实物理 ingest 增量复跑 `tests/feedback tests/simforge tests/continual tests/self_model`：184 passed、1 skipped、3 deselected；原合成四卡 profile 也在四张 A6000 上再次通过，确认新增真实数据入口没有破坏旧诊断路径。
+- 本次最终全仓复跑：5294 passed、59 skipped、27 deselected、26 warnings，耗时 17m52s，无失败。
 
 ## 6. Stability-Plasticity 的实际解决方式
 
@@ -229,10 +264,10 @@ Recent / Anchor / Boundary / Self replay
 | Gate 0 / PR-0B phase clock | 接线完成、校准未完成 | 真实影响 policy frame，默认关闭 |
 | Gate 0 / PR-0C Phase 6 main | 未完成 | 当前 Phase 7 仍堆叠在 Phase 6 分支基线上 |
 | PR-1 RL Trajectory | 基础完成 | 版本、log-prob、body/regime、reward/cost 均已实现 |
-| PR-2 Experience Service | 内核完成 | 当前为进程内 store，尚未服务化 |
+| PR-2 Experience Service | 内核与跨进程 codec 完成 | 当前 store 仍为进程内，尚未长期服务化 |
 | PR-3 Inference Service | 未完成 | 只有 learner inference API |
-| PR-4 Learner Service | 算法内核完成 | SAC 已跑通，尚未形成长期服务 |
-| PR-5 Weight Update | 参考状态机完成 | SIM-only，未接 Registry |
+| PR-4 Learner Service | 算法与真实物理 ingest 完成 | 四卡 SAC 已消费 MuJoCo 轨迹，尚未形成长期服务 |
+| PR-5 Weight Update | 暂存/拒绝闭环完成 | 未评测候选会冻结；SIM-only，未接 Registry |
 | PR-6 AReaL Adapter | 设计映射完成 | 尚未服务编排 |
 | PR-7/8 Anchor/Churn | learner 与 gate 基础完成 | 真实多技能 benchmark 尚缺 |
 | PR-9/10 Rejuvenation/Experts | 未完成 | 下一阶段重点 |
@@ -246,13 +281,14 @@ Recent / Anchor / Boundary / Self replay
 
 ## 8. 下一阶段优先顺序
 
-1. 先把真实 MuJoCo trajectory 转为 `ControlSegment`，替换四卡 smoke 的合成 transition；
-2. 建立 rollout actor、versioned inference、experience、learner、weight-update 五个可恢复服务，并把最大 policy lag 固定为 1；
-3. 用站立、抗扰恢复、静止球、移动球组成交替 curriculum，先跑不少于 8 个 continual seeds 与 8 个 single-task controls；
-4. 实现 dead-unit、effective-rank、fresh-network-gap 和梯度冲突监测，再实现仅限 Plastic Expert 的低效单元重生；
-5. 实现 forward self model，做 payload、friction、latency、motor gain/zero bias 变化检测，再训练和校准 Agency；
-6. 在共同参考状态库上做 SelfCore 多阈值、多种子发现，并执行同规模 matched freeze/lesion/plastic-control/body-change；
-7. 用 Boundary 反例重新学习接触时机估计器；在 holdout 证明无回归前，L2 phase/aim/recovery 保持关闭；
-8. 只有历史平均下降 <3%、关键技能下降 ≤5%、critical regression=0、样本效率提升 ≥30% 且 Self 证据完整，才允许 SIM champion 晋级。
+1. 为 residual SAC artifact 增加只读 inference loader，把候选动作接入新的 MuJoCo evaluation worker；不得接硬件或 active Registry；
+2. 对候选运行 matched multi-seed Recent/Anchor/Boundary/Self 对照，实际计算 retention、安全回归与 anchor action drift；只有这些从 `MISSING` 变成真实观测值后才重新过门；
+3. 建立 rollout actor、versioned inference、experience、learner、weight-update 五个可恢复服务，并把最大 policy lag 固定为 1；
+4. 用站立、抗扰恢复、静止球、移动球组成交替 curriculum，先跑不少于 8 个 continual seeds 与 8 个 single-task controls；
+5. 实现 dead-unit、effective-rank、fresh-network-gap 和梯度冲突监测，再实现仅限 Plastic Expert 的低效单元重生；
+6. 实现 forward self model，做 payload、friction、latency、motor gain/zero bias 变化检测，再训练和校准 Agency；
+7. 在共同参考状态库上做 SelfCore 多阈值、多种子发现，并执行同规模 matched freeze/lesion/plastic-control/body-change；
+8. 用 Boundary 反例重新学习接触时机估计器；在 holdout 证明无回归前，L2 phase/aim/recovery 保持关闭；
+9. 只有历史平均下降 <3%、关键技能下降 ≤5%、critical regression=0、样本效率提升 ≥30% 且 Self 证据完整，才允许 SIM champion 晋级。
 
 真正的下一里程碑不是“训练 loss 下降”，而是：真实 G1 MuJoCo rollout 在四卡异步闭环里持续产生新经验；移动球能力上升；站立、恢复和静止球不遗忘；候选失败时机器门主动拒绝并回滚。

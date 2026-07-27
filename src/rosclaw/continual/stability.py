@@ -157,6 +157,7 @@ class ContinualCandidateEvidence:
     critical_safety_regressions: int
     stale_action_executions: int
     old_version_replays: int
+    candidate_evaluation_complete: bool = True
 
     def __post_init__(self) -> None:
         hashes = (
@@ -169,7 +170,7 @@ class ContinualCandidateEvidence:
         )
         if any(not _SHA256.fullmatch(value) for value in hashes):
             raise ValueError("candidate evidence identities must be sha256: content hashes")
-        if not self.task_retention:
+        if not self.task_retention and self.candidate_evaluation_complete:
             raise ValueError("candidate evidence requires historical task retention")
         counts = (
             self.replay_recent_count,
@@ -187,6 +188,8 @@ class ContinualCandidateEvidence:
 
     @property
     def mean_historical_drop(self) -> float:
+        if not self.task_retention:
+            return 0.0
         return sum(item.drop for item in self.task_retention) / len(self.task_retention)
 
     @property
@@ -258,30 +261,34 @@ class StabilityPlasticityGate:
                 and evidence.safety_kernel_hash == evidence.parent_safety_kernel_hash,
                 "body and immutable safety kernel remain bound to the parent",
             ),
-            _check(
+            self._candidate_evaluation_check(
                 "safety",
                 evidence.critical_safety_regressions == 0,
                 "critical fall/torque/joint/stale/collision regression count is zero",
+                evidence,
             ),
             _check(
                 "version_execution",
                 evidence.stale_action_executions == 0 and evidence.old_version_replays == 0,
                 "no stale action execution or old-version replay",
             ),
-            _check(
+            self._candidate_evaluation_check(
                 "historical_mean",
                 evidence.mean_historical_drop <= self.max_mean_historical_drop,
                 f"mean historical drop={evidence.mean_historical_drop:.6f}",
+                evidence,
             ),
-            _check(
+            self._candidate_evaluation_check(
                 "critical_skill",
                 evidence.worst_critical_drop <= self.max_critical_task_drop,
                 f"worst critical-task drop={evidence.worst_critical_drop:.6f}",
+                evidence,
             ),
-            _check(
+            self._candidate_evaluation_check(
                 "anchor_drift",
                 evidence.anchor_action_drift_rms <= self.max_anchor_action_drift_rms,
                 f"anchor action drift RMS={evidence.anchor_action_drift_rms:.6f}",
+                evidence,
             ),
             _check(
                 "replay_coverage",
@@ -311,6 +318,21 @@ class StabilityPlasticityGate:
             rollback_target_hash=evidence.parent_policy_hash,
             activation_allowed=decision is ContinualDecision.PROMOTE_SIM,
         )
+
+    @staticmethod
+    def _candidate_evaluation_check(
+        name: str,
+        passed: bool,
+        detail: str,
+        evidence: ContinualCandidateEvidence,
+    ) -> GateCheck:
+        if not evidence.candidate_evaluation_complete:
+            return GateCheck(
+                name,
+                CheckStatus.MISSING,
+                "candidate behavior has not completed matched SIM evaluation",
+            )
+        return _check(name, passed, detail)
 
     def _plasticity_check(self, value: PlasticityEvidence | None) -> GateCheck:
         if value is None:
