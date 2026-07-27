@@ -12,7 +12,13 @@ from rosclaw.continual.contracts import PolicyVersion
 
 
 def dispatch_continual_argv(argv: list[str]) -> int | None:
-    if len(argv) < 2 or argv[:2] != ["continual", "candidate"]:
+    if len(argv) < 2 or argv[0] != "continual":
+        return None
+    if argv[1] == "services":
+        from rosclaw.continual.service_cli import dispatch_continual_service_argv
+
+        return dispatch_continual_service_argv(argv[2:])
+    if argv[1] != "candidate":
         return None
     parser = argparse.ArgumentParser(prog="rosclaw continual candidate")
     commands = parser.add_subparsers(dest="command", required=True)

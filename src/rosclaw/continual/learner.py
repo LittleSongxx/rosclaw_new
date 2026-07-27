@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import math
 import struct
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 import numpy as np
 import torch  # type: ignore[import-not-found]
@@ -22,6 +23,7 @@ from torch import nn  # type: ignore[import-not-found]
 
 from rosclaw.continual.contracts import ExperiencePartition, PolicyVersion
 from rosclaw.continual.experience import ExperienceBatch, ExperienceRecord
+from rosclaw.feedback.contracts import canonical_hash
 
 
 @dataclass(frozen=True)
@@ -387,6 +389,74 @@ class ConstrainedResidualSAC:
                 )
             )
         return b"".join(chunks)
+
+    def checkpoint_bytes(self) -> bytes:
+        """Persist complete learner/optimizer state for crash-safe service recovery."""
+
+        payload = {
+            "schema_version": "rosclaw.continual.residual_sac_checkpoint.v1",
+            "config_hash": canonical_hash(asdict(self.config)),
+            "actor": self.actor.state_dict(),
+            "churn_reference": self.churn_reference.state_dict(),
+            "reward_critic": self.reward_critic.state_dict(),
+            "fall_critic": self.fall_critic.state_dict(),
+            "constraint_critic": self.constraint_critic.state_dict(),
+            "reward_target": self.reward_target.state_dict(),
+            "fall_target": self.fall_target.state_dict(),
+            "constraint_target": self.constraint_target.state_dict(),
+            "actor_optimizer": self.actor_optimizer.state_dict(),
+            "critic_optimizer": self.critic_optimizer.state_dict(),
+            "alpha_optimizer": self.alpha_optimizer.state_dict(),
+            "log_alpha": self.log_alpha.detach(),
+            "fall_lagrange": self.fall_lagrange,
+            "constraint_lagrange": self.constraint_lagrange,
+            "update_index": self.update_index,
+            "torch_rng_state": torch.get_rng_state(),
+            "cuda_rng_state": (
+                torch.cuda.get_rng_state_all() if self.device.type == "cuda" else None
+            ),
+        }
+        buffer = io.BytesIO()
+        torch.save(payload, buffer)
+        return buffer.getvalue()
+
+    def restore_checkpoint(self, checkpoint: bytes) -> None:
+        """Restore a trusted service-owned checkpoint into the same SAC config."""
+
+        if not checkpoint:
+            raise ValueError("SAC checkpoint must not be empty")
+        payload = torch.load(io.BytesIO(checkpoint), map_location=self.device, weights_only=False)
+        if not isinstance(payload, dict):
+            raise ValueError("SAC checkpoint payload must be a mapping")
+        if payload.get("schema_version") != "rosclaw.continual.residual_sac_checkpoint.v1":
+            raise ValueError("unsupported SAC checkpoint schema")
+        if payload.get("config_hash") != canonical_hash(asdict(self.config)):
+            raise ValueError("SAC checkpoint config does not match this learner")
+        for name in (
+            "actor",
+            "churn_reference",
+            "reward_critic",
+            "fall_critic",
+            "constraint_critic",
+            "reward_target",
+            "fall_target",
+            "constraint_target",
+        ):
+            getattr(self, name).load_state_dict(payload[name])
+        self.actor_optimizer.load_state_dict(payload["actor_optimizer"])
+        self.critic_optimizer.load_state_dict(payload["critic_optimizer"])
+        self.alpha_optimizer.load_state_dict(payload["alpha_optimizer"])
+        with torch.no_grad():
+            self.log_alpha.copy_(payload["log_alpha"])
+        self.fall_lagrange = float(payload["fall_lagrange"])
+        self.constraint_lagrange = float(payload["constraint_lagrange"])
+        self.update_index = int(payload["update_index"])
+        torch.set_rng_state(payload["torch_rng_state"].cpu())
+        if self.device.type == "cuda":
+            cuda_rng_state = payload.get("cuda_rng_state")
+            if cuda_rng_state is None:
+                raise ValueError("CUDA SAC checkpoint is missing device RNG state")
+            torch.cuda.set_rng_state_all(cuda_rng_state)
 
     def candidate_policy(self, *, parent: PolicyVersion) -> tuple[PolicyVersion, bytes]:
         if parent.observation_names != self.config.observation_names:

@@ -9,6 +9,7 @@ pytest.importorskip("torch")
 from rosclaw.continual.contracts import ExperiencePartition
 from rosclaw.continual.experience import ContinualExperienceStore, ExperienceRecord
 from rosclaw.continual.learner import ConstrainedResidualSAC, ResidualSACConfig
+from rosclaw.continual.services.learner import ResidualSACServiceExecutor
 from tests.continual.helpers import digest, policy, trajectory
 
 
@@ -94,3 +95,71 @@ def test_actor_exposes_hidden_activations_for_post_hoc_selfcore_analysis() -> No
 
     assert first.shape == (2, 8)
     assert second.shape == (2, 6)
+
+
+def test_full_checkpoint_restores_policy_optimizer_and_update_index() -> None:
+    parent, batch = _batch()
+    config = ResidualSACConfig(
+        observation_names=parent.observation_names,
+        action_names=parent.residual_action_names,
+        action_limits=(0.04,),
+        hidden_dims=(16, 16),
+        batch_size=16,
+        seed=17,
+    )
+    source = ConstrainedResidualSAC(config)
+    source.update(batch)
+    checkpoint = source.checkpoint_bytes()
+    expected_artifact = source.artifact_bytes()
+    expected_action = source.action({"roll": 0.2, "pitch": -0.1})
+
+    recovered = ConstrainedResidualSAC(config)
+    recovered.restore_checkpoint(checkpoint)
+
+    assert recovered.update_index == source.update_index
+    assert recovered.artifact_bytes() == expected_artifact
+    assert recovered.action({"roll": 0.2, "pitch": -0.1}) == expected_action
+    assert recovered.update(batch).finite
+
+
+def test_checkpoint_rejects_different_learner_configuration() -> None:
+    parent, _ = _batch()
+    source = ConstrainedResidualSAC(
+        ResidualSACConfig(
+            observation_names=parent.observation_names,
+            action_names=parent.residual_action_names,
+            action_limits=(0.04,),
+            hidden_dims=(8, 8),
+        )
+    )
+    incompatible = ConstrainedResidualSAC(
+        ResidualSACConfig(
+            observation_names=parent.observation_names,
+            action_names=parent.residual_action_names,
+            action_limits=(0.03,),
+            hidden_dims=(8, 8),
+        )
+    )
+
+    with pytest.raises(ValueError, match="config does not match"):
+        incompatible.restore_checkpoint(source.checkpoint_bytes())
+
+
+def test_service_executor_emits_numeric_metrics_and_full_checkpoint() -> None:
+    parent, batch = _batch()
+    learner = ConstrainedResidualSAC(
+        ResidualSACConfig(
+            observation_names=parent.observation_names,
+            action_names=parent.residual_action_names,
+            action_limits=(0.04,),
+            hidden_dims=(8, 8),
+            batch_size=16,
+        )
+    )
+
+    product = ResidualSACServiceExecutor(learner, parent=parent)(batch)
+
+    assert product.checkpoint
+    assert product.artifact
+    assert "schema_version" not in product.metrics
+    assert all(isinstance(value, (bool, int, float)) for value in product.metrics.values())

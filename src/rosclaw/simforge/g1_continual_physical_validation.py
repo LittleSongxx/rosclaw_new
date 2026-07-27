@@ -13,7 +13,12 @@ from typing import Any
 
 import numpy as np
 
-from rosclaw.continual.contracts import ExperiencePartition, PolicyVersion, SkillPhase
+from rosclaw.continual.contracts import (
+    ExperiencePartition,
+    PolicyVersion,
+    SkillPhase,
+    VersionedTrajectory,
+)
 from rosclaw.continual.experience import ContinualExperienceStore, ExperienceRecord
 from rosclaw.continual.g1_goalforge import (
     adapt_goalforge_episode,
@@ -33,7 +38,10 @@ from rosclaw.simforge.backends.unitree_mujoco_backend import (
 from rosclaw.simforge.models import Partition
 from rosclaw.simforge.seed_ledger import SeedLedger
 from rosclaw.simforge.tasks.g1_goalforge.concepts import ShotParameters
-from rosclaw.simforge.tasks.g1_goalforge.scenario import generate_goalforge_scenarios
+from rosclaw.simforge.tasks.g1_goalforge.scenario import (
+    GoalForgeScenario,
+    generate_goalforge_scenarios,
+)
 
 _FOUNDATION_SECRET = b"rosclaw-phase7-physical-continual-foundation-v1"
 
@@ -194,7 +202,7 @@ def run_g1_continual_physical_foundation(
         torque_guard_scale=backend.torque_guard_scale,
         through_version=2,
     )
-    scenarios = _foundation_scenarios()
+    scenarios = build_foundation_scenarios()
     policy_for = {
         ExperiencePartition.ANCHOR: lineage.policy(0),
         ExperiencePartition.RECENT: lineage.policy(2),
@@ -231,7 +239,9 @@ def run_g1_continual_physical_foundation(
                 "strict_replay": strict_replay,
             },
         )
-        record = _record(partition, adaptation.trajectory, scenario.scenario_commitment)
+        record = record_goalforge_experience(
+            partition, adaptation.trajectory, scenario.scenario_commitment
+        )
         store.append(record)
         rollout = PhysicalRolloutEvidence(
             replay_partition=partition.value,
@@ -342,7 +352,8 @@ def run_g1_continual_physical_foundation(
     return result
 
 
-def _foundation_scenarios():
+def build_foundation_scenarios() -> dict[ExperiencePartition, GoalForgeScenario]:
+    """Return deterministic four-partition G1 service-validation scenarios."""
     ledger = SeedLedger(task_id="g1_penalty_kick", secret=_FOUNDATION_SECRET)
     generated = {
         ExperiencePartition.ANCHOR: generate_goalforge_scenarios(
@@ -393,7 +404,12 @@ def _foundation_scenarios():
     }
 
 
-def _record(partition, trajectory, scenario_commitment):
+def record_goalforge_experience(
+    partition: ExperiencePartition,
+    trajectory: VersionedTrajectory,
+    scenario_commitment: str,
+) -> ExperienceRecord:
+    """Bind a physical trajectory to its replay partition and provenance."""
     if partition is ExperiencePartition.ANCHOR:
         return ExperienceRecord(
             trajectory,
@@ -550,5 +566,7 @@ __all__ = [
     "G1ContinualPhysicalFoundation",
     "PhysicalLearnerShard",
     "PhysicalRolloutEvidence",
+    "build_foundation_scenarios",
+    "record_goalforge_experience",
     "run_g1_continual_physical_foundation",
 ]
