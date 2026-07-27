@@ -1,0 +1,31 @@
+places:
+  home:
+    frame_id: map
+    x: 0.0
+    y: 0.0
+    z: 0.0
+    aliases: [起点, 原点, home, start]
+  entrance_a:
+    frame_id: map
+    x: 8.0
+    y: 0.0
+    z: 0.0
+    aliases: [入口A, 入口, entrance, entrance_a]
+  inspection_a:
+    frame_id: map
+    x: 0.0
+    y: 6.0
+    z: 0.0
+    aliases: [巡检点A, A点, inspection_a, a]
+  inspection_b:
+    frame_id: map
+    x: 8.0
+    y: 6.0
+    z: 0.0
+    aliases: [巡检点B, B点, inspection_b, b]
+  staging_area:
+    frame_id: map
+    x: -6.0
+    y: 4.0
+    z: 0.0
+    aliases: [待命区, staging, staging_area]

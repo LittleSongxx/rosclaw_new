@@ -37,6 +37,7 @@ from rosclaw.agent.init_claude_code import add_init_parser as _add_agent_init_pa
 from rosclaw.agent.install import add_install_parser as _add_agent_install_parser
 from rosclaw.agent.test_claude_code import add_test_parser as _add_agent_test_parser
 from rosclaw.app.cli import add_app_subparsers, dispatch_app_command
+from rosclaw.apps.cli import add_demo_app_subparsers
 from rosclaw.body.cli import add_body_subparser, dispatch_body_command
 from rosclaw.body.registry import BodyRegistryManager
 from rosclaw.body.resolver import BodyResolver
@@ -6923,6 +6924,9 @@ def main() -> int:
     app_parser = subparsers.add_parser("app", help="Install, author, and run Capability Apps")
     app_subparsers = app_parser.add_subparsers(dest="app_command")
     add_app_subparsers(app_subparsers)
+    # Imperative demo apps (ROS1 CMU ARE, ROS2 Nav2). Registered after the
+    # declarative Capability App verbs so those keep priority on any collision.
+    add_demo_app_subparsers(app_subparsers)
 
     # Native Agent (rosclaw-agentd) + chat
     from rosclaw.agentd.cli import add_agent_subparsers, dispatch_agent_command

@@ -102,3 +102,7 @@ generated/
 node_modules/
 /agentd/
 /config.yaml
+
+# Large CMU ARE mesh assets are kept local and are not committed. They are
+# fetched by vehicle_simulator/mesh/download_environments.sh (~600MB per env).
+third_party/**/vehicle_simulator/mesh/

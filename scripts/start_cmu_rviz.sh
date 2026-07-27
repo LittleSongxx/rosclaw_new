@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${ROOT_DIR}"
+
+# ROS1 CMU ARE stack, kept separate from the repo-root docker-compose.yml.
+CMU_COMPOSE_FILE="${CMU_COMPOSE_FILE:-docker/ros1/docker-compose.ros1-are.yml}"
+
+CONFIG_VARS=(
+  DISABLE_ROS1_EOL_WARNINGS
+  HEADLESS
+  USE_RVIZ
+  START_ARIADNE2
+  ARIADNE2_ACTIVE
+  ARIADNE2_USE_RVIZ
+  ARIADNE2_LAYERED_PROJECTION
+  ARIADNE2_PROJECTION_Z_BELOW
+  ARIADNE2_PROJECTION_Z_ABOVE
+  ARIADNE2_PROJECTION_MIN_KNOWN_CELLS
+  ARIADNE2_PROJECTION_ROBOT_CHECK_RADIUS
+  ARIADNE2_PROJECTION_MIN_ROBOT_FREE_CELLS
+  ARIADNE2_PROJECTION_OVERLAY_RADIUS
+  SPAWN_CAMERA
+  CMU_ARE_WORLD
+  LIBGL_ALWAYS_SOFTWARE
+  DETACHED
+  DISPLAY
+  WAYLAND_DISPLAY
+  ROSCLAW_XDG_RUNTIME_DIR
+  QT_QPA_PLATFORM
+)
+declare -A PRESET_ENV=()
+declare -A PRESET_VALUE=()
+for var_name in "${CONFIG_VARS[@]}"; do
+  if [[ -v "${var_name}" ]]; then
+    PRESET_ENV["${var_name}"]=1
+    PRESET_VALUE["${var_name}"]="${!var_name}"
+  fi
+done
+
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
+for var_name in "${CONFIG_VARS[@]}"; do
+  if [[ -n "${PRESET_ENV[${var_name}]:-}" ]]; then
+    export "${var_name}=${PRESET_VALUE[${var_name}]}"
+  fi
+done
+
+export DISABLE_ROS1_EOL_WARNINGS="${DISABLE_ROS1_EOL_WARNINGS:-1}"
+export HEADLESS="${HEADLESS:-true}"
+export USE_RVIZ="${USE_RVIZ:-true}"
+export START_ARIADNE2="${START_ARIADNE2:-true}"
+export ARIADNE2_ACTIVE="${ARIADNE2_ACTIVE:-false}"
+export ARIADNE2_USE_RVIZ="${ARIADNE2_USE_RVIZ:-false}"
+export ARIADNE2_LAYERED_PROJECTION="${ARIADNE2_LAYERED_PROJECTION:-false}"
+export ARIADNE2_PROJECTION_Z_BELOW="${ARIADNE2_PROJECTION_Z_BELOW:-1.0}"
+export ARIADNE2_PROJECTION_Z_ABOVE="${ARIADNE2_PROJECTION_Z_ABOVE:-1.6}"
+export ARIADNE2_PROJECTION_MIN_KNOWN_CELLS="${ARIADNE2_PROJECTION_MIN_KNOWN_CELLS:-80}"
+export ARIADNE2_PROJECTION_ROBOT_CHECK_RADIUS="${ARIADNE2_PROJECTION_ROBOT_CHECK_RADIUS:-1.5}"
+export ARIADNE2_PROJECTION_MIN_ROBOT_FREE_CELLS="${ARIADNE2_PROJECTION_MIN_ROBOT_FREE_CELLS:-4}"
+export ARIADNE2_PROJECTION_OVERLAY_RADIUS="${ARIADNE2_PROJECTION_OVERLAY_RADIUS:-8.0}"
+export SPAWN_CAMERA="${SPAWN_CAMERA:-false}"
+export CMU_ARE_WORLD="${CMU_ARE_WORLD:-campus}"
+export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+export DETACHED="${DETACHED:-false}"
+export ROSCLAW_XDG_RUNTIME_DIR="${ROSCLAW_XDG_RUNTIME_DIR:-/tmp/runtime-root}"
+export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
+
+if [[ "${USE_RVIZ}" == "true" || "${ARIADNE2_USE_RVIZ}" == "true" ]]; then
+  export DISPLAY="${DISPLAY:-:0}"
+  export XDG_RUNTIME_DIR="${ROSCLAW_XDG_RUNTIME_DIR}"
+  export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+fi
+
+echo "[ROSClaw] Starting CMU ARE + RViz"
+echo "[ROSClaw] World=${CMU_ARE_WORLD} HEADLESS=${HEADLESS} CMU_RVIZ=${USE_RVIZ} ARIADNE2_RVIZ=${ARIADNE2_USE_RVIZ} SPAWN_CAMERA=${SPAWN_CAMERA}"
+echo "[ROSClaw] ARiADNE2_LAYERED_PROJECTION=${ARIADNE2_LAYERED_PROJECTION} Z_BELOW=${ARIADNE2_PROJECTION_Z_BELOW} Z_ABOVE=${ARIADNE2_PROJECTION_Z_ABOVE} MIN_KNOWN_CELLS=${ARIADNE2_PROJECTION_MIN_KNOWN_CELLS} ROBOT_CHECK_RADIUS=${ARIADNE2_PROJECTION_ROBOT_CHECK_RADIUS} MIN_ROBOT_FREE_CELLS=${ARIADNE2_PROJECTION_MIN_ROBOT_FREE_CELLS} OVERLAY_RADIUS=${ARIADNE2_PROJECTION_OVERLAY_RADIUS}"
+if [[ "${USE_RVIZ}" == "true" || "${ARIADNE2_USE_RVIZ}" == "true" ]]; then
+  echo "[ROSClaw] Display=${DISPLAY:-<unset>} Wayland=${WAYLAND_DISPLAY:-<unset>} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>}"
+fi
+if [[ "${DETACHED}" == "true" ]]; then
+  echo "[ROSClaw] Starting in detached mode. Use scripts/stop_cmu_rviz.sh to stop."
+  docker compose -f "${CMU_COMPOSE_FILE}" up -d --build rosclaw
+else
+  echo "[ROSClaw] Keep this terminal open. Use scripts/stop_cmu_rviz.sh from another terminal to stop."
+  docker compose -f "${CMU_COMPOSE_FILE}" up --build rosclaw
+fi

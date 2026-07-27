@@ -1,0 +1,82 @@
+# ROSClaw ROS1/CMU Autonomous Exploration image.
+
+FROM osrf/ros:noetic-desktop-full
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV ROS_DISTRO=noetic
+ENV ROSCLAW_WORKDIR=/opt/rosclaw
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV LIBGL_ALWAYS_SOFTWARE=1
+ENV MPLBACKEND=Agg
+ENV DISABLE_ROS1_EOL_WARNINGS=1
+
+SHELL ["/bin/bash", "-c"]
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash-completion \
+    build-essential \
+    cmake \
+    curl \
+    git \
+    liboctomap-dev \
+    libpcl-dev \
+    libusb-dev \
+    pybind11-dev \
+    python3-catkin-tools \
+    python3-matplotlib \
+    python3-numpy \
+    python3-pip \
+    python3-pybind11 \
+    python3-rospkg \
+    python3-skimage \
+    python3-yaml \
+    qtbase5-dev \
+    ros-noetic-gazebo-plugins \
+    ros-noetic-gazebo-ros \
+    ros-noetic-gazebo-ros-pkgs \
+    ros-noetic-joy \
+    ros-noetic-octomap-msgs \
+    ros-noetic-octomap-ros \
+    ros-noetic-octomap-server \
+    ros-noetic-pcl-conversions \
+    ros-noetic-pcl-ros \
+    ros-noetic-robot-state-publisher \
+    ros-noetic-rviz \
+    ros-noetic-tf \
+    ros-noetic-xacro \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --no-cache-dir --upgrade pip "setuptools<80" wheel \
+    && python3 -m pip install --no-cache-dir \
+        "torch==1.13.1+cpu" \
+        --extra-index-url https://download.pytorch.org/whl/cpu
+RUN python3 -m pip install --no-cache-dir \
+    "fastapi>=0.100.0" \
+    "uvicorn>=0.23.0" \
+    "websockets>=12.0"
+
+WORKDIR /opt/rosclaw
+
+COPY third_party/ ./third_party/
+
+RUN mkdir -p /opt/rosclaw/ros1_ws/src /opt/rosclaw/practice_data /opt/rosclaw/rosclaw_data \
+    && cp -a /opt/rosclaw/third_party/ros1/are/src/. /opt/rosclaw/ros1_ws/src/ \
+    && source /opt/ros/noetic/setup.bash \
+    && cd /opt/rosclaw/ros1_ws/src \
+    && catkin_init_workspace \
+    && cd /opt/rosclaw/ros1_ws \
+    && catkin_make -DCMAKE_BUILD_TYPE=Release
+
+COPY src/ ./src/
+COPY docker/ ./docker/
+COPY README.md pyproject.toml rosclaw.yaml ./
+
+RUN chmod +x /opt/rosclaw/docker/scripts/rosclaw-noetic-are-entrypoint.sh \
+    /opt/rosclaw/docker/scripts/rosclaw-noetic-are-launch.sh \
+    && ln -s /opt/rosclaw/docker/scripts/rosclaw-noetic-are-launch.sh /usr/local/bin/rosclaw-are-launch \
+    && printf '#!/usr/bin/env bash\nORIG_ARGS=("$@")\nset --\nsource /opt/ros/noetic/setup.bash\nsource /opt/rosclaw/ros1_ws/devel/setup.bash\nset -- "${ORIG_ARGS[@]}"\nexport PYTHONPATH=/opt/rosclaw/src:${PYTHONPATH:-}\nexec python3 -m rosclaw.cli "$@"\n' > /usr/local/bin/rosclaw \
+    && chmod +x /usr/local/bin/rosclaw
+
+ENTRYPOINT ["/opt/rosclaw/docker/scripts/rosclaw-noetic-are-entrypoint.sh"]
+CMD ["rosclaw-are-launch"]
