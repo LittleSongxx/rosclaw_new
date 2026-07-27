@@ -33,6 +33,7 @@ class GoalForgeScenario:
     observation_noise_m: float
     joint_zero_bias_rad: float
     disturbance_n: float
+    ball_launch_delay_sec: float = 0.0
     reachable: bool = True
 
     def __post_init__(self) -> None:
@@ -57,6 +58,7 @@ class GoalForgeScenario:
             "observation_noise_m": (self.observation_noise_m, 0.0, 0.08),
             "joint_zero_bias_rad": (self.joint_zero_bias_rad, -0.04, 0.04),
             "disturbance_n": (self.disturbance_n, 0.0, 80.0),
+            "ball_launch_delay_sec": (self.ball_launch_delay_sec, 0.0, 5.0),
         }
         for name, (value, minimum, maximum) in bounds.items():
             if not math.isfinite(value) or not minimum <= value <= maximum:
@@ -152,6 +154,7 @@ def generate_goalforge_scenarios(
                 observation_noise_m=(0.0 if generation < 8 else rng.uniform(0.0, 0.06)),
                 joint_zero_bias_rad=(0.0 if generation < 5 else rng.uniform(-0.03, 0.03)),
                 disturbance_n=(0.0 if generation < 7 else rng.uniform(0.0, 65.0)),
+                ball_launch_delay_sec=(rng.uniform(3.2, 4.2) if moving else 0.0),
             )
         )
     ledger.assert_disjoint()

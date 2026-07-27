@@ -495,6 +495,7 @@ class G1MuJoCoBackend:
         phase_repeat_accumulator = 0.0
         next_feedback_time = 0.0
         latest_support_slip = 0.0
+        moving_ball_launched = scenario.ball_launch_delay_sec <= 0.0
 
         for frame in range(total_control_frames):
             if feedforward is not None:
@@ -566,6 +567,13 @@ class G1MuJoCoBackend:
             right_ground_force = 0.0
             ball_contact_point: np.ndarray = np.zeros(3, dtype=np.float64)
             for _ in range(10):
+                if not moving_ball_launched and data.time + 1e-12 >= scenario.ball_launch_delay_sec:
+                    data.qvel[ids.ball_qvel : ids.ball_qvel + 3] = (
+                        scenario.ball_velocity_x_mps,
+                        scenario.ball_velocity_y_mps,
+                        0.0,
+                    )
+                    moving_ball_launched = True
                 if feedback_runtime is not None and data.time + 1e-12 >= next_feedback_time:
                     feedback_phase = (
                         policy_phase
@@ -581,6 +589,7 @@ class G1MuJoCoBackend:
                         base_target=delayed_target,
                         support_slip=latest_support_slip,
                         contact_detected=contact_observed,
+                        control_latency_ms=scenario.control_latency_ms,
                     )
                     feedback_residual = feedback_effect.joint_residual
                     feedback_phase_rate = feedback_effect.kick_phase_rate
@@ -921,9 +930,13 @@ def _reset_ball(model: Any, data: Any, scenario: GoalForgeScenario) -> None:
     data.qpos[qpos : qpos + 3] = (scenario.ball_x_m, scenario.ball_y_m, 0.115)
     data.qpos[qpos + 3 : qpos + 7] = (1.0, 0.0, 0.0, 0.0)
     data.qvel[qvel : qvel + 3] = (
-        scenario.ball_velocity_x_mps,
-        scenario.ball_velocity_y_mps,
-        0.0,
+        (
+            scenario.ball_velocity_x_mps,
+            scenario.ball_velocity_y_mps,
+            0.0,
+        )
+        if scenario.ball_launch_delay_sec <= 0.0
+        else (0.0, 0.0, 0.0)
     )
     data.qvel[qvel + 3 : qvel + 6] = 0.0
 
@@ -1131,12 +1144,19 @@ def _feedback_effect(
     base_target: np.ndarray,
     support_slip: float,
     contact_detected: bool,
+    control_latency_ms: float,
 ) -> _FeedbackEffect:
     """Run one feedback tick from MuJoCo state without crossing the EventBus."""
 
     roll, pitch = _roll_pitch(data.xquat[ids.torso])
     com = data.subtree_com[ids.pelvis]
     support_y = float(data.xpos[ids.left_ankle][1])
+    ball_position = np.asarray(data.xpos[ids.ball], dtype=np.float64)
+    foot_position = np.asarray(data.xpos[ids.right_ankle], dtype=np.float64)
+    ball_velocity = np.asarray(data.qvel[ids.ball_qvel : ids.ball_qvel + 3], dtype=np.float64)
+    foot_velocity = np.asarray(data.cvel[ids.right_ankle][3:6], dtype=np.float64)
+    relative_position = ball_position - foot_position
+    relative_velocity = ball_velocity - foot_velocity
     actual: dict[str, float] = {
         "torso_roll": roll,
         "torso_pitch": pitch,
@@ -1146,6 +1166,29 @@ def _feedback_effect(
         "ball_lateral_error_m": float(data.qpos[ids.ball_qpos + 1])
         - float(data.xpos[ids.right_ankle][1]),
         "contact_detected": float(contact_detected),
+        "ball_relative_x_m": float(relative_position[0]),
+        "ball_relative_y_m": float(relative_position[1]),
+        "ball_relative_z_m": float(relative_position[2]),
+        "ball_relative_vx_mps": float(relative_velocity[0]),
+        "ball_relative_vy_mps": float(relative_velocity[1]),
+        "ball_relative_vz_mps": float(relative_velocity[2]),
+        "control_latency_ms": control_latency_ms,
+        "energy_margin": float(
+            np.clip(
+                1.0
+                - np.max(
+                    np.abs(np.asarray(data.ctrl, dtype=np.float64))
+                    / np.asarray(G1_HARD_TORQUE_LIMITS, dtype=np.float64)
+                ),
+                0.0,
+                1.0,
+            )
+        ),
+        "sensor_quality": float(
+            np.all(np.isfinite(data.qpos))
+            and np.all(np.isfinite(data.qvel))
+            and np.all(np.isfinite(data.ctrl))
+        ),
     }
     actual.update(
         {

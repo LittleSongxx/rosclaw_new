@@ -26,6 +26,18 @@ def main() -> int:
     if result is not None:
         return result
 
+    from rosclaw.continual.cli import dispatch_continual_argv
+
+    result = dispatch_continual_argv(sys.argv[1:])
+    if result is not None:
+        return result
+
+    from rosclaw.simforge.g1_hat_trick_cli import dispatch_hat_trick_argv
+
+    result = dispatch_hat_trick_argv(sys.argv[1:])
+    if result is not None:
+        return result
+
     from rosclaw.simforge.phase4_cli import dispatch_phase4_argv
 
     result = dispatch_phase4_argv(sys.argv[1:])
