@@ -94,6 +94,7 @@ Welcome to the ROSClaw documentation index. This directory contains all project 
 - **[validation/ROSCLAW_PHASE6_SECOND_STAGE_REPORT.md](validation/ROSCLAW_PHASE6_SECOND_STAGE_REPORT.md)** — Phase 6 second-stage Holdout, historical regression, ten-trial ILC, and canonical DDS evidence report.
 - **[validation/ROSCLAW_PHASE6_SELF_EVOLUTION_REPORT.md](validation/ROSCLAW_PHASE6_SELF_EVOLUTION_REPORT.md)** — Phase 6 evidence-to-candidate self-evolution loop, reloadable ILC artifact, F1-F15 gate, and rollback lineage report.
 - **[validation/ROSCLAW_PHASE7_1_RECOVERABLE_SERVICES_AND_SELF_MODEL.md](validation/ROSCLAW_PHASE7_1_RECOVERABLE_SERVICES_AND_SELF_MODEL.md)** — Phase 7.1 recoverable continual services, adaptation trigger, operational embodied-self model, and real-MuJoCo fail-closed validation.
+- **[validation/ROSCLAW_PHASE7_1_CEREBELLAR_RECOVERY.md](validation/ROSCLAW_PHASE7_1_CEREBELLAR_RECOVERY.md)** — Phase 7.1 contact-gated G1 post-kick cerebellar recovery, trajectory-derived wobble metrics, Regime Gate, strict A/B evidence, and stabilized Hat Trick video.
 - **[help/rosclaw-simforge-phase4-implementation-report.md](help/rosclaw-simforge-phase4-implementation-report.md)** — Phase 4 implementation, physical recovery, Practice flywheel, four-GPU screening, DDS chaos, proof hashes, and evidence ceiling.
 - **[INTEGRATION_GUIDE.md](INTEGRATION_GUIDE.md)** — Integration guide.
 - **[G1_SENSE_DEMO.md](G1_SENSE_DEMO.md)** — Unitree G1 sense demo.

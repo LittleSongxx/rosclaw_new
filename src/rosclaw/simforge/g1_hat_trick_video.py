@@ -29,6 +29,7 @@ class HatTrickVideoClip:
     success: bool
     target_error_m: float
     ball_speed_mps: float
+    tail_wobble_reduction: float
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,8 @@ class _Source:
     trajectory_hash: str
     trajectory: dict[str, np.ndarray]
     comparison: dict[str, np.ndarray] | None
+    recovery_metrics: dict[str, Any]
+    recovery_comparison: dict[str, Any]
 
 
 def render_goalforge_hat_trick_video(
@@ -171,6 +174,9 @@ def render_goalforge_hat_trick_video(
                 success=bool(source.result["success"]),
                 target_error_m=float(source.result["target_error_m"]),
                 ball_speed_mps=float(source.result["ball_speed_mps"]),
+                tail_wobble_reduction=float(
+                    source.recovery_comparison.get("tail_wobble_reduction", 0.0)
+                ),
             )
         )
         offset += duration
@@ -223,6 +229,8 @@ def _load_sources(report: dict[str, Any], checkout: Path) -> tuple[_Source, ...]
                 trajectory_hash=str(shot["trajectory_hash"]),
                 trajectory=trajectory,
                 comparison=comparison,
+                recovery_metrics=dict(shot.get("recovery_metrics") or {}),
+                recovery_comparison=dict(shot.get("recovery_comparison") or {}),
             )
         )
     return tuple(result)
@@ -248,13 +256,14 @@ def _load_trajectory(path: Path) -> dict[str, np.ndarray]:
 def _timeline(source: _Source, *, fps: int) -> tuple[float, ...]:
     contact = float(source.result["ball_contact_time_sec"])
     start = max(float(source.trajectory["time"][0]), contact - 2.7)
-    end = min(float(source.trajectory["time"][-1]), contact + 3.2)
+    end = min(float(source.trajectory["time"][-1]), contact + 7.5)
     segments = (
         (start, contact - 0.45, 1.35),
         (contact - 0.45, contact + 0.75, 0.45),
-        (contact + 0.75, end, 1.45),
+        (contact + 0.75, min(end, contact + 3.2), 1.45),
+        (min(end, contact + 3.2), end, 2.10),
     )
-    values = []
+    values: list[float] = []
     for segment_start, segment_end, speed in segments:
         if segment_end <= segment_start:
             continue
@@ -359,11 +368,17 @@ def _render_pose(
     data.qpos[7:36] = trajectory["joint_position"][index]
     data.qpos[ball_qpos : ball_qpos + 7] = trajectory["ball_pose"][index]
     mujoco.mj_forward(model, data)
-    if simulation_time >= contact_time + 0.12:
+    if contact_time + 0.12 <= simulation_time < contact_time + 2.2:
         camera.lookat[:] = (3.0, 0.0, 0.65)
         camera.distance = 6.1
         camera.azimuth = 90.0
         camera.elevation = -7.0
+    elif simulation_time >= contact_time + 2.2:
+        camera.lookat[:] = np.asarray(trajectory["pelvis_pose"][index, :3], dtype=np.float64)
+        camera.lookat[2] = 0.72
+        camera.distance = 3.2
+        camera.azimuth = 92.0
+        camera.elevation = -8.0
     else:
         camera.lookat[:] = (1.4, 0.0, 0.72)
         camera.distance = 3.6
@@ -468,9 +483,13 @@ def _ffmpeg_command(
     for source, duration in zip(sources, durations, strict=True):
         end = offset + duration
         result = source.result
+        wobble_reduction = 100.0 * float(
+            source.recovery_comparison.get("tail_wobble_reduction", 0.0)
+        )
         metrics = (
             f"{source.title}  ·  {float(result['ball_speed_mps']):.2f} m/s  ·  "
-            f"error {float(result['target_error_m']):.3f} m  ·  STABLE"
+            f"error {float(result['target_error_m']):.3f} m  ·  "
+            f"RECOVERY WOBBLE -{wobble_reduction:.0f} pct"
         )
         filters.append(
             f"drawtext={font_option}text='{metrics}':x=34:y=68:fontsize=22:"
@@ -480,7 +499,7 @@ def _ffmpeg_command(
             filters.extend(
                 (
                     f"drawtext={font_option}text='FEEDBACK OFF · FALL / UNSAFE':x=120:y=145:fontsize=22:fontcolor=0xFF6262:enable='between(t,{offset:.6f},{end:.6f})'",
-                    f"drawtext={font_option}text='FEEDBACK ON · RESCUED GOAL':x=760:y=145:fontsize=22:fontcolor=0x65F59A:enable='between(t,{offset:.6f},{end:.6f})'",
+                    f"drawtext={font_option}text='FEEDBACK + CEREBELLUM · GOAL + SETTLED':x=700:y=145:fontsize=20:fontcolor=0x65F59A:enable='between(t,{offset:.6f},{end:.6f})'",
                 )
             )
         offset = end

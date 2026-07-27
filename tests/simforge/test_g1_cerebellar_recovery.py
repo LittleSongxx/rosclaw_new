@@ -1,0 +1,222 @@
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from rosclaw.simforge.g1_cerebellar_recovery import (
+    G1CerebellarRecoveryConfig,
+    G1CerebellarRecoveryController,
+    evaluate_g1_cerebellar_recovery_regime,
+)
+from rosclaw.simforge.g1_recovery_quality import (
+    compare_g1_recovery,
+    measure_g1_recovery_quality,
+)
+
+_HASH_A = "sha256:" + "1" * 64
+_HASH_B = "sha256:" + "2" * 64
+
+
+def _controller() -> G1CerebellarRecoveryController:
+    return G1CerebellarRecoveryController(
+        body_hash=_HASH_A,
+        motion_hash=_HASH_B,
+        regime_commitment="sha256:" + "3" * 64,
+        regime_eligible=True,
+        regime_reasons=(),
+        standing_pose=np.zeros(29, dtype=np.float64),
+    )
+
+
+def test_recovery_is_transparent_until_contact_and_kick_foot_landing() -> None:
+    controller = _controller()
+    target = np.linspace(-0.2, 0.2, 29)
+
+    no_contact = controller.adapt_target(
+        target=target,
+        policy_frame=500,
+        timestamp_sec=10.0,
+        ball_contact_detected=False,
+        left_support=True,
+        right_support=True,
+    )
+    contact_without_landing = controller.adapt_target(
+        target=target,
+        policy_frame=500,
+        timestamp_sec=10.02,
+        ball_contact_detected=True,
+        left_support=True,
+        right_support=False,
+    )
+
+    assert not no_contact.active
+    assert not contact_without_landing.active
+    np.testing.assert_array_equal(no_contact.target, target)
+    np.testing.assert_array_equal(contact_without_landing.target, target)
+
+
+def test_recovery_smoothly_blends_qualified_pose_after_landing() -> None:
+    controller = _controller()
+    target = np.ones(29, dtype=np.float64)
+    controller.adapt_target(
+        target=target,
+        policy_frame=300,
+        timestamp_sec=6.0,
+        ball_contact_detected=True,
+        left_support=True,
+        right_support=True,
+    )
+
+    halfway = controller.adapt_target(
+        target=target,
+        policy_frame=470,
+        timestamp_sec=9.0,
+        ball_contact_detected=True,
+        left_support=True,
+        right_support=True,
+    )
+    complete = controller.adapt_target(
+        target=target,
+        policy_frame=520,
+        timestamp_sec=10.0,
+        ball_contact_detected=True,
+        left_support=True,
+        right_support=True,
+    )
+
+    assert halfway.active
+    assert halfway.blend_fraction == 0.5
+    assert complete.blend_fraction == 1.0
+    # Non-roll joints receive only the 30% standing-pose blend.
+    assert complete.target[0] == 0.7
+    # Left hip roll also receives the bounded -0.05 rad posture bias.
+    assert complete.target[1] == pytest.approx(0.65)
+    receipt = controller.build_receipt(strict_replay=True)
+    assert receipt.contact_latched
+    assert receipt.kick_foot_landing_latched
+    assert receipt.activation_policy_frame == 470
+    assert receipt.peak_blend_fraction == 1.0
+    assert receipt.strict_replay
+
+
+def test_recovery_quality_detects_lower_wobble_and_preserved_goal() -> None:
+    baseline_trace = _trajectory(wobble_scale=1.0)
+    candidate_trace = _trajectory(wobble_scale=0.35)
+    baseline = measure_g1_recovery_quality(baseline_trace)
+    candidate = measure_g1_recovery_quality(candidate_trace)
+    result = {
+        "success": True,
+        "goal_crossed": True,
+        "target_zone_hit": True,
+        "target_error_m": 0.2,
+        "ball_speed_mps": 6.0,
+        "post_kick_fall": False,
+        "joint_limit_violation": False,
+        "torque_limit_violation": False,
+        "support_foot_slip_m": 0.01,
+    }
+
+    comparison = compare_g1_recovery(
+        baseline=baseline,
+        candidate=candidate,
+        baseline_result=result,
+        candidate_result=result,
+    )
+
+    assert comparison.passed
+    assert comparison.tail_wobble_reduction > 0.5
+    assert comparison.tail_angular_velocity_reduction > 0.5
+    assert candidate.terminal_bilateral_support
+    assert candidate.settling_time_sec is not None
+
+
+def test_recovery_regime_gate_rejects_uncalibrated_dynamics() -> None:
+    config = G1CerebellarRecoveryConfig()
+
+    eligible, reasons = evaluate_g1_cerebellar_recovery_regime(
+        support_friction=1.0,
+        control_latency_ms=0.0,
+        disturbance_n=80.0,
+        config=config,
+    )
+    low_grip, low_grip_reasons = evaluate_g1_cerebellar_recovery_regime(
+        support_friction=0.8,
+        control_latency_ms=0.0,
+        disturbance_n=0.0,
+        config=config,
+    )
+    medium_push, medium_push_reasons = evaluate_g1_cerebellar_recovery_regime(
+        support_friction=1.0,
+        control_latency_ms=0.0,
+        disturbance_n=60.0,
+        config=config,
+    )
+
+    assert eligible and not reasons
+    assert not low_grip
+    assert low_grip_reasons == ("support_friction_below_calibrated_range",)
+    assert not medium_push
+    assert medium_push_reasons == ("disturbance_below_calibrated_recovery_range",)
+
+    blocked = G1CerebellarRecoveryController(
+        body_hash=_HASH_A,
+        motion_hash=_HASH_B,
+        regime_commitment="sha256:" + "4" * 64,
+        regime_eligible=False,
+        regime_reasons=low_grip_reasons,
+        standing_pose=np.zeros(29, dtype=np.float64),
+    )
+    effect = blocked.adapt_target(
+        target=np.ones(29, dtype=np.float64),
+        policy_frame=520,
+        timestamp_sec=10.0,
+        ball_contact_detected=True,
+        left_support=True,
+        right_support=True,
+    )
+    receipt = blocked.build_receipt(strict_replay=True)
+    assert not effect.active
+    np.testing.assert_array_equal(effect.target, np.ones(29))
+    assert not receipt.regime_eligible
+    assert receipt.regime_reasons == low_grip_reasons
+
+
+def _trajectory(*, wobble_scale: float) -> dict[str, np.ndarray]:
+    time = np.arange(0.0, 8.02, 0.02)
+    count = len(time)
+    contact_index = 50
+    elapsed = np.maximum(0.0, time - time[contact_index])
+    envelope = np.exp(-0.45 * elapsed)
+    roll = wobble_scale * 0.12 * envelope * np.sin(2.0 * elapsed)
+    pitch = wobble_scale * 0.06 * envelope * np.sin(1.5 * elapsed)
+    quaternion = np.zeros((count, 4), dtype=np.float64)
+    # Small roll/pitch fixture; the exact yaw-free quaternion is sufficient for
+    # the metric's deterministic Euler conversion.
+    cr, sr = np.cos(roll / 2.0), np.sin(roll / 2.0)
+    cp, sp = np.cos(pitch / 2.0), np.sin(pitch / 2.0)
+    quaternion[:, 0] = cr * cp
+    quaternion[:, 1] = sr * cp
+    quaternion[:, 2] = cr * sp
+    quaternion[:, 3] = -sr * sp
+    pelvis = np.zeros((count, 7), dtype=np.float64)
+    pelvis[:, 0] = wobble_scale * 0.04 * envelope * np.sin(1.8 * elapsed)
+    pelvis[:, 1] = wobble_scale * 0.05 * envelope * np.cos(1.6 * elapsed)
+    pelvis[:, 2] = 0.78
+    pelvis[:, 3] = 1.0
+    joint_velocity = np.repeat(
+        (wobble_scale * 0.20 * envelope * np.sin(1.7 * elapsed))[:, None],
+        29,
+        axis=1,
+    )
+    impulse = np.zeros(count, dtype=np.float64)
+    impulse[contact_index:] = 1.0
+    return {
+        "time": time,
+        "torso_quaternion": quaternion,
+        "pelvis_pose": pelvis,
+        "joint_velocity": joint_velocity,
+        "com_y_relative": wobble_scale * 0.04 * envelope * np.sin(1.4 * elapsed),
+        "left_foot_contact": np.ones(count, dtype=bool),
+        "right_foot_contact": np.ones(count, dtype=bool),
+        "contact_impulse": impulse,
+    }
