@@ -1,0 +1,1 @@
+"""Embodied self-model tests."""

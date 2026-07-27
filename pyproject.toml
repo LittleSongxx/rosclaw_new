@@ -82,6 +82,11 @@ knowledge = [
 lerobot = [
     "lerobot>=0.6,<0.7",
 ]
+rl = [
+    # Phase 7 continual residual learning is optional and never imported by
+    # the synchronous control plane.
+    "torch>=2.7,<3",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",

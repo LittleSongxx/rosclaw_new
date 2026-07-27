@@ -2,6 +2,10 @@
 
 from rosclaw.feedback.controllers.balance import G1BalanceReflexConfig, G1BalanceReflexController
 from rosclaw.feedback.controllers.base import FeedbackController, ZeroResidualController
+from rosclaw.feedback.controllers.cerebellum import (
+    G1CerebellumConfig,
+    G1CerebellumController,
+)
 from rosclaw.feedback.controllers.kick_skill import (
     G1KickSkillFeedbackConfig,
     G1KickSkillFeedbackController,
@@ -13,6 +17,8 @@ __all__ = [
     "FeedbackController",
     "G1BalanceReflexConfig",
     "G1BalanceReflexController",
+    "G1CerebellumConfig",
+    "G1CerebellumController",
     "G1KickSkillFeedbackConfig",
     "G1KickSkillFeedbackController",
     "LatchedPhaseGate",
