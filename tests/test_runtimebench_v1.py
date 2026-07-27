@@ -240,16 +240,13 @@ class TestForgeExtension:
         assert (output_dir / "README.md").exists(), "README.md not generated"
 
     def test_e2_forge_validate(self):
-        """E2: Bundle validate checks safety requirements."""
+        """E2: Generated MCP bundle validates against its own contract."""
         output_dir = Path("/tmp/test_runtimebench_forge_bundle/test_sensor")
         if not output_dir.exists():
             pytest.skip("E1 bundle not generated")
         rc, out, err = _rosclaw_cli("forge", "validate", str(output_dir))
-        # SDK-to-MCP bundles don't include robot e-URDF files, so validate
-        # reports missing files — but the safety hooks are present.
-        assert "safety_hooks" in out.lower() or "Missing required file" in out
-        # The generated bundle has async_safe and schema_complete from E1 output
-        assert (output_dir / "mcp_server.py").exists()
+        assert rc == 0, f"generated MCP bundle failed validation: {out}\n{err}"
+        assert "YES" in out
 
 
 # ---------------------------------------------------------------------------

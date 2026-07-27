@@ -13,7 +13,9 @@ Targets:
 
 import ast
 import json
+from argparse import Namespace
 
+from rosclaw.cli import cmd_forge_validate
 from rosclaw.forge.bundle_compiler import BundleCompiler
 from rosclaw.sdk_to_mcp import AssetCompiler, MCPManifestBuilder
 
@@ -85,6 +87,9 @@ class TestScenarioFForgeBundle:
         # Auto-injected safety hooks must be present
         assert bundle.validation["safety_hooks"] is True
         assert bundle.validation["preemption_ready"] is True
+        assert bundle.validation["call_handler"] is True
+        assert bundle.validation["fails_closed"] is True
+        assert bundle.validation["runnable"] is True
         # Unsafe bundle stays in staging, never production
         assert bundle.staging_ready is True
         assert bundle.production_ready is False
@@ -167,3 +172,26 @@ class TestScenarioFForgeBundle:
         # Safety validation
         assert bundle.validation["safety_hooks"] is True
         assert bundle.staging_ready is True
+
+    def test_scenario_f_validate_preserves_eurdf_contract(self, tmp_path):
+        """F8: MCP detection must not weaken existing e-URDF validation."""
+        for filename in ("robot.eurdf.yaml", "safety.yaml", "capabilities.yaml"):
+            (tmp_path / filename).write_text("{}\n", encoding="utf-8")
+
+        assert cmd_forge_validate(Namespace(bundle_path=str(tmp_path))) == 0
+
+    def test_scenario_f_validate_rejects_open_mcp_stub(self, tmp_path):
+        """F9: An MCP bundle without a fail-closed handler is rejected."""
+        (tmp_path / "mcp_server.py").write_text(
+            "async def list_tools(): pass\nasync def call_tool(): pass\n"
+            'if __name__ == "__main__": pass\n',
+            encoding="utf-8",
+        )
+        for filename in ("skill_manifest.json", "provider_manifest.json"):
+            (tmp_path / filename).write_text("{}\n", encoding="utf-8")
+        (tmp_path / "README.md").write_text("generated bundle\n", encoding="utf-8")
+        tests_dir = tmp_path / "tests"
+        tests_dir.mkdir()
+        (tests_dir / "test_generated.py").write_text("def test_stub(): pass\n", encoding="utf-8")
+
+        assert cmd_forge_validate(Namespace(bundle_path=str(tmp_path))) == 1

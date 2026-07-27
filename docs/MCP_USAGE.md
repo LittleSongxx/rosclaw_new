@@ -43,6 +43,8 @@ rosclaw forge sdk-to-mcp \
   --output bundles/my_sensor
 ```
 
+生成的 handler 默认返回 `GENERATED_ADAPTER_REQUIRED`，不会直接操作硬件。必须由开发者补齐经过评审的适配器与安全契约，才能进入真机执行路径。
+
 生成内容：
 - `mcp_server.py` — MCP Server stub
 - `skill_manifest.json` — Skill 注册清单
