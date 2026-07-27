@@ -1,0 +1,119 @@
+schema_version: rosclaw.embodiment_card.v1
+robot_id: cmu_are
+aliases: [cmu, cmu_are, are, ariadne2]
+body_type: differential_drive_mobile_base
+ros_version: 1
+ros_distro: noetic
+
+# CMU Autonomous Exploration Environment (ARE). The local planner owns the
+# control loop: a goal is a single /way_point publish, and the planner produces
+# collision-free /cmd_vel itself. External /cmd_vel publishing fights the
+# planner and is therefore discouraged.
+preferred_interfaces:
+  - capability_id: cmu_are.navigate_to_waypoint
+    ros_kind: topic
+    ros_name: /way_point
+    ros_type: geometry_msgs/PointStamped
+    reason: "The CMU local planner plans and executes a collision-free path to the point."
+    args_schema:
+      point:
+        x: float
+        y: float
+        z: float
+      frame_id: str
+
+  - capability_id: cmu_are.set_speed
+    ros_kind: topic
+    ros_name: /speed
+    ros_type: std_msgs/Float32
+    reason: "Bounded scalar speed limit consumed by the local planner."
+    args_schema:
+      data: float
+
+  - capability_id: cmu_are.stop
+    ros_kind: topic
+    ros_name: /stop
+    ros_type: std_msgs/Int8
+    reason: "Latched stop flag; the planner halts the base while it is set."
+    args_schema:
+      data: int
+
+  - capability_id: cmu_are.exploration_control
+    ros_kind: topic
+    ros_name: /rosclaw/exploration_control
+    ros_type: std_msgs/String
+    reason: "ARiADNE2 exploration lifecycle (start/pause/resume/stop)."
+    args_schema:
+      data: str
+
+observation_interfaces:
+  - capability_id: cmu_are.state_estimation
+    ros_kind: topic
+    ros_name: /state_estimation
+    ros_type: nav_msgs/Odometry
+    reason: "Odometry used for goal-reached checks and geofence evaluation."
+
+  - capability_id: cmu_are.registered_scan
+    ros_kind: topic
+    ros_name: /registered_scan
+    ros_type: sensor_msgs/PointCloud2
+
+  - capability_id: cmu_are.terrain_map
+    ros_kind: topic
+    ros_name: /terrain_map
+    ros_type: sensor_msgs/PointCloud2
+
+  - capability_id: cmu_are.planned_path
+    ros_kind: topic
+    ros_name: /path
+    ros_type: nav_msgs/Path
+
+discouraged_interfaces:
+  - ros_kind: topic
+    ros_name: /cmd_vel
+    reason: "The CMU local planner publishes cmd_vel; external publishes conflict with it."
+
+safety_defaults:
+  max_linear_velocity: 2.0
+  max_angular_velocity: 1.0
+  max_motion_duration_sec: 120.0
+  require_stop_guard_for_velocity: true
+  require_obstacle_check_for_motion: true
+
+# Geofence and command-magnitude limits enforced before a goal is published.
+# These are the declarative source of truth for the values that used to be
+# hardcoded in rosclaw.apps.cmu_are_bridge.
+operational_limits:
+  # Absolute goal coordinates must fall inside this axis-aligned box, in the
+  # map frame. Also caps the LLM-parsed 'absolute' intent.
+  max_absolute_coordinate_m: 100.0
+  # Largest single relative move ("go forward N meters").
+  max_relative_move_m: 20.0
+  # Largest radius for a generated circle task.
+  max_circle_radius_m: 6.0
+  # Maximum number of waypoints an LLM may emit for one instruction.
+  max_sequence_steps: 8
+  # Published /speed ceiling.
+  max_speed: 2.0
+  # Goal-reached tolerance.
+  default_tolerance_m: 1.5
+
+# Optional hard geofence. When present, every goal is checked against it in
+# addition to max_absolute_coordinate_m. Supports either explicit x/y/z ranges
+# (as below) or {type: bounding_box, center: [...], dimensions: [...]}.
+workspace_boundaries:
+  x: [-100.0, 100.0]
+  y: [-100.0, 100.0]
+  z: [-10.0, 10.0]
+
+preconditions:
+  cmu_are.navigate_to_waypoint:
+    - state_estimation_active
+    - terrain_map_ready
+    - goal within workspace_boundaries
+  cmu_are.exploration_control:
+    - state_estimation_active
+
+recovery_capabilities:
+  - cmu_are.stop
+  - cmu_are.navigate_to_waypoint

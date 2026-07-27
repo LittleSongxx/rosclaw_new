@@ -3,8 +3,11 @@
 import pytest
 
 from rosclaw.apps.cmu_are_bridge import (
+    CmuAreBridge,
     CmuAreParseError,
     _validate_llm_intent,
+    _validate_llm_task,
+    parse_cmu_instruction,
     DEFAULT_CMU_MAX_ABSOLUTE_COORDINATE,
 )
 
@@ -142,4 +145,122 @@ def test_absolute_intent_beyond_boundary_is_rejected():
             places={},
             current_pose=None,
             max_relative_m=20.0,
+        )
+
+
+# ----------------------------------------------------------------------
+# The deterministic (regex) parse path must be bounded too.
+#
+# The original patch only bounded the LLM-parsed path, so `x=1000000` went
+# straight through the `_COORD_RE` branch unchecked. Both paths now share
+# `_absolute_intent`.
+# ----------------------------------------------------------------------
+def test_deterministic_path_enforces_coordinate_bounds():
+    with pytest.raises(CmuAreParseError, match="absolute x coordinate.*exceeds safety limit"):
+        parse_cmu_instruction("x=1000000, y=-500000")
+
+
+def test_deterministic_path_enforces_y_coordinate_bounds():
+    with pytest.raises(CmuAreParseError, match="absolute y coordinate.*exceeds safety limit"):
+        parse_cmu_instruction("x=1.0, y=-500000")
+
+
+def test_deterministic_path_accepts_in_bounds_coordinates():
+    intent = parse_cmu_instruction("x=12.5, y=-3.0")
+
+    assert intent.type == "absolute"
+    assert intent.x == 12.5
+    assert intent.y == -3.0
+    assert intent.source == "deterministic"
+
+
+def test_deterministic_path_honours_a_tighter_injected_limit():
+    """The embodiment card can tighten the cap below the module default."""
+
+    with pytest.raises(CmuAreParseError, match=r"exceeds safety limit ±10\.000m"):
+        parse_cmu_instruction("x=50.0, y=0.0", max_absolute_coordinate_m=10.0)
+
+    intent = parse_cmu_instruction("x=9.0, y=0.0", max_absolute_coordinate_m=10.0)
+    assert intent.x == 9.0
+
+
+def test_deterministic_path_boundary_is_inclusive():
+    max_coord = DEFAULT_CMU_MAX_ABSOLUTE_COORDINATE
+
+    intent = parse_cmu_instruction(f"x={max_coord}, y={-max_coord}")
+
+    assert intent.x == max_coord
+    assert intent.y == -max_coord
+
+
+def test_llm_intent_honours_a_tighter_injected_limit():
+    data = {"type": "absolute", "x": 50.0, "y": 0.0}
+
+    with pytest.raises(CmuAreParseError, match=r"exceeds safety limit ±10\.000m"):
+        _validate_llm_intent(
+            data,
+            instruction="go to 50, 0",
+            places={},
+            current_pose=None,
+            max_relative_m=20.0,
+            max_absolute_coordinate_m=10.0,
+        )
+
+
+# ----------------------------------------------------------------------
+# The cap must reach every intent inside a multi-step task, not just the
+# top-level one.
+# ----------------------------------------------------------------------
+def test_task_sequence_steps_are_bounded():
+    data = {
+        "status": "action",
+        "type": "sequence",
+        "steps": [
+            {"type": "absolute", "x": 1.0, "y": 1.0},
+            {"type": "absolute", "x": 999999.0, "y": 0.0},
+        ],
+    }
+
+    with pytest.raises(CmuAreParseError, match="absolute x coordinate.*exceeds safety limit"):
+        _validate_llm_task(
+            data,
+            instruction="go to 1,1 then 999999,0",
+            places={},
+            current_pose=None,
+            max_relative_m=20.0,
+            max_sequence_steps=8,
+            circle_segments=8,
+            max_circle_radius_m=6.0,
+        )
+
+
+def test_bridge_geofence_check_reports_as_a_parse_error():
+    """The bridge translates CmuGeofenceError into its own error type.
+
+    Callers of `navigate_to_intent` only handle `CmuAreParseError`, so a leaked
+    `CmuGeofenceError` would escape as an unhandled exception.
+    """
+
+    bridge = CmuAreBridge.__new__(CmuAreBridge)  # no ROS connection needed
+    fence = {"x": [-2.0, 2.0], "y": [-2.0, 2.0]}
+
+    bridge._check_workspace_boundaries(x=1.0, y=1.0, z=0.0, workspace_boundaries=fence)
+
+    with pytest.raises(CmuAreParseError, match="violates workspace boundaries"):
+        bridge._check_workspace_boundaries(x=9.0, y=0.0, z=0.0, workspace_boundaries=fence)
+
+
+def test_task_single_intent_is_bounded():
+    data = {"status": "action", "type": "absolute", "x": 999999.0, "y": 0.0}
+
+    with pytest.raises(CmuAreParseError, match="absolute x coordinate.*exceeds safety limit"):
+        _validate_llm_task(
+            data,
+            instruction="go to 999999, 0",
+            places={},
+            current_pose=None,
+            max_relative_m=20.0,
+            max_sequence_steps=8,
+            circle_segments=8,
+            max_circle_radius_m=6.0,
         )

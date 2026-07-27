@@ -3,6 +3,11 @@
 This module is intentionally import-safe outside ROS1.  It parses a constrained
 mobility command, then uses the CMU ARE public ROS topics instead of replacing
 the simulator or local planner.
+
+The safety envelope (goal geofence, largest relative move, speed ceiling) is
+declared in the ``cmu_are`` embodiment card and resolved through
+:mod:`rosclaw.apps.cmu_safety`. The module-level ``DEFAULT_CMU_*`` constants
+remain the fallback when no card is present.
 """
 
 from __future__ import annotations
@@ -17,9 +22,12 @@ import subprocess
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import yaml
+
+if TYPE_CHECKING:
+    from rosclaw.apps.cmu_safety import CmuSafetyLimits
 
 
 class CmuAreUnavailableError(RuntimeError):
@@ -250,6 +258,71 @@ def resolve_cmu_place(query: str, places: dict[str, CmuPlace]) -> CmuPlace:
     raise CmuAreParseError(f"could not resolve place from {query!r}; known places: {known}")
 
 
+def _resolve_limits(
+    limits: "CmuSafetyLimits | None",
+    *,
+    workspace_boundaries: dict[str, Any] | None = None,
+    max_relative_m: float | None = None,
+) -> "CmuSafetyLimits":
+    """Return the effective safety envelope for a navigation entry point.
+
+    Resolves the ``cmu_are`` embodiment card on first use. An explicit
+    ``workspace_boundaries`` or ``max_relative_m`` from the caller (CLI flag)
+    takes precedence over the card.
+    """
+    from rosclaw.apps.cmu_safety import resolve_cmu_safety_limits
+
+    if limits is None:
+        return resolve_cmu_safety_limits(
+            workspace_boundaries=workspace_boundaries,
+            max_relative_move_m=max_relative_m,
+        )
+    return limits.with_overrides(
+        workspace_boundaries=workspace_boundaries,
+        max_relative_move_m=max_relative_m,
+    )
+
+
+def _absolute_intent(
+    *,
+    instruction: str,
+    x: float,
+    y: float,
+    z: float = 0.0,
+    frame_id: str = "map",
+    source: str,
+    max_absolute_coordinate_m: float | None = None,
+) -> CmuIntent:
+    """Build an ``absolute`` intent, enforcing the coordinate safety cap.
+
+    The cap comes from the ``cmu_are`` embodiment card
+    (``operational_limits.max_absolute_coordinate_m``) when the caller resolved
+    one, otherwise from :data:`DEFAULT_CMU_MAX_ABSOLUTE_COORDINATE`.
+
+    Raises:
+        CmuAreParseError: A coordinate lies outside ±max.
+    """
+    max_abs = (
+        max_absolute_coordinate_m
+        if max_absolute_coordinate_m is not None
+        else DEFAULT_CMU_MAX_ABSOLUTE_COORDINATE
+    )
+    for axis, value in (("x", x), ("y", y), ("z", z)):
+        if abs(value) > max_abs:
+            raise CmuAreParseError(
+                f"absolute {axis} coordinate {value:.3f}m exceeds safety limit ±{max_abs:.3f}m"
+            )
+    return CmuIntent(
+        type="absolute",
+        instruction=instruction,
+        x=x,
+        y=y,
+        z=z,
+        frame_id=frame_id,
+        source=source,
+    )
+
+
 def parse_cmu_instruction(
     instruction: str,
     *,
@@ -257,6 +330,7 @@ def parse_cmu_instruction(
     current_pose: dict[str, float] | None = None,
     max_relative_m: float = DEFAULT_CMU_MAX_RELATIVE_M,
     use_llm: bool = False,
+    max_absolute_coordinate_m: float | None = None,
 ) -> CmuIntent:
     """Ground a constrained Chinese/English command into a place, relative move, or control."""
 
@@ -270,12 +344,17 @@ def parse_cmu_instruction(
 
     coord_match = _COORD_RE.search(text)
     if coord_match:
-        return CmuIntent(
-            type="absolute",
+        # The absolute-coordinate cap applies to the deterministic path too, not
+        # just to LLM-produced intents: a typed "x=1e6, y=-5e5" is the same
+        # unbounded goal.
+        return _absolute_intent(
             instruction=instruction,
             x=float(coord_match.group(1)),
             y=float(coord_match.group(2)),
+            z=0.0,
+            frame_id="map",
             source="deterministic",
+            max_absolute_coordinate_m=max_absolute_coordinate_m,
         )
 
     relative = _parse_relative_move(text, max_relative_m=max_relative_m, current_pose=current_pose)
@@ -316,6 +395,7 @@ def parse_cmu_instruction(
             places=places or {},
             current_pose=current_pose,
             max_relative_m=max_relative_m,
+            max_absolute_coordinate_m=max_absolute_coordinate_m,
         )
 
     raise CmuAreParseError(
@@ -494,34 +574,14 @@ class CmuAreBridge:
         Raises:
             CmuAreParseError: If coordinates violate workspace boundaries.
         """
-        if not workspace_boundaries:
-            return
+        from rosclaw.apps.cmu_safety import CmuGeofenceError, check_within_workspace
 
-        # Handle both x/y/z dict and bounding_box formats
-        if workspace_boundaries.get("type") == "bounding_box":
-            center = workspace_boundaries.get("center", [0, 0, 0])
-            dims = workspace_boundaries.get("dimensions", [0, 0, 0])
-            x_range = [center[0] - dims[0] / 2, center[0] + dims[0] / 2]
-            y_range = [center[1] - dims[1] / 2, center[1] + dims[1] / 2]
-            z_range = [center[2] - dims[2] / 2, center[2] + dims[2] / 2]
-        else:
-            x_range = workspace_boundaries.get("x", [-float('inf'), float('inf')])
-            y_range = workspace_boundaries.get("y", [-float('inf'), float('inf')])
-            z_range = workspace_boundaries.get("z", [-float('inf'), float('inf')])
-
-        # Check boundaries
-        violations = []
-        if x < x_range[0] or x > x_range[1]:
-            violations.append(f"x={x:.2f} not in [{x_range[0]:.2f}, {x_range[1]:.2f}]")
-        if y < y_range[0] or y > y_range[1]:
-            violations.append(f"y={y:.2f} not in [{y_range[0]:.2f}, {y_range[1]:.2f}]")
-        if z < z_range[0] or z > z_range[1]:
-            violations.append(f"z={z:.2f} not in [{z_range[0]:.2f}, {z_range[1]:.2f}]")
-
-        if violations:
-            raise CmuAreParseError(
-                f"Navigation goal violates workspace boundaries: {', '.join(violations)}"
+        try:
+            check_within_workspace(
+                x=x, y=y, z=z, workspace_boundaries=workspace_boundaries
             )
+        except CmuGeofenceError as exc:
+            raise CmuAreParseError(str(exc)) from exc
 
     def publish_waypoint(
         self,
@@ -706,8 +766,18 @@ def run_cmu_go(
     speed: float = 2.0,
     use_llm: bool = False,
     workspace_boundaries: dict[str, Any] | None = None,
+    limits: "CmuSafetyLimits | None" = None,
 ) -> CmuRunResult:
-    """Parse and execute one target-navigation command against a running CMU ARE sim."""
+    """Parse and execute one target-navigation command against a running CMU ARE sim.
+
+    ``limits`` carries the resolved embodiment-card safety envelope. When
+    omitted it is resolved from the ``cmu_are`` card, and ``workspace_boundaries``
+    (if given) overrides the card's geofence.
+    """
+
+    limits = _resolve_limits(limits, workspace_boundaries=workspace_boundaries)
+    workspace_boundaries = limits.workspace_boundaries
+    speed = limits.clamp_speed(speed)
 
     places = load_cmu_places(places_path)
     bridge = CmuAreBridge()
@@ -720,6 +790,8 @@ def run_cmu_go(
         places=places,
         current_pose=current_pose,
         use_llm=use_llm,
+        max_relative_m=limits.max_relative_move_m,
+        max_absolute_coordinate_m=limits.max_absolute_coordinate_m,
     )
     if intent.type == "explore_control":
         if not intent.command:
@@ -768,8 +840,18 @@ def run_cmu_chat_turn(
     ros_topics: list[str] | None = None,
     max_relative_m: float = DEFAULT_CMU_MAX_RELATIVE_M,
     workspace_boundaries: dict[str, Any] | None = None,
+    limits: "CmuSafetyLimits | None" = None,
 ) -> CmuChatTurn:
     """Use an LLM-only parser to execute or clarify one interactive command."""
+
+    limits = _resolve_limits(
+        limits,
+        workspace_boundaries=workspace_boundaries,
+        max_relative_m=max_relative_m,
+    )
+    workspace_boundaries = limits.workspace_boundaries
+    max_relative_m = limits.max_relative_move_m
+    speed = limits.clamp_speed(speed)
 
     resolved_places = places or load_cmu_places(places_path)
     active_bridge = bridge or CmuAreBridge()
@@ -808,6 +890,7 @@ def run_cmu_chat_turn(
         places=resolved_places,
         current_pose=current_pose,
         max_relative_m=max_relative_m,
+        max_absolute_coordinate_m=limits.max_absolute_coordinate_m,
     )
     if intent.type == "explore_control":
         if not intent.command:
@@ -865,7 +948,13 @@ class CmuChatTaskManager:
         max_circle_radius_m: float = DEFAULT_CMU_MAX_CIRCLE_RADIUS,
         exploration_on_manual: str = "pause",
         workspace_boundaries: dict[str, Any] | None = None,
+        limits: "CmuSafetyLimits | None" = None,
     ) -> None:
+        # The embodiment card supplies the safety envelope; explicit kwargs from
+        # the CLI still win. Only the geofence and relative-move cap are treated
+        # as overrides here, since the rest are already explicit defaults.
+        self.limits = _resolve_limits(limits, workspace_boundaries=workspace_boundaries)
+
         self.bridge = bridge
         self.places = places
         self.ros_topics = ros_topics
@@ -873,14 +962,14 @@ class CmuChatTaskManager:
         self.timeout_sec = timeout_sec
         self.readiness_timeout_sec = readiness_timeout_sec
         self.tolerance_m = tolerance_m
-        self.speed = speed
+        self.speed = self.limits.clamp_speed(speed)
         self.max_relative_m = max_relative_m
         self.progress_interval_sec = progress_interval_sec
         self.max_sequence_steps = max_sequence_steps
         self.circle_segments = circle_segments
         self.max_circle_radius_m = max_circle_radius_m
         self.exploration_on_manual = exploration_on_manual
-        self.workspace_boundaries = workspace_boundaries
+        self.workspace_boundaries = self.limits.workspace_boundaries
 
         self._lock = threading.Lock()
         self._events: list[CmuChatTaskEvent] = []
@@ -906,6 +995,7 @@ class CmuChatTaskManager:
             max_sequence_steps=self.max_sequence_steps,
             circle_segments=self.circle_segments,
             max_circle_radius_m=self.max_circle_radius_m,
+            max_absolute_coordinate_m=self.limits.max_absolute_coordinate_m,
         )
         if task.kind == "clarify":
             question = str((task.metadata or {}).get("question", task.say or "请再说清楚一点。"))
@@ -1220,6 +1310,7 @@ def parse_cmu_chat_task(
     max_sequence_steps: int = DEFAULT_CMU_MAX_SEQUENCE_STEPS,
     circle_segments: int = DEFAULT_CMU_CIRCLE_SEGMENTS,
     max_circle_radius_m: float = DEFAULT_CMU_MAX_CIRCLE_RADIUS,
+    max_absolute_coordinate_m: float | None = None,
 ) -> CmuChatTask:
     """Parse an interactive LLM command into an executable task."""
 
@@ -1268,6 +1359,7 @@ def parse_cmu_chat_task(
         max_sequence_steps=max_sequence_steps,
         circle_segments=circle_segments,
         max_circle_radius_m=max_circle_radius_m,
+        max_absolute_coordinate_m=max_absolute_coordinate_m,
     )
     return task
 
@@ -1282,6 +1374,7 @@ def _validate_llm_task(
     max_sequence_steps: int,
     circle_segments: int,
     max_circle_radius_m: float,
+    max_absolute_coordinate_m: float | None = None,
 ) -> CmuChatTask:
     if not isinstance(data, dict):
         raise CmuAreParseError("LLM returned non-object task")
@@ -1307,6 +1400,7 @@ def _validate_llm_task(
             places=places,
             current_pose=current_pose,
             max_relative_m=max_relative_m,
+            max_absolute_coordinate_m=max_absolute_coordinate_m,
         )
         return CmuChatTask(
             kind="navigation",
@@ -1336,6 +1430,7 @@ def _validate_llm_task(
                 places=places,
                 current_pose=pose,
                 max_relative_m=max_relative_m,
+                max_absolute_coordinate_m=max_absolute_coordinate_m,
             )
             if intent.type == "explore_control":
                 raise CmuAreParseError("sequence steps cannot include exploration control")
@@ -1898,6 +1993,7 @@ def _validate_llm_intent(
     places: dict[str, CmuPlace],
     current_pose: dict[str, float] | None,
     max_relative_m: float,
+    max_absolute_coordinate_m: float | None = None,
 ) -> CmuIntent:
     if not isinstance(data, dict):
         raise CmuAreParseError("LLM returned non-object intent")
@@ -1971,29 +2067,14 @@ def _validate_llm_intent(
         except (ValueError, TypeError) as e:
             raise CmuAreParseError(f"absolute intent has invalid coordinate values: {e}")
 
-        # Apply safety bounds for absolute coordinates
-        max_abs = DEFAULT_CMU_MAX_ABSOLUTE_COORDINATE
-        if abs(x) > max_abs:
-            raise CmuAreParseError(
-                f"absolute x coordinate {x:.3f}m exceeds safety limit ±{max_abs:.3f}m"
-            )
-        if abs(y) > max_abs:
-            raise CmuAreParseError(
-                f"absolute y coordinate {y:.3f}m exceeds safety limit ±{max_abs:.3f}m"
-            )
-        if abs(z) > max_abs:
-            raise CmuAreParseError(
-                f"absolute z coordinate {z:.3f}m exceeds safety limit ±{max_abs:.3f}m"
-            )
-
-        return CmuIntent(
-            type="absolute",
+        return _absolute_intent(
             instruction=instruction,
             x=x,
             y=y,
             z=z,
             frame_id=str(data.get("frame_id", "map")),
             source="llm",
+            max_absolute_coordinate_m=max_absolute_coordinate_m,
         )
     raise CmuAreParseError(f"LLM returned unsupported intent type {typ!r}")
 

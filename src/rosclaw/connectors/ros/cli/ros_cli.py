@@ -18,6 +18,7 @@ from rosclaw.connectors.ros.compiler import (
     SafetyContractCompiler,
 )
 from rosclaw.connectors.ros.discovery import RosGraphDiscovery
+from rosclaw.connectors.ros.embodiment import EmbodimentCardError, load_embodiment_card
 from rosclaw.connectors.ros.provider import RosCapabilityProvider
 from rosclaw.connectors.ros.transport import RosbridgeEndpoint, RosbridgeTransport
 from rosclaw.daemon.client import DaemonClient, DaemonClientError
@@ -27,16 +28,11 @@ from rosclaw.provider.core.request import ProviderRequest
 
 def _load_robot_spec(robot_id: str) -> dict[str, Any] | None:
     """Load an embodiment card YAML for the given robot id if it exists."""
-    specs_dir = Path(__file__).parent.parent / "specs"
-    for name in (robot_id, robot_id.replace("_", "-")):
-        for ext in (".yaml", ".yml"):
-            path = specs_dir / f"{name}{ext}"
-            if path.exists():
-                import yaml
-
-                with open(path, encoding="utf-8") as f:
-                    return yaml.safe_load(f) or {}
-    return None
+    try:
+        card = load_embodiment_card(robot_id)
+    except EmbodimentCardError:
+        return None
+    return card.to_dict() if card is not None else None
 
 
 def _load_json_or_yaml(path: Path) -> dict[str, Any]:
