@@ -65,12 +65,16 @@ def evaluate_promotion_gate(
     patch_proofs: list[dict[str, Any]],
     promotion_config: dict[str, Any],
     stats_fn: Any | None = None,
+    min_sessions_c: int = 3,
+    other_arm_aborts: int = 0,
 ) -> PromotionGateReport:
     """Evaluate the Phase 7 gate.  ``arm_records`` maps arm → SessionRecord
     list (each carrying invalid_rate / verified_rate properties);
     ``safety`` carries the zero-tolerance counters; ``patch_proofs`` the
     arm-C apply proofs; ``stats_fn`` is the evo3 promotion_report (or a
     test double) used for the session-level effect estimate.
+    ``min_sessions_c`` is the promotion floor (§Phase 6 pilot: 3 sessions
+    per arm) — a single lucky session never promotes.
     """
     checks: list[GateCheck] = []
     zero_tolerance = (
@@ -116,6 +120,18 @@ def evaluate_promotion_gate(
     a_valid = mean_rate(a_records, "verified_rate")
     c_valid = mean_rate(c_records, "verified_rate")
 
+    checks.append(
+        GateCheck(
+            "min_sessions_c",
+            len(c_records) >= min_sessions_c,
+            f"{len(c_records)}/{min_sessions_c} arm-C sessions"
+            + (
+                f" (matrix incomplete: {other_arm_aborts} abort(s) in other arms)"
+                if other_arm_aborts
+                else ""
+            ),
+        )
+    )
     checks.append(
         GateCheck(
             "c_valid_ge_a",
