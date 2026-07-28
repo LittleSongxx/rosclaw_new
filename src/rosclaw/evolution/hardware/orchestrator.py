@@ -615,15 +615,25 @@ class EvoRpsOrchestrator:
         store = self.namespace.knowledge_store()
         self.namespace.assert_store_isolated(store)
         registry = CandidateRegistry(store)
-        sessions = manifest.by_kind("canary_session")
+        # The gate evaluates the LATEST canary generation only: the candidate
+        # named by the newest canary_candidate_selected entry and the sessions
+        # recorded after it.  Mixing generations (yesterday's rolled-back
+        # candidate's sessions with today's selection) would be a second
+        # attribution error (found 2026-07-26).
+        selections = manifest.by_kind("canary_candidate_selected")
+        if not selections:
+            manifest.record("promote_blocked", reason="no canary candidate selection")
+            raise OrchestratorError("promote requires a canary run (run canary first)")
+        generation_start = float(selections[-1].get("recorded_at") or 0.0)
+        candidate_id = str(selections[-1].get("candidate_id"))
+        sessions = [
+            entry
+            for entry in manifest.by_kind("canary_session")
+            if float(entry.get("recorded_at") or 0.0) >= generation_start
+        ]
         if not sessions:
             manifest.record("promote_blocked", reason="no canary sessions")
             raise OrchestratorError("promote requires canary sessions (run canary first)")
-        candidate_id = next(
-            (s["candidate_id"] for s in sessions if s.get("candidate_id")), None
-        )
-        if candidate_id is None:
-            raise OrchestratorError("canary sessions carry no candidate id")
         candidate_row = registry.get(candidate_id)
         if candidate_row is None:
             raise OrchestratorError(f"candidate {candidate_id} not in the registry")
@@ -683,13 +693,24 @@ class EvoRpsOrchestrator:
             "memory_hurt": 0.0,
         }
         aborted = manifest.by_kind("canary_aborted")
-        if aborted:
-            safety["protection_event"] = len(aborted)
+        # Attribution matters: only an abort in the CANDIDATE's OWN arm is a
+        # candidate protection event.  An abort in arm A/B is an experiment-
+        # condition signal (the hardware is heat-soaked), never evidence
+        # against the candidate — rolling back C for B's overheat would be a
+        # false verdict (found + fixed 2026-07-26).
+        candidate_aborts = [a for a in aborted if a.get("arm") == ARM_C]
+        other_aborts = [a for a in aborted if a.get("arm") != ARM_C]
+        if candidate_aborts:
+            safety["protection_event"] = len(candidate_aborts)
 
         gate = evaluate_promotion_gate(
             candidate_id=candidate_id,
             arm_records=arm_records,
             safety=safety,
+            min_sessions_c=int(
+                (self.config.raw.get("canary") or {}).get("min_sessions_per_arm", 3)
+            ),
+            other_arm_aborts=len(other_aborts),
             patch_proofs=patch_proofs,
             promotion_config=self.config.promotion,
             stats_fn=promotion_report,
@@ -701,14 +722,19 @@ class EvoRpsOrchestrator:
             source_failure=str(candidate_row.get("source_failure") or ""),
             current_regime=str(candidate_row.get("current_regime") or ""),
         )
-        # Preserve the validate-phase gate verdicts from the existing row —
-        # upsert replaces the row, and the registry must keep the full
-        # evaluation history, not just the terminal state.
+        # Preserve the validate-phase gate verdicts AND the existing state —
+        # upsert replaces the row.  A NOT_PROMOTED verdict changes nothing
+        # about the candidate's state (VALIDATED stays VALIDATED, terminal
+        # ROLLED_BACK stays terminal); only PROMOTED/ROLLED_BACK transition
+        # (found 2026-07-26: a fresh default record silently reset states).
         prior_verdicts = candidate_row.get("gate_verdicts")
         if isinstance(prior_verdicts, str):
             prior_verdicts = json.loads(prior_verdicts)
         if prior_verdicts:
             record.gate_verdicts = list(prior_verdicts)
+        prior_state = candidate_row.get("state")
+        if prior_state:
+            record.state = CandidateState(str(prior_state))
         if gate.decision is PromotionDecision.PROMOTED:
             record.state = CandidateState.VALIDATED
             record.promote()

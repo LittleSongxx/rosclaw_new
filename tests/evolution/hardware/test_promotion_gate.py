@@ -112,3 +112,38 @@ def test_promoted_rule_record_shape() -> None:
     assert rule["status"] == "active"
     assert rule["canary_sessions"] == ["prac_1"]
     assert rule["gate_report"]["decision"] == "PROMOTED"
+
+
+def test_min_sessions_floor_blocks_single_lucky_session() -> None:
+    """One lucky session never promotes (§Phase 6 pilot: 3/arm)."""
+    records = {
+        "A_no_memory": [_Rec(0.20, 0.80)],
+        "B_fixed_cooldown": [_Rec(0.25, 0.75)],
+        "C_candidate_canary": [_Rec(0.175, 0.825)],
+    }
+    report = _gate(records)
+    assert report.decision is PromotionDecision.NOT_PROMOTED
+    failed = {c.name for c in report.checks if not c.passed}
+    assert "min_sessions_c" in failed
+    # With 3 sessions per arm the same metrics promote.
+    full = _arms(0.20, 0.25, 0.175)
+    report2 = _gate(full)
+    assert report2.decision is PromotionDecision.PROMOTED
+
+
+def test_other_arm_abort_is_disclosed_not_candidate_fault() -> None:
+    """An abort in arm B is an experiment-condition note, never a
+    protection_event against the candidate (found 2026-07-26)."""
+    report = evaluate_promotion_gate(
+        candidate_id="cand_x",
+        arm_records=_arms(0.20, 0.25, 0.175),
+        safety=dict(SAFETY_ZERO),
+        patch_proofs=PROOFS,
+        promotion_config={},
+        stats_fn=None,
+        other_arm_aborts=1,
+    )
+    # Metrics pass; the other-arm abort appears only as disclosure.
+    assert report.decision is PromotionDecision.PROMOTED
+    detail = next(c.detail for c in report.checks if c.name == "min_sessions_c")
+    assert "matrix incomplete" in detail
