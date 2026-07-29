@@ -36,6 +36,9 @@ class G1CerebellarRecoveryConfig:
     blend_frames: int = 100
     standing_pose_blend: float = 0.30
     roll_posture_bias_rad: float = -0.05
+    target_smoothing_alpha: float = 1.0
+    target_smoothing_start_policy_frame: int = 400
+    target_smoothing_joint_group: str = "upper_body"
     contact_required: bool = True
     kick_foot_landing_required: bool = True
     minimum_calibrated_support_friction: float = 0.95
@@ -54,6 +57,12 @@ class G1CerebellarRecoveryConfig:
             -0.08 <= self.roll_posture_bias_rad <= 0.08
         ):
             raise ValueError("roll_posture_bias_rad must be finite and in [-0.08, 0.08]")
+        if not 0.25 <= self.target_smoothing_alpha <= 1.0:
+            raise ValueError("target_smoothing_alpha must be in [0.25, 1.0]")
+        if self.target_smoothing_start_policy_frame < 0:
+            raise ValueError("target_smoothing_start_policy_frame must be non-negative")
+        if self.target_smoothing_joint_group not in {"upper_body", "arms"}:
+            raise ValueError("target_smoothing_joint_group must be upper_body or arms")
         if not 0.0 < self.minimum_calibrated_support_friction <= 2.0:
             raise ValueError("minimum calibrated support friction must be in (0, 2]")
         if not 0.0 <= self.maximum_calibrated_control_latency_ms <= 100.0:
@@ -71,6 +80,8 @@ class G1CerebellarRecoveryEffect:
     blend_fraction: float
     contact_latched: bool
     kick_foot_landing_latched: bool
+    smoothing_active: bool
+    smoothing_residual_rms_rad: float
 
 
 @dataclass(frozen=True)
@@ -86,11 +97,14 @@ class G1CerebellarRecoveryReceipt:
     kick_foot_landing_latched: bool
     activation_policy_frame: int | None
     activation_time_sec: float | None
+    smoothing_activation_policy_frame: int | None
+    smoothing_activation_time_sec: float | None
     peak_blend_fraction: float
+    peak_smoothing_residual_rms_rad: float
     strict_replay: bool
     evidence_domain: str
     config: dict[str, Any]
-    schema_version: str = "rosclaw.g1_goalforge.cerebellar_recovery_receipt.v1"
+    schema_version: str = "rosclaw.g1_goalforge.cerebellar_recovery_receipt.v2"
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -147,7 +161,7 @@ class G1CerebellarRecoveryController:
         return hash_json(
             {
                 "controller_type": "g1_cerebellar_post_kick_recovery",
-                "version": 1,
+                "version": 2,
                 "body_hash": self.body_hash,
                 "motion_hash": self.motion_hash,
                 "standing_pose_hash": self.standing_pose_hash,
@@ -177,7 +191,11 @@ class G1CerebellarRecoveryController:
         self._landing_latched = False
         self._activation_policy_frame: int | None = None
         self._activation_time_sec: float | None = None
+        self._smoothing_activation_policy_frame: int | None = None
+        self._smoothing_activation_time_sec: float | None = None
+        self._smoothed_target: np.ndarray | None = None
         self._peak_blend_fraction = 0.0
+        self._peak_smoothing_residual_rms_rad = 0.0
 
     def adapt_target(
         self,
@@ -198,36 +216,59 @@ class G1CerebellarRecoveryController:
         self._contact_latched = self._contact_latched or bool(ball_contact_detected)
         if self._contact_latched and right_support:
             self._landing_latched = True
-        eligible = (
+        causal_gate = (
             self.regime_eligible
             and (self._contact_latched or not self.config.contact_required)
             and (self._landing_latched or not self.config.kick_foot_landing_required)
-            and policy_frame >= self.config.start_policy_frame
         )
-        if not eligible:
-            return G1CerebellarRecoveryEffect(
-                target=value.copy(),
-                active=False,
-                blend_fraction=0.0,
-                contact_latched=self._contact_latched,
-                kick_foot_landing_latched=self._landing_latched,
+        eligible = causal_gate and policy_frame >= self.config.start_policy_frame
+        if eligible:
+            linear = min(
+                1.0,
+                max(
+                    0.0,
+                    (policy_frame - self.config.start_policy_frame) / self.config.blend_frames,
+                ),
             )
-
-        linear = min(
-            1.0,
-            max(
-                0.0,
-                (policy_frame - self.config.start_policy_frame) / self.config.blend_frames,
-            ),
+            fraction = linear * linear * (3.0 - 2.0 * linear)
+            standing_weight = fraction * self.config.standing_pose_blend
+            adapted = (
+                (1.0 - standing_weight) * value
+                + standing_weight * self.standing_pose
+                + fraction * self.config.roll_posture_bias_rad * self._roll_pattern
+            )
+        else:
+            fraction = 0.0
+            adapted = value.copy()
+        smoothing_active = bool(
+            causal_gate
+            and self.config.target_smoothing_alpha < 1.0
+            and policy_frame >= self.config.target_smoothing_start_policy_frame
         )
-        fraction = linear * linear * (3.0 - 2.0 * linear)
-        standing_weight = fraction * self.config.standing_pose_blend
-        adapted = (
-            (1.0 - standing_weight) * value
-            + standing_weight * self.standing_pose
-            + fraction * self.config.roll_posture_bias_rad * self._roll_pattern
-        )
-        active = fraction > 0.0
+        previous = self._smoothed_target if self._smoothed_target is not None else value
+        if smoothing_active:
+            alpha = self.config.target_smoothing_alpha
+            first_joint = {
+                "upper_body": 12,
+                "arms": 15,
+            }[self.config.target_smoothing_joint_group]
+            smoothed = adapted.copy()
+            smoothed[first_joint:] = previous[first_joint:] + alpha * (
+                adapted[first_joint:] - previous[first_joint:]
+            )
+            smoothing_residual = float(np.sqrt(np.mean(np.square(adapted - smoothed))))
+            adapted = smoothed
+            if self._smoothing_activation_policy_frame is None:
+                self._smoothing_activation_policy_frame = policy_frame
+                self._smoothing_activation_time_sec = timestamp_sec
+            self._peak_smoothing_residual_rms_rad = max(
+                self._peak_smoothing_residual_rms_rad,
+                smoothing_residual,
+            )
+        else:
+            smoothing_residual = 0.0
+        self._smoothed_target = adapted.copy()
+        active = fraction > 0.0 or smoothing_active
         if active and self._activation_policy_frame is None:
             self._activation_policy_frame = policy_frame
             self._activation_time_sec = timestamp_sec
@@ -238,6 +279,8 @@ class G1CerebellarRecoveryController:
             blend_fraction=fraction,
             contact_latched=self._contact_latched,
             kick_foot_landing_latched=self._landing_latched,
+            smoothing_active=smoothing_active,
+            smoothing_residual_rms_rad=smoothing_residual,
         )
 
     def build_receipt(
@@ -258,7 +301,10 @@ class G1CerebellarRecoveryController:
             kick_foot_landing_latched=self._landing_latched,
             activation_policy_frame=self._activation_policy_frame,
             activation_time_sec=self._activation_time_sec,
+            smoothing_activation_policy_frame=self._smoothing_activation_policy_frame,
+            smoothing_activation_time_sec=self._smoothing_activation_time_sec,
             peak_blend_fraction=self._peak_blend_fraction,
+            peak_smoothing_residual_rms_rad=self._peak_smoothing_residual_rms_rad,
             strict_replay=strict_replay,
             evidence_domain=evidence_domain,
             config=asdict(self.config),

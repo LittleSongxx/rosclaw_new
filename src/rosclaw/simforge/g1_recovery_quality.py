@@ -21,11 +21,18 @@ class G1RecoveryQuality:
     com_lateral_velocity_rms_m_s: float
     pelvis_planar_velocity_rms_m_s: float
     joint_velocity_rms_rad_s: float
+    post_contact_joint_acceleration_rms_rad_s2: float
+    post_contact_joint_jerk_rms_rad_s3: float
+    post_contact_leg_joint_jerk_rms_rad_s3: float
+    post_contact_waist_joint_jerk_rms_rad_s3: float
+    post_contact_arm_joint_jerk_rms_rad_s3: float
     tail_torso_angular_velocity_rms_rad_s: float
     tail_torso_tilt_rms_rad: float
     tail_com_lateral_velocity_rms_m_s: float
     tail_pelvis_planar_velocity_rms_m_s: float
     tail_joint_velocity_rms_rad_s: float
+    tail_joint_acceleration_rms_rad_s2: float
+    tail_joint_jerk_rms_rad_s3: float
     tail_wobble_index: float
     post_contact_pelvis_path_length_m: float
     post_contact_pelvis_displacement_m: float
@@ -36,7 +43,7 @@ class G1RecoveryQuality:
     terminal_bilateral_support: bool
     terminal_stable_duration_sec: float
     settling_time_sec: float | None
-    schema_version: str = "rosclaw.g1_goalforge.recovery_quality.v2"
+    schema_version: str = "rosclaw.g1_goalforge.recovery_quality.v3"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -78,6 +85,34 @@ class G1MomentumUnloadingComparison:
     support_transition_reduction: float
     reasons: tuple[str, ...]
     schema_version: str = "rosclaw.g1_goalforge.momentum_unloading_comparison.v1"
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["reasons"] = list(self.reasons)
+        return value
+
+
+@dataclass(frozen=True)
+class G1NaturalnessComparison:
+    """Fail-closed A/B gate for post-contact whole-body motion quality."""
+
+    passed: bool
+    goal_outcome_preserved: bool
+    safety_preserved: bool
+    strict_replay_preserved: bool
+    joint_acceleration_reduction: float
+    joint_jerk_reduction: float
+    leg_joint_jerk_reduction: float
+    waist_joint_jerk_reduction: float
+    arm_joint_jerk_reduction: float
+    tail_joint_jerk_reduction: float
+    pelvis_path_regression: float
+    pelvis_displacement_regression: float
+    tail_wobble_reduction: float
+    settling_time_regression: float
+    support_transition_regression: float
+    reasons: tuple[str, ...]
+    schema_version: str = "rosclaw.g1_goalforge.naturalness_comparison.v1"
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -176,6 +211,8 @@ def measure_g1_recovery_quality(
         axis=1,
     )
     joint_speed = np.sqrt(np.mean(np.square(joint_velocity), axis=1))
+    joint_acceleration = np.gradient(joint_velocity, time, axis=0)
+    joint_jerk = np.gradient(joint_acceleration, time, axis=0)
     bilateral = left_support & right_support
     support_state = left_support.astype(np.uint8) + 2 * right_support.astype(np.uint8)
     post_xy = pelvis[contact_index:, :2]
@@ -221,11 +258,18 @@ def measure_g1_recovery_quality(
         com_lateral_velocity_rms_m_s=_rms(com_velocity[evaluation]),
         pelvis_planar_velocity_rms_m_s=_rms(pelvis_velocity[evaluation]),
         joint_velocity_rms_rad_s=_rms(joint_speed[evaluation]),
+        post_contact_joint_acceleration_rms_rad_s2=_rms(joint_acceleration[evaluation]),
+        post_contact_joint_jerk_rms_rad_s3=_rms(joint_jerk[evaluation]),
+        post_contact_leg_joint_jerk_rms_rad_s3=_rms(joint_jerk[evaluation, :12]),
+        post_contact_waist_joint_jerk_rms_rad_s3=_rms(joint_jerk[evaluation, 12:15]),
+        post_contact_arm_joint_jerk_rms_rad_s3=_rms(joint_jerk[evaluation, 15:]),
         tail_torso_angular_velocity_rms_rad_s=tail_angular,
         tail_torso_tilt_rms_rad=tail_tilt,
         tail_com_lateral_velocity_rms_m_s=tail_com_velocity,
         tail_pelvis_planar_velocity_rms_m_s=tail_pelvis_velocity,
         tail_joint_velocity_rms_rad_s=tail_joint_velocity,
+        tail_joint_acceleration_rms_rad_s2=_rms(joint_acceleration[tail]),
+        tail_joint_jerk_rms_rad_s3=_rms(joint_jerk[tail]),
         tail_wobble_index=wobble,
         post_contact_pelvis_path_length_m=post_path,
         post_contact_pelvis_displacement_m=post_displacement,
@@ -363,6 +407,169 @@ def compare_g1_momentum_unloading(
     )
 
 
+def compare_g1_naturalness(
+    *,
+    parent: G1RecoveryQuality,
+    candidate: G1RecoveryQuality,
+    parent_result: Mapping[str, Any],
+    candidate_result: Mapping[str, Any],
+    parent_strict_replay: bool,
+    candidate_strict_replay: bool,
+    minimum_joint_acceleration_reduction: float = 0.01,
+    minimum_joint_jerk_reduction: float = 0.01,
+    minimum_leg_jerk_reduction: float = 0.0,
+    minimum_waist_jerk_reduction: float = 0.02,
+    minimum_arm_jerk_reduction: float = 0.05,
+    minimum_tail_jerk_reduction: float = 0.10,
+    maximum_path_regression: float = 0.02,
+    maximum_displacement_regression: float = 0.05,
+    maximum_settling_time_regression: float = 0.02,
+) -> G1NaturalnessComparison:
+    """Promote smooth follow-through only when stability remains intact.
+
+    Jerk is derived from recorded physical joint velocity and starts one
+    second after ball contact, so impact itself cannot dominate the score.
+    Small path/time allowances cover the extra body coordination, while
+    wobble and support chatter may not regress at all.
+    """
+
+    thresholds = (
+        minimum_joint_acceleration_reduction,
+        minimum_joint_jerk_reduction,
+        minimum_leg_jerk_reduction,
+        minimum_waist_jerk_reduction,
+        minimum_arm_jerk_reduction,
+        minimum_tail_jerk_reduction,
+        maximum_path_regression,
+        maximum_displacement_regression,
+        maximum_settling_time_regression,
+    )
+    if not all(math.isfinite(value) and 0.0 <= value < 1.0 for value in thresholds):
+        raise ValueError("naturalness thresholds must be finite and in [0, 1)")
+
+    goal_preserved = bool(
+        candidate_result.get("success")
+        and candidate_result.get("goal_crossed") == parent_result.get("goal_crossed")
+        and candidate_result.get("target_zone_hit") == parent_result.get("target_zone_hit")
+        and float(candidate_result.get("target_error_m", math.inf))
+        <= float(parent_result.get("target_error_m", math.inf)) + 1e-9
+        and float(candidate_result.get("ball_speed_mps", 0.0))
+        >= float(parent_result.get("ball_speed_mps", 0.0)) - 1e-9
+    )
+    safety_preserved = bool(
+        not candidate_result.get("post_kick_fall")
+        and not candidate_result.get("joint_limit_violation")
+        and not candidate_result.get("torque_limit_violation")
+        and not candidate_result.get("actuator_saturation")
+        and float(candidate_result.get("support_foot_slip_m", math.inf))
+        <= max(0.04, float(parent_result.get("support_foot_slip_m", 0.0)) + 1e-9)
+        and candidate.terminal_bilateral_support
+    )
+    strict_replay = bool(parent_strict_replay and candidate_strict_replay)
+    acceleration_reduction = _reduction(
+        parent.post_contact_joint_acceleration_rms_rad_s2,
+        candidate.post_contact_joint_acceleration_rms_rad_s2,
+    )
+    jerk_reduction = _reduction(
+        parent.post_contact_joint_jerk_rms_rad_s3,
+        candidate.post_contact_joint_jerk_rms_rad_s3,
+    )
+    leg_reduction = _reduction(
+        parent.post_contact_leg_joint_jerk_rms_rad_s3,
+        candidate.post_contact_leg_joint_jerk_rms_rad_s3,
+    )
+    waist_reduction = _reduction(
+        parent.post_contact_waist_joint_jerk_rms_rad_s3,
+        candidate.post_contact_waist_joint_jerk_rms_rad_s3,
+    )
+    arm_reduction = _reduction(
+        parent.post_contact_arm_joint_jerk_rms_rad_s3,
+        candidate.post_contact_arm_joint_jerk_rms_rad_s3,
+    )
+    tail_reduction = _reduction(
+        parent.tail_joint_jerk_rms_rad_s3,
+        candidate.tail_joint_jerk_rms_rad_s3,
+    )
+    path_regression = _regression(
+        parent.post_contact_pelvis_path_length_m,
+        candidate.post_contact_pelvis_path_length_m,
+    )
+    displacement_regression = _regression(
+        parent.post_contact_pelvis_displacement_m,
+        candidate.post_contact_pelvis_displacement_m,
+    )
+    wobble_reduction = _reduction(parent.tail_wobble_index, candidate.tail_wobble_index)
+    settling_regression = _optional_time_regression(
+        parent.settling_time_sec,
+        candidate.settling_time_sec,
+    )
+    transition_regression = _regression(
+        float(parent.post_contact_support_transition_count),
+        float(candidate.post_contact_support_transition_count),
+    )
+    reasons = []
+    if not goal_preserved:
+        reasons.append("goal_outcome_regressed")
+    if not safety_preserved:
+        reasons.append("safety_regressed")
+    if not strict_replay:
+        reasons.append("strict_replay_missing")
+    for actual, threshold, reason in (
+        (
+            acceleration_reduction,
+            minimum_joint_acceleration_reduction,
+            "joint_acceleration_reduction_below_gate",
+        ),
+        (jerk_reduction, minimum_joint_jerk_reduction, "joint_jerk_reduction_below_gate"),
+        (leg_reduction, minimum_leg_jerk_reduction, "leg_jerk_regressed"),
+        (
+            waist_reduction,
+            minimum_waist_jerk_reduction,
+            "waist_jerk_reduction_below_gate",
+        ),
+        (arm_reduction, minimum_arm_jerk_reduction, "arm_jerk_reduction_below_gate"),
+        (tail_reduction, minimum_tail_jerk_reduction, "tail_jerk_reduction_below_gate"),
+    ):
+        if actual < threshold:
+            reasons.append(reason)
+    for actual, maximum, reason in (
+        (path_regression, maximum_path_regression, "pelvis_path_regression_above_gate"),
+        (
+            displacement_regression,
+            maximum_displacement_regression,
+            "pelvis_displacement_regression_above_gate",
+        ),
+        (
+            settling_regression,
+            maximum_settling_time_regression,
+            "settling_time_regression_above_gate",
+        ),
+        (transition_regression, 0.0, "support_transition_regressed"),
+    ):
+        if actual > maximum + 1e-12:
+            reasons.append(reason)
+    if wobble_reduction < 0.0:
+        reasons.append("tail_wobble_regressed")
+    return G1NaturalnessComparison(
+        passed=not reasons,
+        goal_outcome_preserved=goal_preserved,
+        safety_preserved=safety_preserved,
+        strict_replay_preserved=strict_replay,
+        joint_acceleration_reduction=acceleration_reduction,
+        joint_jerk_reduction=jerk_reduction,
+        leg_joint_jerk_reduction=leg_reduction,
+        waist_joint_jerk_reduction=waist_reduction,
+        arm_joint_jerk_reduction=arm_reduction,
+        tail_joint_jerk_reduction=tail_reduction,
+        pelvis_path_regression=path_regression,
+        pelvis_displacement_regression=displacement_regression,
+        tail_wobble_reduction=wobble_reduction,
+        settling_time_regression=settling_regression,
+        support_transition_regression=transition_regression,
+        reasons=tuple(reasons),
+    )
+
+
 def compare_g1_recovery(
     *,
     baseline: G1RecoveryQuality,
@@ -460,6 +667,10 @@ def _reduction(baseline: float, candidate: float) -> float:
     return (baseline - candidate) / baseline
 
 
+def _regression(baseline: float, candidate: float) -> float:
+    return -_reduction(baseline, candidate)
+
+
 def _optional_time_reduction(baseline: float | None, candidate: float | None) -> float:
     if candidate is None:
         return -math.inf
@@ -468,11 +679,21 @@ def _optional_time_reduction(baseline: float | None, candidate: float | None) ->
     return _reduction(baseline, candidate)
 
 
+def _optional_time_regression(baseline: float | None, candidate: float | None) -> float:
+    if candidate is None:
+        return math.inf
+    if baseline is None:
+        return -1.0
+    return _regression(baseline, candidate)
+
+
 __all__ = [
     "G1RecoveryComparison",
     "G1RecoveryQuality",
     "G1MomentumUnloadingComparison",
+    "G1NaturalnessComparison",
     "compare_g1_momentum_unloading",
+    "compare_g1_naturalness",
     "compare_g1_recovery",
     "measure_g1_recovery_quality",
 ]

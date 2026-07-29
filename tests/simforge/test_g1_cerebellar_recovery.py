@@ -16,6 +16,7 @@ from rosclaw.simforge.g1_recovery_evolution import (
 )
 from rosclaw.simforge.g1_recovery_quality import (
     compare_g1_momentum_unloading,
+    compare_g1_naturalness,
     compare_g1_recovery,
     measure_g1_recovery_quality,
 )
@@ -25,7 +26,9 @@ _HASH_A = "sha256:" + "1" * 64
 _HASH_B = "sha256:" + "2" * 64
 
 
-def _controller() -> G1CerebellarRecoveryController:
+def _controller(
+    config: G1CerebellarRecoveryConfig | None = None,
+) -> G1CerebellarRecoveryController:
     return G1CerebellarRecoveryController(
         body_hash=_HASH_A,
         motion_hash=_HASH_B,
@@ -33,6 +36,7 @@ def _controller() -> G1CerebellarRecoveryController:
         regime_eligible=True,
         regime_reasons=(),
         standing_pose=np.zeros(29, dtype=np.float64),
+        config=config,
     )
 
 
@@ -105,6 +109,43 @@ def test_recovery_smoothly_blends_qualified_pose_after_landing() -> None:
     assert receipt.activation_policy_frame == 470
     assert receipt.peak_blend_fraction == 1.0
     assert receipt.strict_replay
+
+
+def test_recovery_causally_smooths_only_upper_body_after_landing() -> None:
+    controller = _controller(
+        G1CerebellarRecoveryConfig(
+            target_smoothing_alpha=0.70,
+            target_smoothing_start_policy_frame=400,
+            target_smoothing_joint_group="upper_body",
+        )
+    )
+    before = np.zeros(29, dtype=np.float64)
+    after = np.ones(29, dtype=np.float64)
+    controller.adapt_target(
+        target=before,
+        policy_frame=399,
+        timestamp_sec=7.98,
+        ball_contact_detected=True,
+        left_support=True,
+        right_support=True,
+    )
+    effect = controller.adapt_target(
+        target=after,
+        policy_frame=400,
+        timestamp_sec=8.0,
+        ball_contact_detected=True,
+        left_support=True,
+        right_support=True,
+    )
+
+    np.testing.assert_array_equal(effect.target[:12], after[:12])
+    np.testing.assert_allclose(effect.target[12:], 0.70)
+    assert effect.active
+    assert effect.smoothing_active
+    assert effect.blend_fraction == 0.0
+    receipt = controller.build_receipt(strict_replay=True)
+    assert receipt.smoothing_activation_policy_frame == 400
+    assert receipt.peak_smoothing_residual_rms_rad > 0.0
 
 
 def test_recovery_quality_detects_lower_wobble_and_preserved_goal() -> None:
@@ -204,6 +245,60 @@ def test_momentum_unloading_gate_requires_measured_motion_and_replay_gains() -> 
     assert not fallback_receipt.used_candidate
     assert fallback_receipt.fallback_reason == "out_of_evidence_regime"
     assert fallback_receipt.rollback_target_hash == evolution.parent.policy_hash
+
+
+def test_naturalness_gate_requires_jerk_gains_without_stability_regression() -> None:
+    parent = replace(
+        measure_g1_recovery_quality(_trajectory(wobble_scale=1.0)),
+        post_contact_joint_acceleration_rms_rad_s2=20.0,
+        post_contact_joint_jerk_rms_rad_s3=750.0,
+        post_contact_leg_joint_jerk_rms_rad_s3=1000.0,
+        post_contact_waist_joint_jerk_rms_rad_s3=680.0,
+        post_contact_arm_joint_jerk_rms_rad_s3=400.0,
+        tail_joint_jerk_rms_rad_s3=1.25,
+        post_contact_pelvis_path_length_m=1.86,
+        post_contact_pelvis_displacement_m=0.50,
+        post_contact_support_transition_count=49,
+        tail_wobble_index=0.124,
+        settling_time_sec=4.26,
+    )
+    candidate = replace(
+        parent,
+        post_contact_joint_acceleration_rms_rad_s2=19.7,
+        post_contact_joint_jerk_rms_rad_s3=735.0,
+        post_contact_leg_joint_jerk_rms_rad_s3=992.0,
+        post_contact_waist_joint_jerk_rms_rad_s3=655.0,
+        post_contact_arm_joint_jerk_rms_rad_s3=365.0,
+        tail_joint_jerk_rms_rad_s3=1.04,
+        post_contact_pelvis_path_length_m=1.875,
+        post_contact_pelvis_displacement_m=0.52,
+        tail_wobble_index=0.122,
+        settling_time_sec=4.30,
+    )
+    result = _successful_result(target_error_m=0.13, ball_speed_mps=5.6)
+
+    promoted = compare_g1_naturalness(
+        parent=parent,
+        candidate=candidate,
+        parent_result=result,
+        candidate_result=result,
+        parent_strict_replay=True,
+        candidate_strict_replay=True,
+    )
+    rejected = compare_g1_naturalness(
+        parent=parent,
+        candidate=replace(candidate, post_contact_arm_joint_jerk_rms_rad_s3=410.0),
+        parent_result=result,
+        candidate_result=result,
+        parent_strict_replay=True,
+        candidate_strict_replay=True,
+    )
+
+    assert promoted.passed
+    assert promoted.arm_joint_jerk_reduction == pytest.approx(0.0875)
+    assert promoted.tail_joint_jerk_reduction > 0.15
+    assert not rejected.passed
+    assert "arm_jerk_reduction_below_gate" in rejected.reasons
 
 
 def test_recovery_regime_gate_rejects_uncalibrated_dynamics() -> None:

@@ -20,13 +20,16 @@ from rosclaw.simforge.backends.unitree_mujoco_backend import (
     GoalForgeEpisode,
     trajectory_digest,
 )
+from rosclaw.simforge.g1_cerebellar_recovery import G1CerebellarRecoveryConfig
 from rosclaw.simforge.g1_moving_ball import MovingBallInterceptAdapter
 from rosclaw.simforge.g1_recovery_evolution import G1MomentumUnloadingEvolution
 from rosclaw.simforge.g1_recovery_quality import (
     G1MomentumUnloadingComparison,
+    G1NaturalnessComparison,
     G1RecoveryComparison,
     G1RecoveryQuality,
     compare_g1_momentum_unloading,
+    compare_g1_naturalness,
     compare_g1_recovery,
     measure_g1_recovery_quality,
 )
@@ -75,6 +78,12 @@ class HatTrickShot:
     momentum_comparison: dict[str, Any] | None = None
     momentum_evolution: dict[str, Any] | None = None
     momentum_route_receipt: dict[str, Any] | None = None
+    naturalness_parent_result: dict[str, Any] | None = None
+    naturalness_parent_metrics: dict[str, Any] | None = None
+    naturalness_parent_trajectory_path: str | None = None
+    naturalness_parent_trajectory_hash: str | None = None
+    naturalness_parent_strict_replay: bool = False
+    naturalness_comparison: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -83,7 +92,7 @@ class GoalForgeHatTrick:
     kick_prior_hash: str
     backend_commit: str
     shots: tuple[HatTrickShot, ...]
-    schema_version: str = "rosclaw.g1_goalforge.hat_trick.v3"
+    schema_version: str = "rosclaw.g1_goalforge.hat_trick.v4"
 
     @property
     def passed(self) -> bool:
@@ -109,6 +118,9 @@ class GoalForgeHatTrick:
             and rescue.momentum_evolution["decision"] == "SIM_CHAMPION"
             and rescue.momentum_route_receipt is not None
             and rescue.momentum_route_receipt["used_candidate"]
+            and rescue.naturalness_parent_strict_replay
+            and rescue.naturalness_comparison is not None
+            and rescue.naturalness_comparison["passed"]
             and all(
                 shot.recovery_receipt is not None
                 and shot.recovery_receipt["strict_replay"]
@@ -161,6 +173,10 @@ class GoalForgeHatTrick:
                     self.shots[2].momentum_route_receipt
                     and self.shots[2].momentum_route_receipt["used_candidate"]
                 ),
+                "natural_upper_body_follow_through": bool(
+                    self.shots[2].naturalness_comparison
+                    and self.shots[2].naturalness_comparison["passed"]
+                ),
                 "candidate_v3_promoted": False,
                 "magnus_curve_claimed": False,
                 "real_hardware": False,
@@ -191,6 +207,14 @@ class _MomentumPair:
     route_receipt: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _NaturalnessPair:
+    parent: GoalForgeEpisode
+    parent_strict_replay: bool
+    parent_metrics: G1RecoveryQuality
+    comparison: G1NaturalnessComparison
+
+
 def run_goalforge_hat_trick(
     *,
     asset_root: Path,
@@ -207,6 +231,8 @@ def run_goalforge_hat_trick(
     backend = G1MuJoCoBackend(asset_root=asset_root, trace_stride=1)
     qualification = backend.qualification
     base = _base_scenario()
+    retained_recovery = G1CerebellarRecoveryConfig()
+    natural_recovery = _natural_recovery_config()
     selection_seed = 202607289
     target_y, target_z = 0.0, 0.55
     target_scenario = replace(
@@ -230,6 +256,7 @@ def run_goalforge_hat_trick(
         scenario=target_scenario,
         parameters=target_parameters,
         feedback_enabled=False,
+        recovery_config=retained_recovery,
     )
     target_path = _save_trajectory(root / "shot-1-nine-grid.npz", target.candidate)
     target_baseline_path = _save_trajectory(
@@ -258,6 +285,7 @@ def run_goalforge_hat_trick(
         scenario=moving_scenario,
         parameters=moving_parameters,
         feedback_enabled=False,
+        recovery_config=retained_recovery,
     )
     moving_path = _save_trajectory(root / "shot-2-moving-ball.npz", moving.candidate)
     moving_baseline_path = _save_trajectory(
@@ -282,6 +310,7 @@ def run_goalforge_hat_trick(
         scenario=rescue_scenario,
         parameters=rescue_parameters,
         feedback_enabled=True,
+        recovery_config=natural_recovery,
     )
     rescue_path = _save_trajectory(root / "shot-3-feedback-on.npz", rescue.candidate)
     rescue_off_path = _save_trajectory(root / "shot-3-feedback-off.npz", rescue_baseline)
@@ -289,12 +318,23 @@ def run_goalforge_hat_trick(
         root / "shot-3-feedback-on-recovery-off.npz",
         rescue.baseline,
     )
+    naturalness = _run_naturalness_comparison(
+        backend=backend,
+        scenario=rescue_scenario,
+        parameters=rescue_parameters,
+        candidate_pair=rescue,
+    )
+    rescue_naturalness_parent_path = _save_trajectory(
+        root / "shot-3-naturalness-parent.npz",
+        naturalness.parent,
+    )
     momentum = _run_momentum_evolution(
         backend=backend,
         scenario=rescue_scenario,
         parent_parameters=rescue_parent_parameters,
         candidate_parameters=rescue_parameters,
         candidate_pair=rescue,
+        recovery_config=retained_recovery,
     )
     rescue_momentum_parent_path = _save_trajectory(
         root / "shot-3-momentum-parent.npz",
@@ -355,6 +395,8 @@ def run_goalforge_hat_trick(
             recovery_baseline_path=rescue_recovery_baseline_path,
             momentum_pair=momentum,
             momentum_parent_path=rescue_momentum_parent_path,
+            naturalness_pair=naturalness,
+            naturalness_parent_path=rescue_naturalness_parent_path,
         ),
     )
     result = GoalForgeHatTrick(
@@ -376,12 +418,23 @@ def _base_scenario() -> GoalForgeScenario:
     )[0]
 
 
+def _natural_recovery_config() -> G1CerebellarRecoveryConfig:
+    """Evolved post-contact coordination bound to the Hat Trick evidence."""
+
+    return G1CerebellarRecoveryConfig(
+        target_smoothing_alpha=0.70,
+        target_smoothing_start_policy_frame=400,
+        target_smoothing_joint_group="upper_body",
+    )
+
+
 def _run_recovery_pair(
     *,
     backend: G1MuJoCoBackend,
     scenario: GoalForgeScenario,
     parameters: ShotParameters,
     feedback_enabled: bool,
+    recovery_config: G1CerebellarRecoveryConfig,
 ) -> _RecoveryPair:
     baseline_runtime = _balance_runtime(backend) if feedback_enabled else None
     baseline = backend.run(
@@ -398,7 +451,7 @@ def _run_recovery_pair(
     baseline_strict = _episodes_match(baseline, baseline_replay)
 
     runtime = _balance_runtime(backend) if feedback_enabled else None
-    recovery = backend.build_cerebellar_recovery_controller(scenario)
+    recovery = backend.build_cerebellar_recovery_controller(scenario, recovery_config)
     candidate = backend.run(
         scenario,
         parameters,
@@ -406,7 +459,10 @@ def _run_recovery_pair(
         recovery_controller=recovery,
     )
     replay_runtime = _balance_runtime(backend) if feedback_enabled else None
-    replay_recovery = backend.build_cerebellar_recovery_controller(scenario)
+    replay_recovery = backend.build_cerebellar_recovery_controller(
+        scenario,
+        recovery_config,
+    )
     replay = backend.run(
         scenario,
         parameters,
@@ -455,11 +511,15 @@ def _run_momentum_evolution(
     parent_parameters: ShotParameters,
     candidate_parameters: ShotParameters,
     candidate_pair: _RecoveryPair,
+    recovery_config: G1CerebellarRecoveryConfig,
 ) -> _MomentumPair:
     """Gate a shorter recovery action against the retained Phase 7.1 parent."""
 
     parent_runtime = _balance_runtime(backend)
-    parent_recovery = backend.build_cerebellar_recovery_controller(scenario)
+    parent_recovery = backend.build_cerebellar_recovery_controller(
+        scenario,
+        recovery_config,
+    )
     parent = backend.run(
         scenario,
         parent_parameters,
@@ -467,7 +527,10 @@ def _run_momentum_evolution(
         recovery_controller=parent_recovery,
     )
     replay_runtime = _balance_runtime(backend)
-    replay_recovery = backend.build_cerebellar_recovery_controller(scenario)
+    replay_recovery = backend.build_cerebellar_recovery_controller(
+        scenario,
+        recovery_config,
+    )
     parent_replay = backend.run(
         scenario,
         parent_parameters,
@@ -504,6 +567,57 @@ def _run_momentum_evolution(
         comparison=comparison,
         evolution=evolution,
         route_receipt=route_receipt.to_dict(),
+    )
+
+
+def _run_naturalness_comparison(
+    *,
+    backend: G1MuJoCoBackend,
+    scenario: GoalForgeScenario,
+    parameters: ShotParameters,
+    candidate_pair: _RecoveryPair,
+) -> _NaturalnessPair:
+    """Gate upper-body follow-through against the retained unsmoothed action."""
+
+    parent_config = G1CerebellarRecoveryConfig()
+    parent = backend.run(
+        scenario,
+        parameters,
+        feedback_runtime=_balance_runtime(backend),
+        recovery_controller=backend.build_cerebellar_recovery_controller(
+            scenario,
+            parent_config,
+        ),
+    )
+    parent_replay = backend.run(
+        scenario,
+        parameters,
+        feedback_runtime=_balance_runtime(backend),
+        recovery_controller=backend.build_cerebellar_recovery_controller(
+            scenario,
+            parent_config,
+        ),
+    )
+    parent_strict = _episodes_match(parent, parent_replay)
+    parent_metrics = measure_g1_recovery_quality(parent.trajectory)
+    comparison = compare_g1_naturalness(
+        parent=parent_metrics,
+        candidate=candidate_pair.candidate_metrics,
+        parent_result=parent.result.summary_dict(),
+        candidate_result=candidate_pair.candidate.result.summary_dict(),
+        parent_strict_replay=parent_strict,
+        candidate_strict_replay=candidate_pair.candidate_strict_replay,
+    )
+    if not comparison.passed:
+        raise RuntimeError(
+            "natural upper-body recovery did not pass its promotion gate: "
+            + ", ".join(comparison.reasons)
+        )
+    return _NaturalnessPair(
+        parent=parent,
+        parent_strict_replay=parent_strict,
+        parent_metrics=parent_metrics,
+        comparison=comparison,
     )
 
 
@@ -544,6 +658,8 @@ def _shot(
     planner_receipt: dict[str, Any] | None = None,
     momentum_pair: _MomentumPair | None = None,
     momentum_parent_path: Path | None = None,
+    naturalness_pair: _NaturalnessPair | None = None,
+    naturalness_parent_path: Path | None = None,
 ) -> HatTrickShot:
     return HatTrickShot(
         name=name,
@@ -582,6 +698,24 @@ def _shot(
         momentum_comparison=(momentum_pair.comparison.to_dict() if momentum_pair else None),
         momentum_evolution=(momentum_pair.evolution.to_dict() if momentum_pair else None),
         momentum_route_receipt=(momentum_pair.route_receipt if momentum_pair else None),
+        naturalness_parent_result=(
+            naturalness_pair.parent.result.summary_dict() if naturalness_pair else None
+        ),
+        naturalness_parent_metrics=(
+            naturalness_pair.parent_metrics.to_dict() if naturalness_pair else None
+        ),
+        naturalness_parent_trajectory_path=(
+            str(naturalness_parent_path) if naturalness_parent_path else None
+        ),
+        naturalness_parent_trajectory_hash=(
+            _file_hash(naturalness_parent_path) if naturalness_parent_path else None
+        ),
+        naturalness_parent_strict_replay=bool(
+            naturalness_pair and naturalness_pair.parent_strict_replay
+        ),
+        naturalness_comparison=(
+            naturalness_pair.comparison.to_dict() if naturalness_pair else None
+        ),
     )
 
 

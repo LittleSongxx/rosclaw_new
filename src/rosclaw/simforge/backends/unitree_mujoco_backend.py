@@ -499,6 +499,8 @@ class G1MuJoCoBackend:
                 {
                     "recovery_active": [],
                     "recovery_blend_fraction": [],
+                    "recovery_smoothing_active": [],
+                    "recovery_smoothing_residual_rms_rad": [],
                 }
             )
         kick_support_anchor: np.ndarray | None = None
@@ -555,6 +557,8 @@ class G1MuJoCoBackend:
         moving_ball_launched = scenario.ball_launch_delay_sec <= 0.0
         recovery_active = False
         recovery_blend_fraction = 0.0
+        recovery_smoothing_active = False
+        recovery_smoothing_residual_rms_rad = 0.0
 
         for frame in range(total_control_frames):
             if feedforward is not None:
@@ -617,6 +621,10 @@ class G1MuJoCoBackend:
                         target = recovery_effect.target
                         recovery_active = recovery_effect.active
                         recovery_blend_fraction = recovery_effect.blend_fraction
+                        recovery_smoothing_active = recovery_effect.smoothing_active
+                        recovery_smoothing_residual_rms_rad = (
+                            recovery_effect.smoothing_residual_rms_rad
+                        )
                 else:
                     target = last_target.copy()
                     kp = np.asarray(policy.kps, dtype=np.float64)
@@ -787,6 +795,8 @@ class G1MuJoCoBackend:
                     combined_residual_saturation=combined_residual_saturation,
                     recovery_active=recovery_active,
                     recovery_blend_fraction=recovery_blend_fraction,
+                    recovery_smoothing_active=recovery_smoothing_active,
+                    recovery_smoothing_residual_rms_rad=(recovery_smoothing_residual_rms_rad),
                 )
             if not finite:
                 break
@@ -820,6 +830,8 @@ class G1MuJoCoBackend:
                 combined_residual_saturation=combined_residual_saturation,
                 recovery_active=recovery_active,
                 recovery_blend_fraction=recovery_blend_fraction,
+                recovery_smoothing_active=recovery_smoothing_active,
+                recovery_smoothing_residual_rms_rad=recovery_smoothing_residual_rms_rad,
             )
         target_error = (
             math.hypot(crossing_y - scenario.target_y_m, crossing_z - scenario.target_z_m)
@@ -1180,6 +1192,8 @@ def _append_trace(
     combined_residual_saturation: int = 0,
     recovery_active: bool = False,
     recovery_blend_fraction: float = 0.0,
+    recovery_smoothing_active: bool = False,
+    recovery_smoothing_residual_rms_rad: float = 0.0,
 ) -> None:
     trace["time"].append(time_sec)
     trace["joint_position"].append(data.qpos[7:36].copy())
@@ -1220,6 +1234,8 @@ def _append_trace(
     if "recovery_active" in trace:
         trace["recovery_active"].append(recovery_active)
         trace["recovery_blend_fraction"].append(recovery_blend_fraction)
+        trace["recovery_smoothing_active"].append(recovery_smoothing_active)
+        trace["recovery_smoothing_residual_rms_rad"].append(recovery_smoothing_residual_rms_rad)
 
 
 def _feedback_effect(
