@@ -49,6 +49,7 @@ def main() -> int:
         default="synthetic_contract_fixture",
     )
     parser.add_argument("--updates", type=int, default=3)
+    parser.add_argument("--learner-seed", type=int)
     args = parser.parse_args()
     if args.physical_gpu not in range(4) or not 1 <= args.updates <= 20:
         raise SystemExit("invalid continual CUDA worker request")
@@ -68,6 +69,9 @@ def main() -> int:
     else:
         parent, batch = _screening_batch(args.physical_gpu)
     gpu_uuid, pci_bus_id = _gpu_identity(args.physical_gpu)
+    learner_seed = args.learner_seed if args.learner_seed is not None else 7001 + args.physical_gpu
+    if learner_seed < 0:
+        raise SystemExit("learner seed must be non-negative")
     learner = ConstrainedResidualSAC(
         ResidualSACConfig(
             observation_names=OBSERVATIONS,
@@ -76,7 +80,7 @@ def main() -> int:
             hidden_dims=(64, 64),
             batch_size=32,
             device="cuda:0",
-            seed=7001 + args.physical_gpu,
+            seed=learner_seed,
         )
     )
     started = time.perf_counter()
@@ -110,6 +114,7 @@ def main() -> int:
         "candidate_version": candidate.version,
         "artifact_bytes": len(artifact),
         "update_count": len(updates),
+        "learner_seed": learner_seed,
         "updates_finite": all(update.finite for update in updates),
         "critic_transition_count": updates[-1].critic_transition_count,
         "actor_transition_count": updates[-1].actor_transition_count,
