@@ -128,8 +128,10 @@ def real_handlers(capture_box: dict, gate: FrameFreshnessGate, artifacts_dir: Pa
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--procedure", default="B_reset_fresh_frames",
+    parser.add_argument("--procedure", default=None,
                         choices=["A_immediate_restart", "B_reset_fresh_frames", "C_backoff_sync_check"])
+    parser.add_argument("--from-memory", action="store_true",
+                        help="复发模式：从命名空间检索已验证的 procedural memory 并执行其程序")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     args = parser.parse_args()
 
@@ -142,6 +144,45 @@ def main() -> int:
     manifest = EvidenceManifest.open(
         namespace.evidence_root, config.experiment_id, config.config_hash
     )
+
+    procedure = args.procedure
+    memory_source = None
+    if args.from_memory:
+        # §Camera Experiment C 复发: retrieve the VALIDATED recovery
+        # procedure from the namespace's procedural memory — the recovery
+        # must be memory-driven, never re-hardcoded.
+        store = namespace.knowledge_store()
+        namespace.assert_store_isolated(store)
+        rows = store.query(
+            "memory_items",
+            filters={"memory_type": "procedural", "failure_type": "camera_no_fresh_frame"},
+            limit=20,
+        )
+        recovered = [r for r in rows if (r.get("outcome") == "success")]
+        if not recovered:
+            print(json.dumps({
+                "ok": False,
+                "blocked": "no validated procedural memory for camera_no_fresh_frame "
+                "in the experiment namespace — run the first-fault acceptance first",
+            }, indent=2, ensure_ascii=False))
+            return 1
+        recovered.sort(key=lambda r: float(r.get("event_time") or 0.0))
+        memory_source = recovered[-1]
+        import json as _json
+
+        metadata = memory_source.get("metadata")
+        if isinstance(metadata, str):
+            metadata = _json.loads(metadata)
+        procedure = str(metadata.get("procedure"))
+        manifest.record(
+            "camera_recovery_memory_retrieved",
+            memory_id=memory_source["id"],
+            procedure=procedure,
+            memory_ttr_s=metadata.get("ttr_s"),
+            note="第二次故障: 恢复程序来自已验证的 procedural memory, 不是重新硬编码",
+        )
+    if not procedure:
+        procedure = "B_reset_fresh_frames"
     artifacts_dir = namespace.evidence_root / "artifacts" / "camera"
     gate = FrameFreshnessGate()
     capture_box: dict = {}
@@ -156,7 +197,7 @@ def main() -> int:
 
     # 2) Recovery from the injected fault (the torn-down pipeline above).
     handlers = real_handlers(capture_box, gate, artifacts_dir)
-    result = run_recovery(args.procedure, handlers=handlers)
+    result = run_recovery(procedure, handlers=handlers)
     if capture_box.get("cap") is not None:
         capture_box["cap"].stop()
 
@@ -167,7 +208,7 @@ def main() -> int:
         device=identity,
         pre_fault_frame_age_ms=pre_fault_age,
         robot_id="rh56_rps_robot",
-        evidence_refs=[f"camera_recovery_{args.procedure}_{int(time.time())}"],
+        evidence_refs=[f"camera_recovery_{procedure}_{int(time.time())}"],
     )
     store = namespace.knowledge_store()
     namespace.assert_store_isolated(store)
@@ -198,12 +239,13 @@ def main() -> int:
 
     entry = manifest.record(
         "camera_recovery",
-        procedure=args.procedure,
+        procedure=procedure,
         recovered=result.recovered,
         ttr_s=round(result.ttr_s, 3),
         manual_replug_required=result.manual_replug_required,
         camera_session_id=result.camera_session_id,
         memory_id=record["id"],
+        driven_by_memory_id=(memory_source or {}).get("id"),
         steps=[{"name": s.name, "ok": s.ok, "duration_s": round(s.duration_s, 3)} for s in result.steps],
         device=identity,
         note=result.note,
