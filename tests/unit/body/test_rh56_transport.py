@@ -108,6 +108,17 @@ def test_serial_timeout() -> None:
         transport.read_state()
 
 
+def test_mock_transport_honors_maximum_step_per_read_tick() -> None:
+    profile = load_transport_profile(RS485_PROFILE)
+    transport = MockModbusTransport(profile)
+    transport.connect()
+
+    assert transport.write_position([900] * 6, speed=100, force_limit=100)
+    feedback = transport.read_state()
+
+    assert feedback.position == [950] * 6
+
+
 def test_serial_reenumeration_revokes_permit() -> None:
     from rosclaw.integrations.lerobot.execution import PermitManager
 

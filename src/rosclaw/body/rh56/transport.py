@@ -196,14 +196,13 @@ class MockModbusTransport:
             self._connected = False
             raise TransportIOError("device_path_disappeared: simulated disconnect")
 
-        dt = 1.0 / self._tick_hz
         for i in range(self._count):
             spec = self._specs[i]
             error = self._target[i] - self._position[i]
             if self._estopped:
                 error = 0.0
             step = math.copysign(
-                min(abs(error), spec.max_step_per_tick * dt * (self._speed / 100.0)),
+                min(abs(error), spec.max_step_per_tick * (self._speed / 100.0)),
                 error,
             )
             moving = abs(step) > 1e-6

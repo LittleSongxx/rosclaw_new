@@ -89,6 +89,10 @@ Welcome to the ROSClaw documentation index. This directory contains all project 
 - **[help/rosclaw-simforge-phase2-implementation-report.md](help/rosclaw-simforge-phase2-implementation-report.md)** — Phase 2 implementation and local simulation evidence report.
 - **[help/rosclaw-simforge-phase3-implementation-report.md](help/rosclaw-simforge-phase3-implementation-report.md)** — Phase 3 implementation, causal results, process-chaos evidence, hashes, and evidence ceiling.
 - **[validation/GOALFORGE_PHASE4.md](validation/GOALFORGE_PHASE4.md)** — Phase 4 G1 GoalForge physical kick loop, Practice-to-MLP flywheel, four-GPU holdout isolation, Promotion Gate V4, Unitree DDS fail-closed execution, and MP4 evidence replay.
+- **[validation/FEEDBACK_PLANE_PHASE6.md](validation/FEEDBACK_PLANE_PHASE6.md)** — Phase 6 synchronous Feedback Plane contracts, deadline-aware runtime, safety projection, strict replay, G1 emergency balance reflex, and bounded ILC foundation.
+- **[validation/ROSCLAW_PHASE6_IMPLEMENTATION_REPORT.md](validation/ROSCLAW_PHASE6_IMPLEMENTATION_REPORT.md)** — Chinese implementation and evidence report for the first Phase 6 GoalForge Reflex milestone.
+- **[validation/ROSCLAW_PHASE6_SECOND_STAGE_REPORT.md](validation/ROSCLAW_PHASE6_SECOND_STAGE_REPORT.md)** — Phase 6 second-stage Holdout, historical regression, ten-trial ILC, and canonical DDS evidence report.
+- **[validation/ROSCLAW_PHASE6_SELF_EVOLUTION_REPORT.md](validation/ROSCLAW_PHASE6_SELF_EVOLUTION_REPORT.md)** — Phase 6 evidence-to-candidate self-evolution loop, reloadable ILC artifact, F1-F15 gate, and rollback lineage report.
 - **[help/rosclaw-simforge-phase4-implementation-report.md](help/rosclaw-simforge-phase4-implementation-report.md)** — Phase 4 implementation, physical recovery, Practice flywheel, four-GPU screening, DDS chaos, proof hashes, and evidence ceiling.
 - **[INTEGRATION_GUIDE.md](INTEGRATION_GUIDE.md)** — Integration guide.
 - **[G1_SENSE_DEMO.md](G1_SENSE_DEMO.md)** — Unitree G1 sense demo.
