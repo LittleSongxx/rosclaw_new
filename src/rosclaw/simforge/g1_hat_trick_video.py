@@ -29,6 +29,12 @@ class HatTrickVideoClip:
     success: bool
     target_error_m: float
     ball_speed_mps: float
+    tail_wobble_reduction: float
+    pelvis_path_reduction: float
+    pelvis_displacement_reduction: float
+    joint_jerk_reduction: float
+    arm_jerk_reduction: float
+    tail_joint_jerk_reduction: float
 
 
 @dataclass(frozen=True)
@@ -44,7 +50,7 @@ class HatTrickVideoResult:
     duration_sec: float
     clips: tuple[HatTrickVideoClip, ...]
     visualization_only: bool = True
-    schema_version: str = "rosclaw.g1_goalforge.hat_trick_video.v1"
+    schema_version: str = "rosclaw.g1_goalforge.hat_trick_video.v3"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -64,6 +70,11 @@ class _Source:
     trajectory_hash: str
     trajectory: dict[str, np.ndarray]
     comparison: dict[str, np.ndarray] | None
+    recovery_metrics: dict[str, Any]
+    recovery_comparison: dict[str, Any]
+    momentum_comparison: dict[str, Any]
+    naturalness_comparison: dict[str, Any]
+    comparison_kind: str | None
 
 
 def render_goalforge_hat_trick_video(
@@ -171,6 +182,27 @@ def render_goalforge_hat_trick_video(
                 success=bool(source.result["success"]),
                 target_error_m=float(source.result["target_error_m"]),
                 ball_speed_mps=float(source.result["ball_speed_mps"]),
+                tail_wobble_reduction=float(
+                    source.momentum_comparison.get(
+                        "tail_wobble_reduction",
+                        source.recovery_comparison.get("tail_wobble_reduction", 0.0),
+                    )
+                ),
+                pelvis_path_reduction=float(
+                    source.momentum_comparison.get("pelvis_path_reduction", 0.0)
+                ),
+                pelvis_displacement_reduction=float(
+                    source.momentum_comparison.get("pelvis_displacement_reduction", 0.0)
+                ),
+                joint_jerk_reduction=float(
+                    source.naturalness_comparison.get("joint_jerk_reduction", 0.0)
+                ),
+                arm_jerk_reduction=float(
+                    source.naturalness_comparison.get("arm_joint_jerk_reduction", 0.0)
+                ),
+                tail_joint_jerk_reduction=float(
+                    source.naturalness_comparison.get("tail_joint_jerk_reduction", 0.0)
+                ),
             )
         )
         offset += duration
@@ -206,12 +238,21 @@ def _load_sources(report: dict[str, Any], checkout: Path) -> tuple[_Source, ...]
             raise ValueError("Hat Trick trajectory hash mismatch")
         trajectory = _load_trajectory(path)
         comparison = None
-        comparison_path = shot.get("comparison_trajectory_path")
+        comparison_kind = None
+        comparison_path = shot.get("naturalness_parent_trajectory_path")
+        comparison_hash = shot.get("naturalness_parent_trajectory_hash")
+        if comparison_path:
+            comparison_kind = "naturalness_parent"
+        else:
+            comparison_path = shot.get("comparison_trajectory_path")
+            comparison_hash = shot.get("comparison_trajectory_hash")
+            if comparison_path:
+                comparison_kind = "feedback_off"
         if comparison_path:
             resolved = Path(str(comparison_path)).expanduser().resolve()
             if checkout == resolved or checkout in resolved.parents:
                 raise ValueError("Hat Trick comparison trajectory must be outside the checkout")
-            if _hash_file(resolved) != shot["comparison_trajectory_hash"]:
+            if _hash_file(resolved) != comparison_hash:
                 raise ValueError("Hat Trick comparison trajectory hash mismatch")
             comparison = _load_trajectory(resolved)
         result.append(
@@ -223,6 +264,11 @@ def _load_sources(report: dict[str, Any], checkout: Path) -> tuple[_Source, ...]
                 trajectory_hash=str(shot["trajectory_hash"]),
                 trajectory=trajectory,
                 comparison=comparison,
+                recovery_metrics=dict(shot.get("recovery_metrics") or {}),
+                recovery_comparison=dict(shot.get("recovery_comparison") or {}),
+                momentum_comparison=dict(shot.get("momentum_comparison") or {}),
+                naturalness_comparison=dict(shot.get("naturalness_comparison") or {}),
+                comparison_kind=comparison_kind,
             )
         )
     return tuple(result)
@@ -242,19 +288,27 @@ def _load_trajectory(path: Path) -> dict[str, np.ndarray]:
             raise ValueError(f"Hat Trick trajectory {name} has invalid shape")
         if not np.all(np.isfinite(array)):
             raise ValueError(f"Hat Trick trajectory {name} is non-finite")
+    time = np.asarray(value["time"], dtype=np.float64)
+    if len(time) < 2 or not np.all(np.diff(time) > 0.0):
+        raise ValueError("Hat Trick trajectory time must be strictly increasing")
+    for name in ("pelvis_pose", "ball_pose"):
+        quaternion_norm = np.linalg.norm(np.asarray(value[name])[:, 3:], axis=1)
+        if np.any(quaternion_norm <= 1e-12):
+            raise ValueError(f"Hat Trick trajectory {name} contains a zero quaternion")
     return value
 
 
 def _timeline(source: _Source, *, fps: int) -> tuple[float, ...]:
     contact = float(source.result["ball_contact_time_sec"])
     start = max(float(source.trajectory["time"][0]), contact - 2.7)
-    end = min(float(source.trajectory["time"][-1]), contact + 3.2)
+    end = min(float(source.trajectory["time"][-1]), contact + 7.5)
     segments = (
         (start, contact - 0.45, 1.35),
         (contact - 0.45, contact + 0.75, 0.45),
-        (contact + 0.75, end, 1.45),
+        (contact + 0.75, min(end, contact + 3.2), 1.45),
+        (min(end, contact + 3.2), end, 2.10),
     )
-    values = []
+    values: list[float] = []
     for segment_start, segment_end, speed in segments:
         if segment_end <= segment_start:
             continue
@@ -352,18 +406,26 @@ def _render_pose(
     show_grid: bool,
     show_push: bool,
 ) -> np.ndarray:
-    times = trajectory["time"]
-    index = min(int(np.searchsorted(times, simulation_time, side="left")), len(times) - 1)
+    index, pelvis_pose, joint_position, ball_pose = _sample_trajectory(
+        trajectory,
+        simulation_time,
+    )
     data.qpos[:] = model.qpos0
-    data.qpos[:7] = trajectory["pelvis_pose"][index]
-    data.qpos[7:36] = trajectory["joint_position"][index]
-    data.qpos[ball_qpos : ball_qpos + 7] = trajectory["ball_pose"][index]
+    data.qpos[:7] = pelvis_pose
+    data.qpos[7:36] = joint_position
+    data.qpos[ball_qpos : ball_qpos + 7] = ball_pose
     mujoco.mj_forward(model, data)
-    if simulation_time >= contact_time + 0.12:
+    if contact_time + 0.12 <= simulation_time < contact_time + 2.2:
         camera.lookat[:] = (3.0, 0.0, 0.65)
         camera.distance = 6.1
         camera.azimuth = 90.0
         camera.elevation = -7.0
+    elif simulation_time >= contact_time + 2.2:
+        camera.lookat[:] = pelvis_pose[:3]
+        camera.lookat[2] = 0.72
+        camera.distance = 3.2
+        camera.azimuth = 92.0
+        camera.elevation = -8.0
     else:
         camera.lookat[:] = (1.4, 0.0, 0.72)
         camera.distance = 3.6
@@ -379,7 +441,7 @@ def _render_pose(
         show_grid=show_grid,
     )
     if show_push and 4.35 <= simulation_time <= 5.05:
-        pelvis = np.asarray(trajectory["pelvis_pose"][index, :3], dtype=np.float64)
+        pelvis = pelvis_pose[:3]
         for offset in np.linspace(-0.6, -0.15, 6):
             _append_sphere(
                 mujoco,
@@ -389,6 +451,81 @@ def _render_pose(
                 (1.0, 0.15, 0.12, 0.85),
             )
     return renderer.render().copy()
+
+
+def _sample_trajectory(
+    trajectory: dict[str, np.ndarray],
+    simulation_time: float,
+) -> tuple[int, np.ndarray, np.ndarray, np.ndarray]:
+    """Interpolate physical poses without changing their evidence source.
+
+    Slow-motion playback advances by less than one 50 Hz trace step.  Nearest
+    sampling therefore repeated frames and made a continuous movement look
+    like a twitch.  Positions use linear interpolation and free-joint
+    quaternions use shortest-arc SLERP.
+    """
+
+    times = np.asarray(trajectory["time"], dtype=np.float64)
+    upper = int(np.searchsorted(times, simulation_time, side="right"))
+    if upper <= 0:
+        index = 0
+        ratio = 0.0
+        upper = 0
+    elif upper >= len(times):
+        index = len(times) - 1
+        ratio = 0.0
+        upper = index
+    else:
+        index = upper - 1
+        ratio = float((simulation_time - times[index]) / (times[upper] - times[index]))
+    pelvis = _interpolate_pose(
+        trajectory["pelvis_pose"][index],
+        trajectory["pelvis_pose"][upper],
+        ratio,
+    )
+    joints = _lerp(
+        trajectory["joint_position"][index],
+        trajectory["joint_position"][upper],
+        ratio,
+    )
+    ball = _interpolate_pose(
+        trajectory["ball_pose"][index],
+        trajectory["ball_pose"][upper],
+        ratio,
+    )
+    trail_index = upper if ratio >= 0.5 else index
+    return trail_index, pelvis, joints, ball
+
+
+def _interpolate_pose(left: np.ndarray, right: np.ndarray, ratio: float) -> np.ndarray:
+    result = np.empty(7, dtype=np.float64)
+    result[:3] = _lerp(left[:3], right[:3], ratio)
+    result[3:] = _slerp_wxyz(left[3:], right[3:], ratio)
+    return result
+
+
+def _lerp(left: np.ndarray, right: np.ndarray, ratio: float) -> np.ndarray:
+    return np.asarray(left, dtype=np.float64) + ratio * (
+        np.asarray(right, dtype=np.float64) - np.asarray(left, dtype=np.float64)
+    )
+
+
+def _slerp_wxyz(left: np.ndarray, right: np.ndarray, ratio: float) -> np.ndarray:
+    start = np.asarray(left, dtype=np.float64)
+    end = np.asarray(right, dtype=np.float64)
+    start = start / np.linalg.norm(start)
+    end = end / np.linalg.norm(end)
+    dot = float(np.dot(start, end))
+    if dot < 0.0:
+        end = -end
+        dot = -dot
+    dot = float(np.clip(dot, -1.0, 1.0))
+    if dot > 0.9995:
+        value = start + ratio * (end - start)
+        return value / np.linalg.norm(value)
+    angle = float(np.arccos(dot))
+    scale = float(np.sin(angle))
+    return np.sin((1.0 - ratio) * angle) / scale * start + np.sin(ratio * angle) / scale * end
 
 
 def _add_targets_and_trail(
@@ -468,19 +605,53 @@ def _ffmpeg_command(
     for source, duration in zip(sources, durations, strict=True):
         end = offset + duration
         result = source.result
-        metrics = (
-            f"{source.title}  ·  {float(result['ball_speed_mps']):.2f} m/s  ·  "
-            f"error {float(result['target_error_m']):.3f} m  ·  STABLE"
-        )
+        if source.momentum_comparison:
+            path_reduction = 100.0 * float(source.momentum_comparison["pelvis_path_reduction"])
+            arm_jerk_reduction = 100.0 * float(
+                source.naturalness_comparison.get("arm_joint_jerk_reduction", 0.0)
+            )
+            tail_jerk_reduction = 100.0 * float(
+                source.naturalness_comparison.get("tail_joint_jerk_reduction", 0.0)
+            )
+            metrics = (
+                f"SHOT 3 · NATURAL FOLLOW-THROUGH  ·  PATH -{path_reduction:.0f}pct  ·  "
+                f"ARM JERK -{arm_jerk_reduction:.0f}pct  ·  "
+                f"TAIL JERK -{tail_jerk_reduction:.0f}pct"
+            )
+        elif float(source.scenario["target_z_m"]) >= 0.55:
+            metrics = (
+                f"{source.title}  ·  HIGH TARGET {float(source.scenario['target_z_m']):.2f} m  ·  "
+                f"{float(result['ball_speed_mps']):.2f} m/s  ·  "
+                f"error {float(result['target_error_m']):.3f} m"
+            )
+        else:
+            wobble_reduction = 100.0 * float(
+                source.recovery_comparison.get("tail_wobble_reduction", 0.0)
+            )
+            metrics = (
+                f"{source.title}  ·  {float(result['ball_speed_mps']):.2f} m/s  ·  "
+                f"error {float(result['target_error_m']):.3f} m  ·  "
+                f"RECOVERY WOBBLE -{wobble_reduction:.0f} pct"
+            )
         filters.append(
             f"drawtext={font_option}text='{metrics}':x=34:y=68:fontsize=22:"
             f"fontcolor=0x65F59A:enable='between(t,{offset:.6f},{end:.6f})'"
         )
         if source.comparison is not None:
+            left_label = (
+                "V5 CONTROL · UNSMOOTHED UPPER BODY"
+                if source.comparison_kind == "naturalness_parent"
+                else "PARENT · LONG DRIFT / UNSAFE"
+            )
+            right_label = (
+                "V6 · COORDINATED FOLLOW-THROUGH"
+                if source.comparison_kind == "naturalness_parent"
+                else "EVOLVED UNLOAD · SHORT STEP + SETTLED"
+            )
             filters.extend(
                 (
-                    f"drawtext={font_option}text='FEEDBACK OFF · FALL / UNSAFE':x=120:y=145:fontsize=22:fontcolor=0xFF6262:enable='between(t,{offset:.6f},{end:.6f})'",
-                    f"drawtext={font_option}text='FEEDBACK ON · RESCUED GOAL':x=760:y=145:fontsize=22:fontcolor=0x65F59A:enable='between(t,{offset:.6f},{end:.6f})'",
+                    f"drawtext={font_option}text='{left_label}':x=105:y=145:fontsize=20:fontcolor=0xFFB45F:enable='between(t,{offset:.6f},{end:.6f})'",
+                    f"drawtext={font_option}text='{right_label}':x=735:y=145:fontsize=20:fontcolor=0x65F59A:enable='between(t,{offset:.6f},{end:.6f})'",
                 )
             )
         offset = end

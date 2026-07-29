@@ -26,6 +26,12 @@ from rosclaw.feedback.contracts import FeedbackReceipt
 from rosclaw.feedback.ilc import ILCFeedforward
 from rosclaw.feedback.profiles.g1 import g1_joint_residual_limits
 from rosclaw.feedback.runtime import FeedbackRuntime
+from rosclaw.simforge.g1_cerebellar_recovery import (
+    G1CerebellarRecoveryConfig,
+    G1CerebellarRecoveryController,
+    G1CerebellarRecoveryReceipt,
+    evaluate_g1_cerebellar_recovery_regime,
+)
 from rosclaw.simforge.tasks.g1_goalforge.concepts import (
     G1_DDS_JOINT_NAMES,
     G1_HARD_TORQUE_LIMITS,
@@ -84,6 +90,7 @@ class GoalForgeEpisode:
     trajectory: dict[str, np.ndarray]
     feedback_receipt: FeedbackReceipt | None = None
     feedforward_hash: str | None = None
+    recovery_receipt: G1CerebellarRecoveryReceipt | None = None
 
     @property
     def result_hash(self) -> str:
@@ -205,6 +212,36 @@ class G1MuJoCoBackend:
         self.torque_guard_scale = torque_guard_scale
         self._policy_session: Any | None = None
 
+    def build_cerebellar_recovery_controller(
+        self,
+        scenario: GoalForgeScenario,
+        config: G1CerebellarRecoveryConfig | None = None,
+    ) -> G1CerebellarRecoveryController:
+        """Bind the recovery segment to the exact qualified Body and motion."""
+
+        resolved = config or G1CerebellarRecoveryConfig()
+        regime_eligible, regime_reasons = evaluate_g1_cerebellar_recovery_regime(
+            support_friction=scenario.support_ground_friction,
+            control_latency_ms=scenario.control_latency_ms,
+            disturbance_n=scenario.disturbance_n,
+            config=resolved,
+        )
+        *_, mujoco_to_isaac = _load_robonaldo(self.qualification.asset_root)
+        with np.load(self.qualification.asset_root / _MOTION_REL) as motion:
+            standing_pose = np.asarray(
+                motion["joint_pos"][0][mujoco_to_isaac],
+                dtype=np.float64,
+            )
+        return G1CerebellarRecoveryController(
+            body_hash=self.qualification.body_hash,
+            motion_hash=self.qualification.motion_hash,
+            regime_commitment=scenario.scenario_commitment,
+            regime_eligible=regime_eligible,
+            regime_reasons=regime_reasons,
+            standing_pose=standing_pose,
+            config=resolved,
+        )
+
     def run(
         self,
         scenario: GoalForgeScenario,
@@ -212,6 +249,7 @@ class G1MuJoCoBackend:
         *,
         feedback_runtime: FeedbackRuntime | None = None,
         feedforward: ILCFeedforward | None = None,
+        recovery_controller: G1CerebellarRecoveryController | None = None,
     ) -> GoalForgeEpisode:
         if (
             feedback_runtime is not None
@@ -223,6 +261,12 @@ class G1MuJoCoBackend:
                 body_hash=self.qualification.body_hash,
                 regime_hash=scenario.scenario_commitment,
                 joint_names=G1_DDS_JOINT_NAMES,
+            )
+        if recovery_controller is not None:
+            recovery_controller.require_compatible(
+                body_hash=self.qualification.body_hash,
+                motion_hash=self.qualification.motion_hash,
+                regime_commitment=scenario.scenario_commitment,
             )
         if parameters.kick_foot != "right":
             return GoalForgeEpisode(
@@ -247,6 +291,7 @@ class G1MuJoCoBackend:
             parameters,
             feedback_runtime=feedback_runtime,
             feedforward=feedforward,
+            recovery_controller=recovery_controller,
         )
 
     def run_and_record(
@@ -341,6 +386,7 @@ class G1MuJoCoBackend:
         *,
         feedback_runtime: FeedbackRuntime | None = None,
         feedforward: ILCFeedforward | None = None,
+        recovery_controller: G1CerebellarRecoveryController | None = None,
     ) -> GoalForgeEpisode:
         import mujoco
 
@@ -351,6 +397,8 @@ class G1MuJoCoBackend:
         model.opt.timestep = 0.002
         if feedback_runtime is not None:
             feedback_runtime.reset()
+        if recovery_controller is not None:
+            recovery_controller.reset()
         _configure_scene(model, scenario)
         state = state_type(29)
         output = output_type(29)
@@ -446,6 +494,15 @@ class G1MuJoCoBackend:
                     "combined_residual_saturation": [],
                 }
             )
+        if recovery_controller is not None:
+            trace.update(
+                {
+                    "recovery_active": [],
+                    "recovery_blend_fraction": [],
+                    "recovery_smoothing_active": [],
+                    "recovery_smoothing_residual_rms_rad": [],
+                }
+            )
         kick_support_anchor: np.ndarray | None = None
         peak_support_slip = 0.0
         com_margin_min = math.inf
@@ -481,9 +538,9 @@ class G1MuJoCoBackend:
                 "ILC feedforward frame count does not match the pinned GoalForge trajectory"
             )
         last_target = data.qpos[7:36].copy()
-        feedback_residual = np.zeros(29, dtype=np.float64)
-        feedforward_residual = np.zeros(29, dtype=np.float64)
-        combined_residual = np.zeros(29, dtype=np.float64)
+        feedback_residual: np.ndarray = np.zeros(29, dtype=np.float64)
+        feedforward_residual: np.ndarray = np.zeros(29, dtype=np.float64)
+        combined_residual: np.ndarray = np.zeros(29, dtype=np.float64)
         combined_residual_saturation = 0
         combined_limits = np.asarray(
             g1_joint_residual_limits(G1_DDS_JOINT_NAMES),
@@ -495,7 +552,13 @@ class G1MuJoCoBackend:
         phase_repeat_accumulator = 0.0
         next_feedback_time = 0.0
         latest_support_slip = 0.0
+        latest_left_support = False
+        latest_right_support = False
         moving_ball_launched = scenario.ball_launch_delay_sec <= 0.0
+        recovery_active = False
+        recovery_blend_fraction = 0.0
+        recovery_smoothing_active = False
+        recovery_smoothing_residual_rms_rad = 0.0
 
         for frame in range(total_control_frames):
             if feedforward is not None:
@@ -546,6 +609,22 @@ class G1MuJoCoBackend:
                         parameters=parameters,
                         policy_frame=policy_frame,
                     )
+                    if recovery_controller is not None:
+                        recovery_effect = recovery_controller.adapt_target(
+                            target=target,
+                            policy_frame=policy_frame,
+                            timestamp_sec=float(data.time),
+                            ball_contact_detected=contact_observed,
+                            left_support=latest_left_support,
+                            right_support=latest_right_support,
+                        )
+                        target = recovery_effect.target
+                        recovery_active = recovery_effect.active
+                        recovery_blend_fraction = recovery_effect.blend_fraction
+                        recovery_smoothing_active = recovery_effect.smoothing_active
+                        recovery_smoothing_residual_rms_rad = (
+                            recovery_effect.smoothing_residual_rms_rad
+                        )
                 else:
                     target = last_target.copy()
                     kp = np.asarray(policy.kps, dtype=np.float64)
@@ -657,6 +736,8 @@ class G1MuJoCoBackend:
                 kick_support_anchor = None
             peak_support_slip = max(peak_support_slip, support_slip)
             latest_support_slip = support_slip
+            latest_left_support = left_contact
+            latest_right_support = right_contact
             com = data.subtree_com[ids.pelvis].copy()
             support_y = float(data.xpos[ids.left_ankle][1])
             com_margin = 0.11 - abs(float(com[1]) - support_y)
@@ -712,6 +793,10 @@ class G1MuJoCoBackend:
                     feedforward_residual=feedforward_residual,
                     combined_residual=combined_residual,
                     combined_residual_saturation=combined_residual_saturation,
+                    recovery_active=recovery_active,
+                    recovery_blend_fraction=recovery_blend_fraction,
+                    recovery_smoothing_active=recovery_smoothing_active,
+                    recovery_smoothing_residual_rms_rad=(recovery_smoothing_residual_rms_rad),
                 )
             if not finite:
                 break
@@ -743,6 +828,10 @@ class G1MuJoCoBackend:
                 feedforward_residual=feedforward_residual,
                 combined_residual=combined_residual,
                 combined_residual_saturation=combined_residual_saturation,
+                recovery_active=recovery_active,
+                recovery_blend_fraction=recovery_blend_fraction,
+                recovery_smoothing_active=recovery_smoothing_active,
+                recovery_smoothing_residual_rms_rad=recovery_smoothing_residual_rms_rad,
             )
         target_error = (
             math.hypot(crossing_y - scenario.target_y_m, crossing_z - scenario.target_z_m)
@@ -816,6 +905,11 @@ class G1MuJoCoBackend:
             if feedback_runtime is not None
             else None
         )
+        recovery_receipt = (
+            recovery_controller.build_receipt(strict_replay=False, evidence_domain="SIM")
+            if recovery_controller is not None
+            else None
+        )
         return GoalForgeEpisode(
             scenario=scenario,
             parameters=parameters,
@@ -825,6 +919,7 @@ class G1MuJoCoBackend:
             trajectory=arrays,
             feedback_receipt=feedback_receipt,
             feedforward_hash=feedforward.trajectory_hash if feedforward is not None else None,
+            recovery_receipt=recovery_receipt,
         )
 
 
@@ -1095,6 +1190,10 @@ def _append_trace(
     feedforward_residual: np.ndarray | None = None,
     combined_residual: np.ndarray | None = None,
     combined_residual_saturation: int = 0,
+    recovery_active: bool = False,
+    recovery_blend_fraction: float = 0.0,
+    recovery_smoothing_active: bool = False,
+    recovery_smoothing_residual_rms_rad: float = 0.0,
 ) -> None:
     trace["time"].append(time_sec)
     trace["joint_position"].append(data.qpos[7:36].copy())
@@ -1132,6 +1231,11 @@ def _append_trace(
         trace["feedforward_residual"].append(feedforward_residual.copy())
         trace["combined_residual"].append(combined_residual.copy())
         trace["combined_residual_saturation"].append(combined_residual_saturation)
+    if "recovery_active" in trace:
+        trace["recovery_active"].append(recovery_active)
+        trace["recovery_blend_fraction"].append(recovery_blend_fraction)
+        trace["recovery_smoothing_active"].append(recovery_smoothing_active)
+        trace["recovery_smoothing_residual_rms_rad"].append(recovery_smoothing_residual_rms_rad)
 
 
 def _feedback_effect(
@@ -1210,7 +1314,7 @@ def _feedback_effect(
         actual=actual,
         base_action=base_action,
     )
-    residual = np.zeros(29, dtype=np.float64)
+    residual: np.ndarray = np.zeros(29, dtype=np.float64)
     kick_phase_rate = 0.0
     joint_index = {name: index for index, name in enumerate(G1_DDS_JOINT_NAMES)}
     for output, value in command.projected.items():
