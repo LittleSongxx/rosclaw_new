@@ -252,7 +252,7 @@ class EvoRpsOrchestrator:
         """Generate bounded candidates from the latest baseline session's
         failure signature + regime (AUTO v1: config candidates only)."""
         from .candidates import generate_candidates
-        from .promotion import CandidateRecord, CandidateRegistry
+        from .promotion import CandidateRecord, CandidateRegistry, CandidateState
 
         manifest = self._open_manifest()
         baseline = manifest.by_kind("baseline_session")
@@ -281,6 +281,21 @@ class EvoRpsOrchestrator:
                 current_regime=candidate.current_regime,
                 baseline_practice_id=latest.get("practice_id"),
             )
+            # Re-proposing must never clobber lifecycle state: a candidate
+            # that already passed the gates keeps VALIDATED/PROMOTED, and a
+            # terminal REJECTED/ROLLED_BACK stays terminal — only genuinely
+            # new candidates enter as PROPOSED (same bug class as the
+            # promote() state reset found 2026-07-26).
+            existing = registry.get(candidate.candidate_id)
+            if existing is not None:
+                prior_state = existing.get("state")
+                if prior_state:
+                    record.state = CandidateState(str(prior_state))
+                prior_verdicts = existing.get("gate_verdicts")
+                if isinstance(prior_verdicts, str):
+                    prior_verdicts = json.loads(prior_verdicts)
+                if prior_verdicts:
+                    record.gate_verdicts = list(prior_verdicts)
             registry.upsert(record)
             records.append(record.to_record())
         manifest.record(
