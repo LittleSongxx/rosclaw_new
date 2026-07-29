@@ -18,6 +18,54 @@ from rosclaw.continual.contracts import (
 from rosclaw.continual.experience import ExperienceBatch, ExperienceRecord
 
 _ENVELOPE_SCHEMA = "rosclaw.continual.experience_batch_envelope.v1"
+_RECORD_ENVELOPE_SCHEMA = "rosclaw.continual.experience_record_envelope.v1"
+
+
+def policy_version_from_dict(value: Mapping[str, Any]) -> PolicyVersion:
+    """Rebuild a policy identity for durable service recovery."""
+
+    return _policy(value)
+
+
+def experience_record_to_dict(record: ExperienceRecord) -> dict[str, Any]:
+    """Serialize one complete record for an append-only experience log."""
+
+    return {
+        "schema_version": _RECORD_ENVELOPE_SCHEMA,
+        "trajectory": record.trajectory.to_dict(),
+        "record": {
+            "schema_version": record.schema_version,
+            "partition": record.partition.value,
+            "anchor_policy_hash": record.anchor_policy_hash,
+            "boundary_reason": record.boundary_reason,
+            "self_change_hash": record.self_change_hash,
+            "near_boundary_score": record.near_boundary_score,
+            "trajectory_hash": record.trajectory.trajectory_hash,
+            "record_hash": record.record_hash,
+        },
+    }
+
+
+def experience_record_from_dict(value: Mapping[str, Any]) -> ExperienceRecord:
+    """Rebuild one record and reject trajectory or record tampering."""
+
+    _schema(value, "schema_version", _RECORD_ENVELOPE_SCHEMA)
+    trajectory = _trajectory(_mapping(value, "trajectory"))
+    item = _mapping(value, "record")
+    _schema(item, "schema_version", "rosclaw.continual.experience_record.v1")
+    if item.get("trajectory_hash") != trajectory.trajectory_hash:
+        raise ValueError("experience record trajectory hash mismatch")
+    record = ExperienceRecord(
+        trajectory=trajectory,
+        partition=ExperiencePartition(str(item["partition"])),
+        anchor_policy_hash=_optional_string(item.get("anchor_policy_hash")),
+        boundary_reason=_optional_string(item.get("boundary_reason")),
+        self_change_hash=_optional_string(item.get("self_change_hash")),
+        near_boundary_score=float(item["near_boundary_score"]),
+    )
+    if item.get("record_hash") != record.record_hash:
+        raise ValueError("experience record hash mismatch")
+    return record
 
 
 def experience_batch_to_dict(batch: ExperienceBatch) -> dict[str, Any]:
@@ -207,4 +255,10 @@ def _ordered_numeric(
     return {name: float(value[name]) for name in names}
 
 
-__all__ = ["experience_batch_from_dict", "experience_batch_to_dict"]
+__all__ = [
+    "experience_batch_from_dict",
+    "experience_batch_to_dict",
+    "experience_record_from_dict",
+    "experience_record_to_dict",
+    "policy_version_from_dict",
+]
