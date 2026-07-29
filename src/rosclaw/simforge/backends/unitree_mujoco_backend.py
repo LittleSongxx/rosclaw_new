@@ -499,6 +499,7 @@ class G1MuJoCoBackend:
                 {
                     "recovery_active": [],
                     "recovery_blend_fraction": [],
+                    "recovery_settling_fraction": [],
                     "recovery_smoothing_active": [],
                     "recovery_smoothing_residual_rms_rad": [],
                 }
@@ -557,6 +558,7 @@ class G1MuJoCoBackend:
         moving_ball_launched = scenario.ball_launch_delay_sec <= 0.0
         recovery_active = False
         recovery_blend_fraction = 0.0
+        recovery_settling_fraction = 0.0
         recovery_smoothing_active = False
         recovery_smoothing_residual_rms_rad = 0.0
 
@@ -621,6 +623,7 @@ class G1MuJoCoBackend:
                         target = recovery_effect.target
                         recovery_active = recovery_effect.active
                         recovery_blend_fraction = recovery_effect.blend_fraction
+                        recovery_settling_fraction = recovery_effect.settling_fraction
                         recovery_smoothing_active = recovery_effect.smoothing_active
                         recovery_smoothing_residual_rms_rad = (
                             recovery_effect.smoothing_residual_rms_rad
@@ -795,6 +798,7 @@ class G1MuJoCoBackend:
                     combined_residual_saturation=combined_residual_saturation,
                     recovery_active=recovery_active,
                     recovery_blend_fraction=recovery_blend_fraction,
+                    recovery_settling_fraction=recovery_settling_fraction,
                     recovery_smoothing_active=recovery_smoothing_active,
                     recovery_smoothing_residual_rms_rad=(recovery_smoothing_residual_rms_rad),
                 )
@@ -830,6 +834,7 @@ class G1MuJoCoBackend:
                 combined_residual_saturation=combined_residual_saturation,
                 recovery_active=recovery_active,
                 recovery_blend_fraction=recovery_blend_fraction,
+                recovery_settling_fraction=recovery_settling_fraction,
                 recovery_smoothing_active=recovery_smoothing_active,
                 recovery_smoothing_residual_rms_rad=recovery_smoothing_residual_rms_rad,
             )
@@ -1192,6 +1197,7 @@ def _append_trace(
     combined_residual_saturation: int = 0,
     recovery_active: bool = False,
     recovery_blend_fraction: float = 0.0,
+    recovery_settling_fraction: float = 0.0,
     recovery_smoothing_active: bool = False,
     recovery_smoothing_residual_rms_rad: float = 0.0,
 ) -> None:
@@ -1234,6 +1240,7 @@ def _append_trace(
     if "recovery_active" in trace:
         trace["recovery_active"].append(recovery_active)
         trace["recovery_blend_fraction"].append(recovery_blend_fraction)
+        trace["recovery_settling_fraction"].append(recovery_settling_fraction)
         trace["recovery_smoothing_active"].append(recovery_smoothing_active)
         trace["recovery_smoothing_residual_rms_rad"].append(recovery_smoothing_residual_rms_rad)
 

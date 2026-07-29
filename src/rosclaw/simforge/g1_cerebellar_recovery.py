@@ -27,15 +27,20 @@ _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 class G1CerebellarRecoveryConfig:
     """Bounded target-space recovery segment discovered by matched SIM A/B.
 
-    ``start_policy_frame=420`` begins after the original contact and recovery
-    step.  A smooth 100-frame blend avoids the unstable discontinuity produced
-    by immediately switching the whole-body policy to a standing pose.
+    The first smoothstep unloads the kick while the second, optional smoothstep
+    settles into a more upright terminal posture.  Both are contact- and
+    landing-gated, so the kick itself is never modified.
     """
 
     start_policy_frame: int = 420
     blend_frames: int = 100
     standing_pose_blend: float = 0.30
     roll_posture_bias_rad: float = -0.05
+    settling_start_policy_frame: int | None = None
+    settling_blend_frames: int = 80
+    settling_standing_pose_blend: float | None = None
+    settling_roll_posture_bias_rad: float | None = None
+    settling_waist_pitch_bias_rad: float = 0.0
     target_smoothing_alpha: float = 1.0
     target_smoothing_start_policy_frame: int = 400
     target_smoothing_joint_group: str = "upper_body"
@@ -57,6 +62,35 @@ class G1CerebellarRecoveryConfig:
             -0.08 <= self.roll_posture_bias_rad <= 0.08
         ):
             raise ValueError("roll_posture_bias_rad must be finite and in [-0.08, 0.08]")
+        settling_values = (
+            self.settling_start_policy_frame,
+            self.settling_standing_pose_blend,
+            self.settling_roll_posture_bias_rad,
+        )
+        if any(value is None for value in settling_values) and not all(
+            value is None for value in settling_values
+        ):
+            raise ValueError("settling recovery parameters must be all set or all disabled")
+        if self.settling_blend_frames <= 0:
+            raise ValueError("settling_blend_frames must be positive")
+        if self.settling_start_policy_frame is not None:
+            if self.settling_start_policy_frame < self.start_policy_frame + self.blend_frames:
+                raise ValueError("settling recovery cannot overlap the unloading blend")
+            if not 0.0 <= float(self.settling_standing_pose_blend) <= 0.50:
+                raise ValueError("settling_standing_pose_blend must be in [0, 0.50]")
+            settling_roll = float(self.settling_roll_posture_bias_rad)
+            if not math.isfinite(settling_roll) or not -0.08 <= settling_roll <= 0.08:
+                raise ValueError(
+                    "settling_roll_posture_bias_rad must be finite and in [-0.08, 0.08]"
+                )
+        if not math.isfinite(self.settling_waist_pitch_bias_rad) or not (
+            -0.12 <= self.settling_waist_pitch_bias_rad <= 0.12
+        ):
+            raise ValueError(
+                "settling_waist_pitch_bias_rad must be finite and in [-0.12, 0.12]"
+            )
+        if self.settling_start_policy_frame is None and self.settling_waist_pitch_bias_rad != 0.0:
+            raise ValueError("settling waist pitch bias requires settling recovery")
         if not 0.25 <= self.target_smoothing_alpha <= 1.0:
             raise ValueError("target_smoothing_alpha must be in [0.25, 1.0]")
         if self.target_smoothing_start_policy_frame < 0:
@@ -78,6 +112,7 @@ class G1CerebellarRecoveryEffect:
     target: np.ndarray
     active: bool
     blend_fraction: float
+    settling_fraction: float
     contact_latched: bool
     kick_foot_landing_latched: bool
     smoothing_active: bool
@@ -99,12 +134,15 @@ class G1CerebellarRecoveryReceipt:
     activation_time_sec: float | None
     smoothing_activation_policy_frame: int | None
     smoothing_activation_time_sec: float | None
+    settling_activation_policy_frame: int | None
+    settling_activation_time_sec: float | None
     peak_blend_fraction: float
+    peak_settling_fraction: float
     peak_smoothing_residual_rms_rad: float
     strict_replay: bool
     evidence_domain: str
     config: dict[str, Any]
-    schema_version: str = "rosclaw.g1_goalforge.cerebellar_recovery_receipt.v2"
+    schema_version: str = "rosclaw.g1_goalforge.cerebellar_recovery_receipt.v3"
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -154,6 +192,7 @@ class G1CerebellarRecoveryController:
         self.standing_pose_hash = hash_bytes(np.ascontiguousarray(pose).tobytes())
         self.config = config or G1CerebellarRecoveryConfig()
         self._roll_pattern = _roll_posture_pattern()
+        self._waist_pitch_pattern = _waist_pitch_pattern()
         self.reset()
 
     @property
@@ -161,7 +200,7 @@ class G1CerebellarRecoveryController:
         return hash_json(
             {
                 "controller_type": "g1_cerebellar_post_kick_recovery",
-                "version": 2,
+                "version": 3,
                 "body_hash": self.body_hash,
                 "motion_hash": self.motion_hash,
                 "standing_pose_hash": self.standing_pose_hash,
@@ -193,8 +232,11 @@ class G1CerebellarRecoveryController:
         self._activation_time_sec: float | None = None
         self._smoothing_activation_policy_frame: int | None = None
         self._smoothing_activation_time_sec: float | None = None
+        self._settling_activation_policy_frame: int | None = None
+        self._settling_activation_time_sec: float | None = None
         self._smoothed_target: np.ndarray | None = None
         self._peak_blend_fraction = 0.0
+        self._peak_settling_fraction = 0.0
         self._peak_smoothing_residual_rms_rad = 0.0
 
     def adapt_target(
@@ -231,14 +273,44 @@ class G1CerebellarRecoveryController:
                 ),
             )
             fraction = linear * linear * (3.0 - 2.0 * linear)
-            standing_weight = fraction * self.config.standing_pose_blend
+            settling_fraction = 0.0
+            standing_pose_blend = self.config.standing_pose_blend
+            roll_posture_bias = self.config.roll_posture_bias_rad
+            if (
+                self.config.settling_start_policy_frame is not None
+                and policy_frame >= self.config.settling_start_policy_frame
+            ):
+                settling_linear = min(
+                    1.0,
+                    max(
+                        0.0,
+                        (policy_frame - self.config.settling_start_policy_frame)
+                        / self.config.settling_blend_frames,
+                    ),
+                )
+                settling_fraction = settling_linear * settling_linear * (
+                    3.0 - 2.0 * settling_linear
+                )
+                standing_pose_blend += settling_fraction * (
+                    float(self.config.settling_standing_pose_blend)
+                    - standing_pose_blend
+                )
+                roll_posture_bias += settling_fraction * (
+                    float(self.config.settling_roll_posture_bias_rad)
+                    - roll_posture_bias
+                )
+            standing_weight = fraction * standing_pose_blend
             adapted = (
                 (1.0 - standing_weight) * value
                 + standing_weight * self.standing_pose
-                + fraction * self.config.roll_posture_bias_rad * self._roll_pattern
+                + fraction * roll_posture_bias * self._roll_pattern
+                + settling_fraction
+                * self.config.settling_waist_pitch_bias_rad
+                * self._waist_pitch_pattern
             )
         else:
             fraction = 0.0
+            settling_fraction = 0.0
             adapted = value.copy()
         smoothing_active = bool(
             causal_gate
@@ -272,11 +344,16 @@ class G1CerebellarRecoveryController:
         if active and self._activation_policy_frame is None:
             self._activation_policy_frame = policy_frame
             self._activation_time_sec = timestamp_sec
+        if settling_fraction > 0.0 and self._settling_activation_policy_frame is None:
+            self._settling_activation_policy_frame = policy_frame
+            self._settling_activation_time_sec = timestamp_sec
         self._peak_blend_fraction = max(self._peak_blend_fraction, fraction)
+        self._peak_settling_fraction = max(self._peak_settling_fraction, settling_fraction)
         return G1CerebellarRecoveryEffect(
             target=adapted,
             active=active,
             blend_fraction=fraction,
+            settling_fraction=settling_fraction,
             contact_latched=self._contact_latched,
             kick_foot_landing_latched=self._landing_latched,
             smoothing_active=smoothing_active,
@@ -303,7 +380,10 @@ class G1CerebellarRecoveryController:
             activation_time_sec=self._activation_time_sec,
             smoothing_activation_policy_frame=self._smoothing_activation_policy_frame,
             smoothing_activation_time_sec=self._smoothing_activation_time_sec,
+            settling_activation_policy_frame=self._settling_activation_policy_frame,
+            settling_activation_time_sec=self._settling_activation_time_sec,
             peak_blend_fraction=self._peak_blend_fraction,
+            peak_settling_fraction=self._peak_settling_fraction,
             peak_smoothing_residual_rms_rad=self._peak_smoothing_residual_rms_rad,
             strict_replay=strict_replay,
             evidence_domain=evidence_domain,
@@ -344,6 +424,14 @@ def _roll_posture_pattern() -> np.ndarray:
     for name in ("left_ankle_roll_joint", "right_ankle_roll_joint"):
         pattern[index[name]] = -0.65
     pattern[index["waist_roll_joint"]] = 0.45
+    pattern.setflags(write=False)
+    return pattern
+
+
+def _waist_pitch_pattern() -> np.ndarray:
+    index = {name: position for position, name in enumerate(G1_DDS_JOINT_NAMES)}
+    pattern: np.ndarray = np.zeros(len(G1_DDS_JOINT_NAMES), dtype=np.float64)
+    pattern[index["waist_pitch_joint"]] = 1.0
     pattern.setflags(write=False)
     return pattern
 

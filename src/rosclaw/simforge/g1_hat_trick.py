@@ -92,7 +92,7 @@ class GoalForgeHatTrick:
     kick_prior_hash: str
     backend_commit: str
     shots: tuple[HatTrickShot, ...]
-    schema_version: str = "rosclaw.g1_goalforge.hat_trick.v4"
+    schema_version: str = "rosclaw.g1_goalforge.hat_trick.v5"
 
     @property
     def passed(self) -> bool:
@@ -121,6 +121,8 @@ class GoalForgeHatTrick:
             and rescue.naturalness_parent_strict_replay
             and rescue.naturalness_comparison is not None
             and rescue.naturalness_comparison["passed"]
+            and rescue.recovery_receipt is not None
+            and rescue.recovery_receipt["peak_settling_fraction"] == 1.0
             and all(
                 shot.recovery_receipt is not None
                 and shot.recovery_receipt["strict_replay"]
@@ -176,6 +178,17 @@ class GoalForgeHatTrick:
                 "natural_upper_body_follow_through": bool(
                     self.shots[2].naturalness_comparison
                     and self.shots[2].naturalness_comparison["passed"]
+                ),
+                "two_stage_upright_body_recovery": bool(
+                    self.shots[2].recovery_receipt
+                    and self.shots[2].recovery_receipt["peak_settling_fraction"] == 1.0
+                ),
+                "backward_and_lateral_reversal_reduced": bool(
+                    self.shots[2].naturalness_comparison
+                    and self.shots[2].naturalness_comparison["backward_reversal_reduction"]
+                    >= 0.10
+                    and self.shots[2].naturalness_comparison["lateral_peak_return_reduction"]
+                    >= 0.15
                 ),
                 "candidate_v3_promoted": False,
                 "magnus_curve_claimed": False,
@@ -381,8 +394,8 @@ def run_goalforge_hat_trick(
         ),
         _shot(
             name="disturbance_feedback_rescue",
-            title="SHOT 3 · 80 N EVOLVED RECOVERY",
-            capability="balance_momentum_unloading_and_disturbance_recovery",
+            title="SHOT 3 · 80 N TWO-STAGE BODY RECOVERY",
+            capability="balance_unloading_upright_settling_and_disturbance_recovery",
             scenario=rescue_scenario,
             parameters=rescue_parameters,
             episode=rescue.candidate,
@@ -419,7 +432,26 @@ def _base_scenario() -> GoalForgeScenario:
 
 
 def _natural_recovery_config() -> G1CerebellarRecoveryConfig:
-    """Evolved post-contact coordination bound to the Hat Trick evidence."""
+    """Two-stage unloading and upright settling bound to matched SIM evidence."""
+
+    return G1CerebellarRecoveryConfig(
+        start_policy_frame=300,
+        blend_frames=100,
+        standing_pose_blend=0.30,
+        roll_posture_bias_rad=-0.05,
+        settling_start_policy_frame=400,
+        settling_blend_frames=100,
+        settling_standing_pose_blend=0.45,
+        settling_roll_posture_bias_rad=-0.02,
+        settling_waist_pitch_bias_rad=0.09,
+        target_smoothing_alpha=0.60,
+        target_smoothing_start_policy_frame=300,
+        target_smoothing_joint_group="upper_body",
+    )
+
+
+def _retained_natural_recovery_config() -> G1CerebellarRecoveryConfig:
+    """Immediate Phase 7.1 parent used by the body-effect promotion gate."""
 
     return G1CerebellarRecoveryConfig(
         target_smoothing_alpha=0.70,
@@ -577,9 +609,9 @@ def _run_naturalness_comparison(
     parameters: ShotParameters,
     candidate_pair: _RecoveryPair,
 ) -> _NaturalnessPair:
-    """Gate upper-body follow-through against the retained unsmoothed action."""
+    """Gate two-stage body recovery against the retained natural action."""
 
-    parent_config = G1CerebellarRecoveryConfig()
+    parent_config = _retained_natural_recovery_config()
     parent = backend.run(
         scenario,
         parameters,

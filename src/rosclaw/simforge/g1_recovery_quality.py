@@ -37,13 +37,16 @@ class G1RecoveryQuality:
     post_contact_pelvis_path_length_m: float
     post_contact_pelvis_displacement_m: float
     post_contact_pelvis_max_excursion_m: float
+    post_contact_forward_peak_advance_m: float
+    post_contact_backward_reversal_m: float
+    post_contact_lateral_peak_return_m: float
     post_contact_support_transition_count: int
     post_contact_single_support_duration_sec: float
     bilateral_support_fraction: float
     terminal_bilateral_support: bool
     terminal_stable_duration_sec: float
     settling_time_sec: float | None
-    schema_version: str = "rosclaw.g1_goalforge.recovery_quality.v3"
+    schema_version: str = "rosclaw.g1_goalforge.recovery_quality.v4"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -109,10 +112,12 @@ class G1NaturalnessComparison:
     pelvis_path_regression: float
     pelvis_displacement_regression: float
     tail_wobble_reduction: float
+    backward_reversal_reduction: float
+    lateral_peak_return_reduction: float
     settling_time_regression: float
     support_transition_regression: float
     reasons: tuple[str, ...]
-    schema_version: str = "rosclaw.g1_goalforge.naturalness_comparison.v1"
+    schema_version: str = "rosclaw.g1_goalforge.naturalness_comparison.v2"
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -145,6 +150,7 @@ def measure_g1_recovery_quality(
         "left_foot_contact",
         "right_foot_contact",
         "contact_impulse",
+        "ball_velocity",
     }
     missing = required.difference(trajectory)
     if missing:
@@ -157,6 +163,7 @@ def measure_g1_recovery_quality(
     left_support = np.asarray(trajectory["left_foot_contact"], dtype=bool)
     right_support = np.asarray(trajectory["right_foot_contact"], dtype=bool)
     impulse = np.asarray(trajectory["contact_impulse"], dtype=np.float64)
+    ball_velocity = np.asarray(trajectory["ball_velocity"], dtype=np.float64)
     count = len(time)
     expected = {
         "torso_quaternion": (count, 4),
@@ -166,6 +173,7 @@ def measure_g1_recovery_quality(
         "left_foot_contact": (count,),
         "right_foot_contact": (count,),
         "contact_impulse": (count,),
+        "ball_velocity": (count, 3),
     }
     actual_shapes = {
         "torso_quaternion": quaternion.shape,
@@ -175,6 +183,7 @@ def measure_g1_recovery_quality(
         "left_foot_contact": left_support.shape,
         "right_foot_contact": right_support.shape,
         "contact_impulse": impulse.shape,
+        "ball_velocity": ball_velocity.shape,
     }
     invalid = [name for name, shape in expected.items() if actual_shapes[name] != shape]
     if count < 3 or time.ndim != 1 or invalid:
@@ -183,7 +192,7 @@ def measure_g1_recovery_quality(
         raise ValueError("recovery trajectory time must be strictly increasing")
     if not all(
         np.all(np.isfinite(value))
-        for value in (time, quaternion, pelvis, joint_velocity, com_y, impulse)
+        for value in (time, quaternion, pelvis, joint_velocity, com_y, impulse, ball_velocity)
     ):
         raise ValueError("recovery trajectory must contain only finite values")
     contact_indices = np.flatnonzero(np.diff(impulse, prepend=0.0) > 1e-9)
@@ -217,6 +226,17 @@ def measure_g1_recovery_quality(
     support_state = left_support.astype(np.uint8) + 2 * right_support.astype(np.uint8)
     post_xy = pelvis[contact_index:, :2]
     post_excursion = np.linalg.norm(post_xy - post_xy[0], axis=1)
+    post_relative_xy = post_xy - post_xy[0]
+    forward_axis = _planar_unit_axis(ball_velocity[contact_index, :2])
+    lateral_axis = np.asarray((-forward_axis[1], forward_axis[0]), dtype=np.float64)
+    forward_progress = post_relative_xy @ forward_axis
+    lateral_progress = post_relative_xy @ lateral_axis
+    forward_peak = float(np.max(forward_progress))
+    backward_reversal = max(0.0, forward_peak - float(forward_progress[-1]))
+    lateral_peak_return = max(
+        float(np.max(lateral_progress) - lateral_progress[-1]),
+        float(lateral_progress[-1] - np.min(lateral_progress)),
+    )
     post_path = float(np.linalg.norm(np.diff(post_xy, axis=0), axis=1).sum())
     post_displacement = float(np.linalg.norm(post_xy[-1] - post_xy[0]))
     post_support = support_state[contact_index:]
@@ -274,6 +294,9 @@ def measure_g1_recovery_quality(
         post_contact_pelvis_path_length_m=post_path,
         post_contact_pelvis_displacement_m=post_displacement,
         post_contact_pelvis_max_excursion_m=float(np.max(post_excursion)),
+        post_contact_forward_peak_advance_m=forward_peak,
+        post_contact_backward_reversal_m=backward_reversal,
+        post_contact_lateral_peak_return_m=lateral_peak_return,
         post_contact_support_transition_count=int(np.count_nonzero(np.diff(post_support))),
         post_contact_single_support_duration_sec=float(np.sum(post_dt * post_single_support[:-1])),
         bilateral_support_fraction=float(np.mean(bilateral[evaluation])),
@@ -421,6 +444,9 @@ def compare_g1_naturalness(
     minimum_waist_jerk_reduction: float = 0.02,
     minimum_arm_jerk_reduction: float = 0.05,
     minimum_tail_jerk_reduction: float = 0.10,
+    minimum_tail_wobble_reduction: float = 0.05,
+    minimum_backward_reversal_reduction: float = 0.10,
+    minimum_lateral_peak_return_reduction: float = 0.15,
     maximum_path_regression: float = 0.02,
     maximum_displacement_regression: float = 0.05,
     maximum_settling_time_regression: float = 0.02,
@@ -429,8 +455,9 @@ def compare_g1_naturalness(
 
     Jerk is derived from recorded physical joint velocity and starts one
     second after ball contact, so impact itself cannot dominate the score.
-    Small path/time allowances cover the extra body coordination, while
-    wobble and support chatter may not regress at all.
+    The immediate retained parent must be beaten on tail wobble, backward
+    reversal, and lateral peak return.  Path, settling time, and support
+    chatter retain fail-closed non-regression bounds.
     """
 
     thresholds = (
@@ -440,6 +467,9 @@ def compare_g1_naturalness(
         minimum_waist_jerk_reduction,
         minimum_arm_jerk_reduction,
         minimum_tail_jerk_reduction,
+        minimum_tail_wobble_reduction,
+        minimum_backward_reversal_reduction,
+        minimum_lateral_peak_return_reduction,
         maximum_path_regression,
         maximum_displacement_regression,
         maximum_settling_time_regression,
@@ -499,6 +529,14 @@ def compare_g1_naturalness(
         candidate.post_contact_pelvis_displacement_m,
     )
     wobble_reduction = _reduction(parent.tail_wobble_index, candidate.tail_wobble_index)
+    backward_reversal_reduction = _reduction(
+        parent.post_contact_backward_reversal_m,
+        candidate.post_contact_backward_reversal_m,
+    )
+    lateral_peak_return_reduction = _reduction(
+        parent.post_contact_lateral_peak_return_m,
+        candidate.post_contact_lateral_peak_return_m,
+    )
     settling_regression = _optional_time_regression(
         parent.settling_time_sec,
         candidate.settling_time_sec,
@@ -529,6 +567,21 @@ def compare_g1_naturalness(
         ),
         (arm_reduction, minimum_arm_jerk_reduction, "arm_jerk_reduction_below_gate"),
         (tail_reduction, minimum_tail_jerk_reduction, "tail_jerk_reduction_below_gate"),
+        (
+            wobble_reduction,
+            minimum_tail_wobble_reduction,
+            "tail_wobble_reduction_below_gate",
+        ),
+        (
+            backward_reversal_reduction,
+            minimum_backward_reversal_reduction,
+            "backward_reversal_reduction_below_gate",
+        ),
+        (
+            lateral_peak_return_reduction,
+            minimum_lateral_peak_return_reduction,
+            "lateral_peak_return_reduction_below_gate",
+        ),
     ):
         if actual < threshold:
             reasons.append(reason)
@@ -548,8 +601,6 @@ def compare_g1_naturalness(
     ):
         if actual > maximum + 1e-12:
             reasons.append(reason)
-    if wobble_reduction < 0.0:
-        reasons.append("tail_wobble_regressed")
     return G1NaturalnessComparison(
         passed=not reasons,
         goal_outcome_preserved=goal_preserved,
@@ -564,6 +615,8 @@ def compare_g1_naturalness(
         pelvis_path_regression=path_regression,
         pelvis_displacement_regression=displacement_regression,
         tail_wobble_reduction=wobble_reduction,
+        backward_reversal_reduction=backward_reversal_reduction,
+        lateral_peak_return_reduction=lateral_peak_return_reduction,
         settling_time_regression=settling_regression,
         support_transition_regression=transition_regression,
         reasons=tuple(reasons),
@@ -655,6 +708,16 @@ def _roll_pitch(quaternion_wxyz: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     roll = np.arctan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
     pitch = np.arcsin(np.clip(2.0 * (w * y - z * x), -1.0, 1.0))
     return roll, pitch
+
+
+def _planar_unit_axis(value: np.ndarray) -> np.ndarray:
+    """Normalize the observed ball travel direction into the field XY plane."""
+
+    axis = np.asarray(value, dtype=np.float64)
+    norm = float(np.linalg.norm(axis))
+    if norm <= 1e-9:
+        raise ValueError("ball contact velocity has no finite planar travel direction")
+    return axis / norm
 
 
 def _rms(value: np.ndarray) -> float:
