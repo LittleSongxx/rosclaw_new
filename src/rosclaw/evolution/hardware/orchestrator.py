@@ -483,8 +483,16 @@ class EvoRpsOrchestrator:
         baseline_regime = (
             self._session_regime_label(baseline[-1]) if baseline else "UNKNOWN"
         )
+        # The ladder walks forward: candidates that already have canary
+        # evidence (their promotion was evaluated) are excluded — the next
+        # untried candidate gets its turn.
+        tried = {
+            str(s["candidate_id"])
+            for s in manifest.by_kind("canary_session")
+            if s.get("candidate_id")
+        }
         candidate_row, selection_reason = select_canary_candidate(
-            validated, baseline_regime=baseline_regime
+            validated, baseline_regime=baseline_regime, exclude_ids=tried
         )
         if candidate_row is None:
             manifest.record("canary_blocked", reason=selection_reason)

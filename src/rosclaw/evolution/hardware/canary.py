@@ -73,25 +73,32 @@ def select_canary_candidate(
     validated: list[dict[str, Any]],
     *,
     baseline_regime: str,
+    exclude_ids: set[str] | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     """Pick ONE validated candidate for the canary with a recorded reason.
 
     Rule: in a thermal/tracking-degradation regime prefer a cooldown-class
     candidate (the failure mode the cooldown addresses); otherwise prefer
     a pose-recovery candidate; C0 (empty) is never canaried — it is the
-    baseline identity, not an intervention.
+    baseline identity, not an intervention.  ``exclude_ids`` filters out
+    candidates that already have canary evidence — re-running a tested
+    candidate wastes hardware time; the ladder walks to the next untried
+    one.
     """
     import json as _json
 
+    excluded = exclude_ids or set()
     candidates = []
     for row in validated:
+        if str(row.get("candidate_id")) in excluded:
+            continue
         changes = row.get("changes") or {}
         if isinstance(changes, str):
             changes = _json.loads(changes)
         if changes:  # skip C0
             candidates.append({**row, "changes": changes})
     if not candidates:
-        return None, "no non-empty validated candidate"
+        return None, "no untried non-empty validated candidate"
     degraded = baseline_regime in (
         "THERMAL_DRIFT",
         "TRACKING_DEGRADATION",
