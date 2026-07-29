@@ -252,7 +252,7 @@ class EvoRpsOrchestrator:
         """Generate bounded candidates from the latest baseline session's
         failure signature + regime (AUTO v1: config candidates only)."""
         from .candidates import generate_candidates
-        from .promotion import CandidateRecord, CandidateRegistry
+        from .promotion import CandidateRecord, CandidateRegistry, CandidateState
 
         manifest = self._open_manifest()
         baseline = manifest.by_kind("baseline_session")
@@ -281,6 +281,21 @@ class EvoRpsOrchestrator:
                 current_regime=candidate.current_regime,
                 baseline_practice_id=latest.get("practice_id"),
             )
+            # Re-proposing must never clobber lifecycle state: a candidate
+            # that already passed the gates keeps VALIDATED/PROMOTED, and a
+            # terminal REJECTED/ROLLED_BACK stays terminal — only genuinely
+            # new candidates enter as PROPOSED (same bug class as the
+            # promote() state reset found 2026-07-26).
+            existing = registry.get(candidate.candidate_id)
+            if existing is not None:
+                prior_state = existing.get("state")
+                if prior_state:
+                    record.state = CandidateState(str(prior_state))
+                prior_verdicts = existing.get("gate_verdicts")
+                if isinstance(prior_verdicts, str):
+                    prior_verdicts = json.loads(prior_verdicts)
+                if prior_verdicts:
+                    record.gate_verdicts = list(prior_verdicts)
             registry.upsert(record)
             records.append(record.to_record())
         manifest.record(
@@ -468,8 +483,16 @@ class EvoRpsOrchestrator:
         baseline_regime = (
             self._session_regime_label(baseline[-1]) if baseline else "UNKNOWN"
         )
+        # The ladder walks forward: candidates that already have canary
+        # evidence (their promotion was evaluated) are excluded — the next
+        # untried candidate gets its turn.
+        tried = {
+            str(s["candidate_id"])
+            for s in manifest.by_kind("canary_session")
+            if s.get("candidate_id")
+        }
         candidate_row, selection_reason = select_canary_candidate(
-            validated, baseline_regime=baseline_regime
+            validated, baseline_regime=baseline_regime, exclude_ids=tried
         )
         if candidate_row is None:
             manifest.record("canary_blocked", reason=selection_reason)

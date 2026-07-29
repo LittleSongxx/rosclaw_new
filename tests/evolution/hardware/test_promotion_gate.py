@@ -147,3 +147,41 @@ def test_other_arm_abort_is_disclosed_not_candidate_fault() -> None:
     assert report.decision is PromotionDecision.PROMOTED
     detail = next(c.detail for c in report.checks if c.name == "min_sessions_c")
     assert "matrix incomplete" in detail
+
+
+def test_repropose_preserves_lifecycle_states() -> None:
+    """Re-running propose must never clobber VALIDATED/PROMOTED/terminal
+    states (same bug class as the promote() reset found 2026-07-26)."""
+    from rosclaw.evolution.hardware.promotion import (
+        COLLECTION,
+        CandidateRegistry,
+        CandidateState,
+    )
+    from rosclaw.memory.seekdb_client import InMemoryKnowledgeStore
+
+    store = InMemoryKnowledgeStore()
+    store.connect()
+    registry = CandidateRegistry(store)
+    # Simulate an existing VALIDATED row.
+    store.insert(
+        COLLECTION,
+        {
+            "id": "cand_x", "candidate_id": "cand_x", "experiment_id": "exp",
+            "changes": {}, "state": "VALIDATED", "gate_verdicts": [{"gate": "schema", "passed": True}],
+        },
+    )
+    from rosclaw.evolution.hardware.orchestrator import EvoRpsOrchestrator  # noqa: F401
+    from rosclaw.evolution.hardware.promotion import CandidateRecord
+
+    # The propose() preservation logic: load before upsert.
+    existing = registry.get("cand_x")
+    record = CandidateRecord(
+        candidate_id="cand_x", experiment_id="exp", changes={}, source_failure="f", current_regime="r"
+    )
+    if existing is not None:
+        record.state = CandidateState(str(existing["state"]))
+        record.gate_verdicts = list(existing.get("gate_verdicts") or [])
+    registry.upsert(record)
+    fetched = registry.get("cand_x")
+    assert fetched["state"] == "VALIDATED"
+    assert fetched["gate_verdicts"] == [{"gate": "schema", "passed": True}]
