@@ -44,6 +44,26 @@ class OrchestratorError(RuntimeError):
     pass
 
 
+def generation_arm_aborts(
+    aborted: list[dict[str, Any]], generation_start: float, arm: str
+) -> list[dict[str, Any]]:
+    """Aborts in one arm within the CURRENT canary generation only.
+
+    The promotion gate's zero-tolerance protection check must see the
+    candidate's own arm AND only the current generation — an abort from
+    a previous candidate's generation is not this candidate's protection
+    event (found 2026-07-29: cand_004's abort inflated cand_005's
+    protection_event to 2; sessions were generation-scoped but the abort
+    list was not).
+    """
+    return [
+        entry
+        for entry in aborted
+        if entry.get("arm") == arm
+        and float(entry.get("recorded_at") or 0.0) >= generation_start
+    ]
+
+
 class EvoRpsOrchestrator:
     def __init__(self, config: EvoRpsConfig) -> None:
         self.config = config
@@ -459,12 +479,23 @@ class EvoRpsOrchestrator:
     # PR-EVO-HW-4: canary / promote
     # ------------------------------------------------------------------
 
-    def canary(self, *, blocks: int = 3, rounds: int = 40) -> dict[str, Any]:
+    def canary(
+        self, *, blocks: int = 3, rounds: int = 40, candidate_id: str | None = None
+    ) -> dict[str, Any]:
         """A/B/C real-machine canary with a seeded interleaved arm order
         (§Phase 6).  Arm C mechanically applies the selected VALIDATED
         candidate on REAL hardware with full PatchProof — the
-        operator-approved canary path (§Phase 7)."""
-        from .canary import ARM_C, build_canary_schedule, select_canary_candidate
+        operator-approved canary path (§Phase 7).
+
+        ``candidate_id`` (operator-directed) bypasses the untried ladder
+        for statistical-power top-ups; the selection reason discloses the
+        operator direction in the evidence manifest."""
+        from .canary import (
+            ARM_C,
+            build_canary_schedule,
+            select_canary_candidate,
+            select_explicit_candidate,
+        )
         from .promotion import CandidateRegistry, CandidateState
 
         manifest = self._open_manifest()
@@ -483,17 +514,22 @@ class EvoRpsOrchestrator:
         baseline_regime = (
             self._session_regime_label(baseline[-1]) if baseline else "UNKNOWN"
         )
-        # The ladder walks forward: candidates that already have canary
-        # evidence (their promotion was evaluated) are excluded — the next
-        # untried candidate gets its turn.
-        tried = {
-            str(s["candidate_id"])
-            for s in manifest.by_kind("canary_session")
-            if s.get("candidate_id")
-        }
-        candidate_row, selection_reason = select_canary_candidate(
-            validated, baseline_regime=baseline_regime, exclude_ids=tried
-        )
+        if candidate_id is not None:
+            candidate_row, selection_reason = select_explicit_candidate(
+                validated, candidate_id
+            )
+        else:
+            # The ladder walks forward: candidates that already have canary
+            # evidence (their promotion was evaluated) are excluded — the next
+            # untried candidate gets its turn.
+            tried = {
+                str(s["candidate_id"])
+                for s in manifest.by_kind("canary_session")
+                if s.get("candidate_id")
+            }
+            candidate_row, selection_reason = select_canary_candidate(
+                validated, baseline_regime=baseline_regime, exclude_ids=tried
+            )
         if candidate_row is None:
             manifest.record("canary_blocked", reason=selection_reason)
             raise OrchestratorError(f"no canary candidate: {selection_reason}")
@@ -716,13 +752,20 @@ class EvoRpsOrchestrator:
             "memory_hurt": 0.0,
         }
         aborted = manifest.by_kind("canary_aborted")
-        # Attribution matters: only an abort in the CANDIDATE's OWN arm is a
-        # candidate protection event.  An abort in arm A/B is an experiment-
-        # condition signal (the hardware is heat-soaked), never evidence
-        # against the candidate — rolling back C for B's overheat would be a
-        # false verdict (found + fixed 2026-07-26).
-        candidate_aborts = [a for a in aborted if a.get("arm") == ARM_C]
-        other_aborts = [a for a in aborted if a.get("arm") != ARM_C]
+        # Attribution matters, on TWO axes: only an abort in the
+        # CANDIDATE's OWN arm AND only in the CURRENT generation is a
+        # candidate protection event.  An abort in arm A/B is an
+        # experiment-condition signal (the hardware is heat-soaked),
+        # never evidence against the candidate (fixed 2026-07-26); an
+        # abort from a PREVIOUS candidate's generation is not this
+        # candidate's event either (fixed 2026-07-29).
+        candidate_aborts = generation_arm_aborts(aborted, generation_start, ARM_C)
+        other_aborts = [
+            a
+            for a in aborted
+            if a.get("arm") != ARM_C
+            and float(a.get("recorded_at") or 0.0) >= generation_start
+        ]
         if candidate_aborts:
             safety["protection_event"] = len(candidate_aborts)
 
