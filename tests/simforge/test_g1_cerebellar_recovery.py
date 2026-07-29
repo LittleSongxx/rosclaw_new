@@ -99,6 +99,7 @@ def test_recovery_smoothly_blends_qualified_pose_after_landing() -> None:
     assert halfway.active
     assert halfway.blend_fraction == 0.5
     assert complete.blend_fraction == 1.0
+    assert complete.settling_fraction == 0.0
     # Non-roll joints receive only the 30% standing-pose blend.
     assert complete.target[0] == 0.7
     # Left hip roll also receives the bounded -0.05 rad posture bias.
@@ -109,6 +110,40 @@ def test_recovery_smoothly_blends_qualified_pose_after_landing() -> None:
     assert receipt.activation_policy_frame == 470
     assert receipt.peak_blend_fraction == 1.0
     assert receipt.strict_replay
+
+
+def test_recovery_uses_a_second_smoothstep_for_upright_settling() -> None:
+    controller = _controller(
+        G1CerebellarRecoveryConfig(
+            start_policy_frame=100,
+            blend_frames=100,
+            standing_pose_blend=0.20,
+            roll_posture_bias_rad=0.0,
+            settling_start_policy_frame=200,
+            settling_blend_frames=100,
+            settling_standing_pose_blend=0.40,
+            settling_roll_posture_bias_rad=0.0,
+            settling_waist_pitch_bias_rad=0.09,
+        )
+    )
+    target = np.ones(29, dtype=np.float64)
+
+    halfway = controller.adapt_target(
+        target=target,
+        policy_frame=250,
+        timestamp_sec=5.0,
+        ball_contact_detected=True,
+        left_support=True,
+        right_support=True,
+    )
+
+    assert halfway.blend_fraction == 1.0
+    assert halfway.settling_fraction == 0.5
+    assert halfway.target[0] == pytest.approx(0.70)
+    assert halfway.target[14] == pytest.approx(0.745)
+    receipt = controller.build_receipt(strict_replay=True)
+    assert receipt.settling_activation_policy_frame == 250
+    assert receipt.peak_settling_fraction == 0.5
 
 
 def test_recovery_causally_smooths_only_upper_body_after_landing() -> None:
@@ -179,6 +214,30 @@ def test_recovery_quality_detects_lower_wobble_and_preserved_goal() -> None:
     assert candidate.settling_time_sec is not None
     assert candidate.post_contact_pelvis_path_length_m > 0.0
     assert candidate.post_contact_pelvis_displacement_m >= 0.0
+    assert candidate.post_contact_backward_reversal_m >= 0.0
+    assert candidate.post_contact_lateral_peak_return_m >= 0.0
+
+
+def test_recovery_quality_measures_reversal_in_the_ball_travel_frame() -> None:
+    trajectory = _trajectory(wobble_scale=0.35)
+    contact = int(np.flatnonzero(trajectory["contact_impulse"] > 0.0)[0])
+    progress = np.linspace(0.0, 1.0, len(trajectory["time"]) - contact)
+    trajectory["pelvis_pose"][contact:, 0] = np.where(
+        progress <= 0.5,
+        progress,
+        0.5 - 0.8 * (progress - 0.5),
+    )
+    trajectory["pelvis_pose"][contact:, 1] = np.where(
+        progress <= 0.5,
+        1.2 * progress,
+        0.6 - 1.6 * (progress - 0.5),
+    )
+
+    quality = measure_g1_recovery_quality(trajectory)
+
+    assert quality.post_contact_forward_peak_advance_m == pytest.approx(0.5, abs=0.01)
+    assert quality.post_contact_backward_reversal_m == pytest.approx(0.4, abs=0.01)
+    assert quality.post_contact_lateral_peak_return_m == pytest.approx(0.8, abs=0.01)
 
 
 def test_momentum_unloading_gate_requires_measured_motion_and_replay_gains() -> None:
@@ -259,6 +318,8 @@ def test_naturalness_gate_requires_jerk_gains_without_stability_regression() -> 
         post_contact_pelvis_path_length_m=1.86,
         post_contact_pelvis_displacement_m=0.50,
         post_contact_support_transition_count=49,
+        post_contact_backward_reversal_m=0.60,
+        post_contact_lateral_peak_return_m=0.85,
         tail_wobble_index=0.124,
         settling_time_sec=4.26,
     )
@@ -272,7 +333,9 @@ def test_naturalness_gate_requires_jerk_gains_without_stability_regression() -> 
         tail_joint_jerk_rms_rad_s3=1.04,
         post_contact_pelvis_path_length_m=1.875,
         post_contact_pelvis_displacement_m=0.52,
-        tail_wobble_index=0.122,
+        post_contact_backward_reversal_m=0.49,
+        post_contact_lateral_peak_return_m=0.61,
+        tail_wobble_index=0.115,
         settling_time_sec=4.30,
     )
     result = _successful_result(target_error_m=0.13, ball_speed_mps=5.6)
@@ -297,6 +360,8 @@ def test_naturalness_gate_requires_jerk_gains_without_stability_regression() -> 
     assert promoted.passed
     assert promoted.arm_joint_jerk_reduction == pytest.approx(0.0875)
     assert promoted.tail_joint_jerk_reduction > 0.15
+    assert promoted.backward_reversal_reduction > 0.15
+    assert promoted.lateral_peak_return_reduction > 0.25
     assert not rejected.passed
     assert "arm_jerk_reduction_below_gate" in rejected.reasons
 
@@ -381,6 +446,8 @@ def _trajectory(*, wobble_scale: float) -> dict[str, np.ndarray]:
     )
     impulse = np.zeros(count, dtype=np.float64)
     impulse[contact_index:] = 1.0
+    ball_velocity = np.zeros((count, 3), dtype=np.float64)
+    ball_velocity[contact_index:, 0] = 1.0
     return {
         "time": time,
         "torso_quaternion": quaternion,
@@ -390,6 +457,7 @@ def _trajectory(*, wobble_scale: float) -> dict[str, np.ndarray]:
         "left_foot_contact": np.ones(count, dtype=bool),
         "right_foot_contact": np.ones(count, dtype=bool),
         "contact_impulse": impulse,
+        "ball_velocity": ball_velocity,
     }
 
 
