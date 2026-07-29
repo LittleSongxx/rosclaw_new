@@ -9,11 +9,16 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
 
 import numpy as np
 
+from rosclaw.simforge.g1_muscle_memory import (
+    G1MuscleMemoryArtifact,
+    G1MuscleMemoryPolicy,
+)
 from rosclaw.simforge.tasks.g1_goalforge.concepts import (
     G1_DDS_JOINT_NAMES,
     hash_bytes,
@@ -120,6 +125,10 @@ class G1CerebellarRecoveryEffect:
     kick_foot_landing_latched: bool
     smoothing_active: bool
     smoothing_residual_rms_rad: float
+    muscle_memory_active: bool
+    muscle_memory_out_of_distribution: bool
+    muscle_memory_residual_rms_rad: float
+    muscle_memory_synergy_actions: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -146,7 +155,8 @@ class G1CerebellarRecoveryReceipt:
     strict_replay: bool
     evidence_domain: str
     config: dict[str, Any]
-    schema_version: str = "rosclaw.g1_goalforge.cerebellar_recovery_receipt.v4"
+    muscle_memory_receipt: dict[str, Any] | None = None
+    schema_version: str = "rosclaw.g1_goalforge.cerebellar_recovery_receipt.v5"
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -173,6 +183,7 @@ class G1CerebellarRecoveryController:
         regime_reasons: tuple[str, ...],
         standing_pose: np.ndarray,
         config: G1CerebellarRecoveryConfig | None = None,
+        muscle_memory_artifact: G1MuscleMemoryArtifact | None = None,
     ) -> None:
         for label, value in (
             ("body_hash", body_hash),
@@ -197,6 +208,17 @@ class G1CerebellarRecoveryController:
         self.config = config or G1CerebellarRecoveryConfig()
         self._roll_pattern = _roll_posture_pattern()
         self._waist_pitch_pattern = _waist_pitch_pattern()
+        self.muscle_memory = (
+            G1MuscleMemoryPolicy(muscle_memory_artifact)
+            if muscle_memory_artifact is not None
+            else None
+        )
+        if self.muscle_memory is not None:
+            self.muscle_memory.require_compatible(
+                body_hash=self.body_hash,
+                motion_hash=self.motion_hash,
+                parent_recovery_config_hash=self.config_hash,
+            )
         self.reset()
 
     @property
@@ -209,7 +231,7 @@ class G1CerebellarRecoveryController:
         )
 
     @property
-    def controller_hash(self) -> str:
+    def base_controller_hash(self) -> str:
         return hash_json(
             {
                 "controller_type": "g1_cerebellar_post_kick_recovery",
@@ -221,6 +243,19 @@ class G1CerebellarRecoveryController:
                 "regime_eligible": self.regime_eligible,
                 "regime_reasons": list(self.regime_reasons),
                 "config": asdict(self.config),
+            }
+        )
+
+    @property
+    def controller_hash(self) -> str:
+        if self.muscle_memory is None:
+            return self.base_controller_hash
+        return hash_json(
+            {
+                "controller_type": "g1_cerebellar_post_kick_recovery_with_muscle_memory",
+                "version": 1,
+                "base_controller_hash": self.base_controller_hash,
+                "muscle_memory_artifact_hash": self.muscle_memory.artifact.artifact_hash,
             }
         )
 
@@ -251,6 +286,8 @@ class G1CerebellarRecoveryController:
         self._peak_blend_fraction = 0.0
         self._peak_settling_fraction = 0.0
         self._peak_smoothing_residual_rms_rad = 0.0
+        if self.muscle_memory is not None:
+            self.muscle_memory.reset()
 
     def adapt_target(
         self,
@@ -261,6 +298,7 @@ class G1CerebellarRecoveryController:
         ball_contact_detected: bool,
         left_support: bool,
         right_support: bool,
+        muscle_memory_observation: Mapping[str, float] | None = None,
     ) -> G1CerebellarRecoveryEffect:
         value = np.asarray(target, dtype=np.float64)
         if value.shape != self.standing_pose.shape or not np.all(np.isfinite(value)):
@@ -354,8 +392,21 @@ class G1CerebellarRecoveryController:
             )
         else:
             smoothing_residual = 0.0
+        muscle_memory_active = False
+        muscle_memory_ood = False
+        muscle_memory_residual_rms = 0.0
+        muscle_memory_actions = np.zeros(0, dtype=np.float64)
+        if self.muscle_memory is not None and causal_gate:
+            if muscle_memory_observation is None:
+                raise ValueError("learned muscle memory requires proprioceptive observations")
+            muscle_effect = self.muscle_memory.infer(muscle_memory_observation)
+            adapted = adapted + muscle_effect.residual
+            muscle_memory_active = muscle_effect.active
+            muscle_memory_ood = muscle_effect.out_of_distribution
+            muscle_memory_residual_rms = muscle_effect.residual_rms_rad
+            muscle_memory_actions = muscle_effect.synergy_actions.copy()
         self._smoothed_target = adapted.copy()
-        active = fraction > 0.0 or smoothing_active
+        active = fraction > 0.0 or smoothing_active or muscle_memory_active
         if active and self._activation_policy_frame is None:
             self._activation_policy_frame = policy_frame
             self._activation_time_sec = timestamp_sec
@@ -373,6 +424,10 @@ class G1CerebellarRecoveryController:
             kick_foot_landing_latched=self._landing_latched,
             smoothing_active=smoothing_active,
             smoothing_residual_rms_rad=smoothing_residual,
+            muscle_memory_active=muscle_memory_active,
+            muscle_memory_out_of_distribution=muscle_memory_ood,
+            muscle_memory_residual_rms_rad=muscle_memory_residual_rms,
+            muscle_memory_synergy_actions=muscle_memory_actions,
         )
 
     def build_receipt(
@@ -404,6 +459,11 @@ class G1CerebellarRecoveryController:
             strict_replay=strict_replay,
             evidence_domain=evidence_domain,
             config=asdict(self.config),
+            muscle_memory_receipt=(
+                self.muscle_memory.build_receipt().to_dict()
+                if self.muscle_memory is not None
+                else None
+            ),
         )
 
 
