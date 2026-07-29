@@ -27,11 +27,16 @@ class G1RecoveryQuality:
     tail_pelvis_planar_velocity_rms_m_s: float
     tail_joint_velocity_rms_rad_s: float
     tail_wobble_index: float
+    post_contact_pelvis_path_length_m: float
+    post_contact_pelvis_displacement_m: float
+    post_contact_pelvis_max_excursion_m: float
+    post_contact_support_transition_count: int
+    post_contact_single_support_duration_sec: float
     bilateral_support_fraction: float
     terminal_bilateral_support: bool
     terminal_stable_duration_sec: float
     settling_time_sec: float | None
-    schema_version: str = "rosclaw.g1_goalforge.recovery_quality.v1"
+    schema_version: str = "rosclaw.g1_goalforge.recovery_quality.v2"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -50,6 +55,29 @@ class G1RecoveryComparison:
     tail_wobble_reduction: float
     reasons: tuple[str, ...]
     schema_version: str = "rosclaw.g1_goalforge.recovery_comparison.v1"
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["reasons"] = list(self.reasons)
+        return value
+
+
+@dataclass(frozen=True)
+class G1MomentumUnloadingComparison:
+    """Fail-closed promotion result for a shorter active recovery step."""
+
+    passed: bool
+    goal_outcome_preserved: bool
+    safety_preserved: bool
+    strict_replay_preserved: bool
+    pelvis_path_reduction: float
+    pelvis_displacement_reduction: float
+    pelvis_max_excursion_reduction: float
+    tail_wobble_reduction: float
+    settling_time_reduction: float
+    support_transition_reduction: float
+    reasons: tuple[str, ...]
+    schema_version: str = "rosclaw.g1_goalforge.momentum_unloading_comparison.v1"
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -149,6 +177,16 @@ def measure_g1_recovery_quality(
     )
     joint_speed = np.sqrt(np.mean(np.square(joint_velocity), axis=1))
     bilateral = left_support & right_support
+    support_state = left_support.astype(np.uint8) + 2 * right_support.astype(np.uint8)
+    post_xy = pelvis[contact_index:, :2]
+    post_excursion = np.linalg.norm(post_xy - post_xy[0], axis=1)
+    post_path = float(np.linalg.norm(np.diff(post_xy, axis=0), axis=1).sum())
+    post_displacement = float(np.linalg.norm(post_xy[-1] - post_xy[0]))
+    post_support = support_state[contact_index:]
+    post_single_support = np.logical_xor(
+        left_support[contact_index:], right_support[contact_index:]
+    )
+    post_dt = np.diff(time[contact_index:])
 
     tail_angular = _rms(angular_speed[tail])
     tail_tilt = _rms(tilt[tail])
@@ -189,10 +227,139 @@ def measure_g1_recovery_quality(
         tail_pelvis_planar_velocity_rms_m_s=tail_pelvis_velocity,
         tail_joint_velocity_rms_rad_s=tail_joint_velocity,
         tail_wobble_index=wobble,
+        post_contact_pelvis_path_length_m=post_path,
+        post_contact_pelvis_displacement_m=post_displacement,
+        post_contact_pelvis_max_excursion_m=float(np.max(post_excursion)),
+        post_contact_support_transition_count=int(np.count_nonzero(np.diff(post_support))),
+        post_contact_single_support_duration_sec=float(np.sum(post_dt * post_single_support[:-1])),
         bilateral_support_fraction=float(np.mean(bilateral[evaluation])),
         terminal_bilateral_support=bool(bilateral[-1]),
         terminal_stable_duration_sec=terminal_duration,
         settling_time_sec=settling_time,
+    )
+
+
+def compare_g1_momentum_unloading(
+    *,
+    parent: G1RecoveryQuality,
+    candidate: G1RecoveryQuality,
+    parent_result: Mapping[str, Any],
+    candidate_result: Mapping[str, Any],
+    parent_strict_replay: bool,
+    candidate_strict_replay: bool,
+    maximum_target_error_m: float = 0.18,
+    minimum_path_reduction: float = 0.40,
+    minimum_displacement_reduction: float = 0.50,
+    minimum_max_excursion_reduction: float = 0.50,
+    minimum_wobble_reduction: float = 0.25,
+    minimum_settling_time_reduction: float = 0.10,
+    minimum_support_transition_reduction: float = 0.05,
+) -> G1MomentumUnloadingComparison:
+    """Compare an evolved recovery action with its retained parent.
+
+    Unlike :func:`compare_g1_recovery`, this gate intentionally allows a
+    bounded precision trade within the declared target zone.  It requires
+    equal-or-better ball speed and large, measured reductions in wandering,
+    wobble, settling time, and support chatter.  Both sides must strictly
+    replay, so a noisy candidate cannot promote itself.
+    """
+
+    thresholds = (
+        maximum_target_error_m,
+        minimum_path_reduction,
+        minimum_displacement_reduction,
+        minimum_max_excursion_reduction,
+        minimum_wobble_reduction,
+        minimum_settling_time_reduction,
+        minimum_support_transition_reduction,
+    )
+    if not all(math.isfinite(value) for value in thresholds):
+        raise ValueError("momentum-unloading thresholds must be finite")
+    if maximum_target_error_m <= 0.0 or any(not 0.0 <= value < 1.0 for value in thresholds[1:]):
+        raise ValueError("momentum-unloading thresholds are outside their bounds")
+
+    goal_preserved = bool(
+        candidate_result.get("success")
+        and candidate_result.get("goal_crossed")
+        and candidate_result.get("target_zone_hit")
+        and float(candidate_result.get("target_error_m", math.inf)) <= maximum_target_error_m
+        and float(candidate_result.get("ball_speed_mps", 0.0))
+        >= float(parent_result.get("ball_speed_mps", 0.0)) - 1e-9
+    )
+    safety_preserved = bool(
+        not candidate_result.get("post_kick_fall")
+        and not candidate_result.get("joint_limit_violation")
+        and not candidate_result.get("torque_limit_violation")
+        and not candidate_result.get("actuator_saturation")
+        and float(candidate_result.get("support_foot_slip_m", math.inf)) <= 0.04
+        and candidate.terminal_bilateral_support
+    )
+    strict_replay = bool(parent_strict_replay and candidate_strict_replay)
+    path_reduction = _reduction(
+        parent.post_contact_pelvis_path_length_m,
+        candidate.post_contact_pelvis_path_length_m,
+    )
+    displacement_reduction = _reduction(
+        parent.post_contact_pelvis_displacement_m,
+        candidate.post_contact_pelvis_displacement_m,
+    )
+    excursion_reduction = _reduction(
+        parent.post_contact_pelvis_max_excursion_m,
+        candidate.post_contact_pelvis_max_excursion_m,
+    )
+    wobble_reduction = _reduction(parent.tail_wobble_index, candidate.tail_wobble_index)
+    settling_reduction = _optional_time_reduction(
+        parent.settling_time_sec, candidate.settling_time_sec
+    )
+    transition_reduction = _reduction(
+        float(parent.post_contact_support_transition_count),
+        float(candidate.post_contact_support_transition_count),
+    )
+    reasons = []
+    if not goal_preserved:
+        reasons.append("goal_or_precision_envelope_regressed")
+    if not safety_preserved:
+        reasons.append("safety_regressed")
+    if not strict_replay:
+        reasons.append("strict_replay_missing")
+    for reduction, minimum, reason in (
+        (path_reduction, minimum_path_reduction, "pelvis_path_reduction_below_gate"),
+        (
+            displacement_reduction,
+            minimum_displacement_reduction,
+            "pelvis_displacement_reduction_below_gate",
+        ),
+        (
+            excursion_reduction,
+            minimum_max_excursion_reduction,
+            "pelvis_max_excursion_reduction_below_gate",
+        ),
+        (wobble_reduction, minimum_wobble_reduction, "tail_wobble_reduction_below_gate"),
+        (
+            settling_reduction,
+            minimum_settling_time_reduction,
+            "settling_time_reduction_below_gate",
+        ),
+        (
+            transition_reduction,
+            minimum_support_transition_reduction,
+            "support_transition_reduction_below_gate",
+        ),
+    ):
+        if reduction < minimum:
+            reasons.append(reason)
+    return G1MomentumUnloadingComparison(
+        passed=not reasons,
+        goal_outcome_preserved=goal_preserved,
+        safety_preserved=safety_preserved,
+        strict_replay_preserved=strict_replay,
+        pelvis_path_reduction=path_reduction,
+        pelvis_displacement_reduction=displacement_reduction,
+        pelvis_max_excursion_reduction=excursion_reduction,
+        tail_wobble_reduction=wobble_reduction,
+        settling_time_reduction=settling_reduction,
+        support_transition_reduction=transition_reduction,
+        reasons=tuple(reasons),
     )
 
 
@@ -293,9 +460,19 @@ def _reduction(baseline: float, candidate: float) -> float:
     return (baseline - candidate) / baseline
 
 
+def _optional_time_reduction(baseline: float | None, candidate: float | None) -> float:
+    if candidate is None:
+        return -math.inf
+    if baseline is None:
+        return 1.0
+    return _reduction(baseline, candidate)
+
+
 __all__ = [
     "G1RecoveryComparison",
     "G1RecoveryQuality",
+    "G1MomentumUnloadingComparison",
+    "compare_g1_momentum_unloading",
     "compare_g1_recovery",
     "measure_g1_recovery_quality",
 ]

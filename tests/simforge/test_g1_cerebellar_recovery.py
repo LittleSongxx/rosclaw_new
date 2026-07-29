@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -8,10 +10,16 @@ from rosclaw.simforge.g1_cerebellar_recovery import (
     G1CerebellarRecoveryController,
     evaluate_g1_cerebellar_recovery_regime,
 )
+from rosclaw.simforge.g1_recovery_evolution import (
+    G1MomentumUnloadingEvolution,
+    G1RecoveryEvolutionDecision,
+)
 from rosclaw.simforge.g1_recovery_quality import (
+    compare_g1_momentum_unloading,
     compare_g1_recovery,
     measure_g1_recovery_quality,
 )
+from rosclaw.simforge.tasks.g1_goalforge.concepts import ShotParameters
 
 _HASH_A = "sha256:" + "1" * 64
 _HASH_B = "sha256:" + "2" * 64
@@ -128,6 +136,74 @@ def test_recovery_quality_detects_lower_wobble_and_preserved_goal() -> None:
     assert comparison.tail_angular_velocity_reduction > 0.5
     assert candidate.terminal_bilateral_support
     assert candidate.settling_time_sec is not None
+    assert candidate.post_contact_pelvis_path_length_m > 0.0
+    assert candidate.post_contact_pelvis_displacement_m >= 0.0
+
+
+def test_momentum_unloading_gate_requires_measured_motion_and_replay_gains() -> None:
+    parent = replace(
+        measure_g1_recovery_quality(_trajectory(wobble_scale=1.0)),
+        post_contact_pelvis_path_length_m=4.0,
+        post_contact_pelvis_displacement_m=2.0,
+        post_contact_pelvis_max_excursion_m=2.1,
+        post_contact_support_transition_count=20,
+        settling_time_sec=5.0,
+    )
+    candidate = replace(
+        measure_g1_recovery_quality(_trajectory(wobble_scale=0.35)),
+        post_contact_pelvis_path_length_m=1.8,
+        post_contact_pelvis_displacement_m=0.5,
+        post_contact_pelvis_max_excursion_m=0.6,
+        post_contact_support_transition_count=12,
+        settling_time_sec=3.8,
+    )
+    parent_result = _successful_result(target_error_m=0.09, ball_speed_mps=5.0)
+    candidate_result = _successful_result(target_error_m=0.14, ball_speed_mps=5.6)
+
+    promoted = compare_g1_momentum_unloading(
+        parent=parent,
+        candidate=candidate,
+        parent_result=parent_result,
+        candidate_result=candidate_result,
+        parent_strict_replay=True,
+        candidate_strict_replay=True,
+    )
+    replay_rejected = compare_g1_momentum_unloading(
+        parent=parent,
+        candidate=candidate,
+        parent_result=parent_result,
+        candidate_result=candidate_result,
+        parent_strict_replay=True,
+        candidate_strict_replay=False,
+    )
+
+    assert promoted.passed
+    assert promoted.pelvis_path_reduction == pytest.approx(0.55)
+    assert promoted.pelvis_displacement_reduction == pytest.approx(0.75)
+    assert promoted.tail_wobble_reduction > 0.5
+    assert not replay_rejected.passed
+    assert replay_rejected.reasons == ("strict_replay_missing",)
+
+    evolution = G1MomentumUnloadingEvolution.evaluate(
+        body_hash=_HASH_A,
+        kick_prior_hash=_HASH_B,
+        regime_commitment="sha256:" + "4" * 64,
+        parent=ShotParameters(),
+        candidate=ShotParameters(stance_offset_y=-0.08, swing_amplitude=1.125),
+        parent_metrics=parent,
+        candidate_metrics=candidate,
+        comparison=promoted,
+    )
+    selected, selected_receipt = evolution.route(regime_commitment="sha256:" + "4" * 64)
+    fallback, fallback_receipt = evolution.route(regime_commitment="sha256:" + "5" * 64)
+
+    assert evolution.decision is G1RecoveryEvolutionDecision.SIM_CHAMPION
+    assert selected.policy_hash == evolution.candidate.policy_hash
+    assert selected_receipt.used_candidate
+    assert fallback.policy_hash == evolution.parent.policy_hash
+    assert not fallback_receipt.used_candidate
+    assert fallback_receipt.fallback_reason == "out_of_evidence_regime"
+    assert fallback_receipt.rollback_target_hash == evolution.parent.policy_hash
 
 
 def test_recovery_regime_gate_rejects_uncalibrated_dynamics() -> None:
@@ -219,4 +295,19 @@ def _trajectory(*, wobble_scale: float) -> dict[str, np.ndarray]:
         "left_foot_contact": np.ones(count, dtype=bool),
         "right_foot_contact": np.ones(count, dtype=bool),
         "contact_impulse": impulse,
+    }
+
+
+def _successful_result(*, target_error_m: float, ball_speed_mps: float) -> dict[str, object]:
+    return {
+        "success": True,
+        "goal_crossed": True,
+        "target_zone_hit": True,
+        "target_error_m": target_error_m,
+        "ball_speed_mps": ball_speed_mps,
+        "post_kick_fall": False,
+        "joint_limit_violation": False,
+        "torque_limit_violation": False,
+        "actuator_saturation": False,
+        "support_foot_slip_m": 0.02,
     }

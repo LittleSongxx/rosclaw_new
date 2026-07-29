@@ -30,6 +30,8 @@ class HatTrickVideoClip:
     target_error_m: float
     ball_speed_mps: float
     tail_wobble_reduction: float
+    pelvis_path_reduction: float
+    pelvis_displacement_reduction: float
 
 
 @dataclass(frozen=True)
@@ -45,7 +47,7 @@ class HatTrickVideoResult:
     duration_sec: float
     clips: tuple[HatTrickVideoClip, ...]
     visualization_only: bool = True
-    schema_version: str = "rosclaw.g1_goalforge.hat_trick_video.v1"
+    schema_version: str = "rosclaw.g1_goalforge.hat_trick_video.v2"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -67,6 +69,7 @@ class _Source:
     comparison: dict[str, np.ndarray] | None
     recovery_metrics: dict[str, Any]
     recovery_comparison: dict[str, Any]
+    momentum_comparison: dict[str, Any]
 
 
 def render_goalforge_hat_trick_video(
@@ -175,7 +178,16 @@ def render_goalforge_hat_trick_video(
                 target_error_m=float(source.result["target_error_m"]),
                 ball_speed_mps=float(source.result["ball_speed_mps"]),
                 tail_wobble_reduction=float(
-                    source.recovery_comparison.get("tail_wobble_reduction", 0.0)
+                    source.momentum_comparison.get(
+                        "tail_wobble_reduction",
+                        source.recovery_comparison.get("tail_wobble_reduction", 0.0),
+                    )
+                ),
+                pelvis_path_reduction=float(
+                    source.momentum_comparison.get("pelvis_path_reduction", 0.0)
+                ),
+                pelvis_displacement_reduction=float(
+                    source.momentum_comparison.get("pelvis_displacement_reduction", 0.0)
                 ),
             )
         )
@@ -231,6 +243,7 @@ def _load_sources(report: dict[str, Any], checkout: Path) -> tuple[_Source, ...]
                 comparison=comparison,
                 recovery_metrics=dict(shot.get("recovery_metrics") or {}),
                 recovery_comparison=dict(shot.get("recovery_comparison") or {}),
+                momentum_comparison=dict(shot.get("momentum_comparison") or {}),
             )
         )
     return tuple(result)
@@ -483,14 +496,31 @@ def _ffmpeg_command(
     for source, duration in zip(sources, durations, strict=True):
         end = offset + duration
         result = source.result
-        wobble_reduction = 100.0 * float(
-            source.recovery_comparison.get("tail_wobble_reduction", 0.0)
-        )
-        metrics = (
-            f"{source.title}  ·  {float(result['ball_speed_mps']):.2f} m/s  ·  "
-            f"error {float(result['target_error_m']):.3f} m  ·  "
-            f"RECOVERY WOBBLE -{wobble_reduction:.0f} pct"
-        )
+        if source.momentum_comparison:
+            path_reduction = 100.0 * float(source.momentum_comparison["pelvis_path_reduction"])
+            drift_reduction = 100.0 * float(
+                source.momentum_comparison["pelvis_displacement_reduction"]
+            )
+            wobble_reduction = 100.0 * float(source.momentum_comparison["tail_wobble_reduction"])
+            metrics = (
+                f"SHOT 3 · ACTIVE UNLOAD  ·  PATH -{path_reduction:.0f}pct  ·  "
+                f"DRIFT -{drift_reduction:.0f}pct  ·  WOBBLE -{wobble_reduction:.0f}pct"
+            )
+        elif float(source.scenario["target_z_m"]) >= 0.55:
+            metrics = (
+                f"{source.title}  ·  HIGH TARGET {float(source.scenario['target_z_m']):.2f} m  ·  "
+                f"{float(result['ball_speed_mps']):.2f} m/s  ·  "
+                f"error {float(result['target_error_m']):.3f} m"
+            )
+        else:
+            wobble_reduction = 100.0 * float(
+                source.recovery_comparison.get("tail_wobble_reduction", 0.0)
+            )
+            metrics = (
+                f"{source.title}  ·  {float(result['ball_speed_mps']):.2f} m/s  ·  "
+                f"error {float(result['target_error_m']):.3f} m  ·  "
+                f"RECOVERY WOBBLE -{wobble_reduction:.0f} pct"
+            )
         filters.append(
             f"drawtext={font_option}text='{metrics}':x=34:y=68:fontsize=22:"
             f"fontcolor=0x65F59A:enable='between(t,{offset:.6f},{end:.6f})'"
@@ -498,8 +528,8 @@ def _ffmpeg_command(
         if source.comparison is not None:
             filters.extend(
                 (
-                    f"drawtext={font_option}text='FEEDBACK OFF · FALL / UNSAFE':x=120:y=145:fontsize=22:fontcolor=0xFF6262:enable='between(t,{offset:.6f},{end:.6f})'",
-                    f"drawtext={font_option}text='FEEDBACK + CEREBELLUM · GOAL + SETTLED':x=700:y=145:fontsize=20:fontcolor=0x65F59A:enable='between(t,{offset:.6f},{end:.6f})'",
+                    f"drawtext={font_option}text='PARENT · LONG DRIFT / UNSAFE':x=120:y=145:fontsize=22:fontcolor=0xFF6262:enable='between(t,{offset:.6f},{end:.6f})'",
+                    f"drawtext={font_option}text='EVOLVED UNLOAD · SHORT STEP + SETTLED':x=700:y=145:fontsize=20:fontcolor=0x65F59A:enable='between(t,{offset:.6f},{end:.6f})'",
                 )
             )
         offset = end
