@@ -16,13 +16,18 @@ def test_schedule_is_seeded_interleaved_and_balanced() -> None:
     for block in range(3):
         arms_in_block = {s.arm for s in schedule if s.block == block}
         assert arms_in_block == set(ARMS)
-    # Deterministic for the same seed, different across seeds.
+    # §Phase 6 相同手势 Seed: all arms within a block share the same seed.
+    for block in range(3):
+        seeds_in_block = {s.seed for s in schedule if s.block == block}
+        assert len(seeds_in_block) == 1
+    # Blocks draw independent seeds.
+    block_seeds = [next(s.seed for s in schedule if s.block == b) for b in range(3)]
+    assert len(set(block_seeds)) == 3
+    # Deterministic for the same seed.
     again = build_canary_schedule(blocks=3, seed=42, base_seed=1000)
     assert [(s.block, s.arm, s.seed) for s in schedule] == [
         (s.block, s.arm, s.seed) for s in again
     ]
-    other = build_canary_schedule(blocks=3, seed=43, base_seed=1000)
-    assert [s.arm for s in schedule] != [s.arm for s in other] or True  # order may coincide rarely
 
 
 def test_selection_prefers_conservative_cooldown_in_degradation() -> None:

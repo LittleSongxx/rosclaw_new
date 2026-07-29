@@ -51,18 +51,24 @@ def build_canary_schedule(
     base_seed: int,
 ) -> list[ArmSlot]:
     """Seeded interleaved schedule: each block runs A, B, C once in a
-    shuffled order (deterministic for a given seed)."""
+    shuffled order (deterministic for a given seed).
+
+    §Phase 6 相同手势 Seed: within one block ALL arms share the same seed —
+    the three arms face the IDENTICAL gesture sequence, so the dominant
+    gesture-mix noise is paired away across arms.  Seeds differ between
+    blocks (independent draws)."""
     rng = random.Random(seed)
     schedule: list[ArmSlot] = []
     for block in range(blocks):
         order = list(ARMS)
         rng.shuffle(order)
-        for slot, arm in enumerate(order):
+        block_seed = base_seed + block
+        for arm in order:
             schedule.append(
                 ArmSlot(
                     block=block,
                     arm=arm,
-                    seed=base_seed + block * 10 + slot,
+                    seed=block_seed,
                     driver_group=ARM_DRIVER_GROUP[arm],
                 )
             )
