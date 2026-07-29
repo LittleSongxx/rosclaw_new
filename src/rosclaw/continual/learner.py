@@ -425,13 +425,34 @@ class ConstrainedResidualSAC:
 
         if not checkpoint:
             raise ValueError("SAC checkpoint must not be empty")
-        payload = torch.load(io.BytesIO(checkpoint), map_location=self.device, weights_only=False)
+        payload = torch.load(io.BytesIO(checkpoint), map_location=self.device, weights_only=True)
         if not isinstance(payload, dict):
             raise ValueError("SAC checkpoint payload must be a mapping")
         if payload.get("schema_version") != "rosclaw.continual.residual_sac_checkpoint.v1":
             raise ValueError("unsupported SAC checkpoint schema")
         if payload.get("config_hash") != canonical_hash(asdict(self.config)):
             raise ValueError("SAC checkpoint config does not match this learner")
+        required = (
+            "actor",
+            "churn_reference",
+            "reward_critic",
+            "fall_critic",
+            "constraint_critic",
+            "reward_target",
+            "fall_target",
+            "constraint_target",
+            "actor_optimizer",
+            "critic_optimizer",
+            "alpha_optimizer",
+            "log_alpha",
+            "fall_lagrange",
+            "constraint_lagrange",
+            "update_index",
+            "torch_rng_state",
+        )
+        missing = [name for name in required if name not in payload]
+        if missing:
+            raise ValueError(f"SAC checkpoint is missing keys: {', '.join(missing)}")
         for name in (
             "actor",
             "churn_reference",
@@ -456,7 +477,7 @@ class ConstrainedResidualSAC:
             cuda_rng_state = payload.get("cuda_rng_state")
             if cuda_rng_state is None:
                 raise ValueError("CUDA SAC checkpoint is missing device RNG state")
-            torch.cuda.set_rng_state_all(cuda_rng_state)
+            torch.cuda.set_rng_state_all([state.cpu() for state in cuda_rng_state])
 
     def candidate_policy(self, *, parent: PolicyVersion) -> tuple[PolicyVersion, bytes]:
         if parent.observation_names != self.config.observation_names:

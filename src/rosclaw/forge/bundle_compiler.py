@@ -34,6 +34,11 @@ class BundleCompiler:
 
     def compile(self, sdk_doc: str, bundle_name: str) -> BundleOutput:
         """Generate a complete bundle."""
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9 _-]{0,63}", bundle_name):
+            raise ValueError(
+                "bundle_name must be 1-64 chars of [a-zA-Z0-9 _-] and start "
+                "with an alphanumeric character"
+            )
         files: dict[str, str] = {}
 
         # Derive capability name from bundle_name

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator, Mapping
 
 import pytest
@@ -249,3 +250,40 @@ def test_recorded_latency_clock_replays_start_end_pairs() -> None:
     assert (clock(), clock(), clock(), clock()) == (0, 100, 100, 350)
     with pytest.raises(RuntimeError, match="exhausted"):
         clock()
+
+
+def test_non_finite_input_fails_closed_instead_of_raising() -> None:
+    runtime = _runtime()
+    command = runtime.tick(
+        timestamp_ns=1_000_000_000,
+        observation_timestamp_ns=1_000_000_000,
+        phase=0.5,
+        reference={"roll": 0.0},
+        actual={"roll": float("nan")},
+        base_action={"joint:waist_roll_joint": float("inf")},
+    )
+    recovered = _tick(runtime, 1, actual=0.2)
+
+    assert command.fallback is not None
+    assert command.reasons[0].startswith("invalid_input")
+    assert all(math.isfinite(value) for value in command.projected.values())
+    assert math.isfinite(runtime.records[-2].residual_norm)
+    assert recovered.fallback is None
+    assert recovered.projected
+
+
+def test_non_finite_base_action_does_not_leak_into_fallback_base() -> None:
+    runtime = _runtime()
+    command = runtime.tick(
+        timestamp_ns=1_000_000_000,
+        observation_timestamp_ns=1_000_000_000,
+        phase=0.5,
+        reference={"roll": 0.0},
+        actual={"roll": 0.3},
+        base_action={"joint:waist_roll_joint": float("nan")},
+    )
+
+    assert command.fallback is not None
+    assert all(math.isfinite(value) for value in command.projected.values())
+    recorded = runtime.records[-1]
+    assert all(math.isfinite(value) for value in recorded.input.base_action.values())

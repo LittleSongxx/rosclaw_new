@@ -209,6 +209,98 @@ def test_inference_slot_blocks_mid_motion_switch_then_activates_safely(tmp_path:
     assert inference.rollback == parent
 
 
+def _rejecting_gate(parent, candidate):
+    evidence = replace(
+        _passing_evidence(),
+        parent_policy_hash=digest("not-the-active-artifact"),
+        candidate_policy_hash=candidate.artifact_hash,
+    )
+    return StabilityPlasticityGate().evaluate(evidence)
+
+
+def test_inference_safety_freeze_requires_operator_unfreeze(tmp_path: Path) -> None:
+    parent, parent_artifact = policy(0)
+    candidate, candidate_artifact = policy(1, parent=parent)
+    inference = InferenceService(
+        tmp_path,
+        source_checkout=_source_checkout(),
+        active=parent,
+        active_artifact=parent_artifact,
+    )
+    updater = WeightUpdateService(
+        tmp_path,
+        source_checkout=_source_checkout(),
+        inference=inference,
+    )
+    updater.publish(candidate, artifact=candidate_artifact)
+    updater.verify()
+    updater.stage()
+
+    rejected = updater.activate(
+        phase=SkillPhase.COMPLETE,
+        gate_report=_rejecting_gate(parent, candidate),
+    )
+    assert rejected.inference.frozen
+    assert rejected.inference.active_version_hash == parent.version_hash
+
+    # A safety freeze blocks activation retry even with a passing gate report.
+    with pytest.raises(RuntimeError, match="operator unfreeze"):
+        updater.activate(
+            phase=SkillPhase.COMPLETE,
+            gate_report=_matching_gate(parent, candidate),
+        )
+    # Motion stays blocked while frozen.
+    with pytest.raises(RuntimeError, match="frozen"):
+        inference.begin_motion(episode_id="frozen-motion", phase=SkillPhase.SWING)
+
+    unfrozen = updater.unfreeze(reason="operator reviewed the rejected gate evidence")
+    assert not unfrozen.inference.frozen
+
+    activated = updater.activate(
+        phase=SkillPhase.COMPLETE,
+        gate_report=_matching_gate(parent, candidate),
+    )
+    assert activated.inference.active_version_hash == candidate.version_hash
+    assert not activated.inference.frozen
+
+
+def test_inference_safety_freeze_and_unfreeze_survive_recovery(tmp_path: Path) -> None:
+    parent, parent_artifact = policy(0)
+    candidate, candidate_artifact = policy(1, parent=parent)
+    inference = InferenceService(
+        tmp_path,
+        source_checkout=_source_checkout(),
+        active=parent,
+        active_artifact=parent_artifact,
+    )
+    updater = WeightUpdateService(
+        tmp_path,
+        source_checkout=_source_checkout(),
+        inference=inference,
+    )
+    updater.publish(candidate, artifact=candidate_artifact)
+    updater.verify()
+    updater.stage()
+    updater.activate(phase=SkillPhase.COMPLETE, gate_report=_rejecting_gate(parent, candidate))
+
+    recovered = InferenceService(tmp_path, source_checkout=_source_checkout())
+    assert recovered.receipt("recovered").frozen
+    with pytest.raises(RuntimeError, match="operator unfreeze"):
+        recovered._activate(
+            phase=SkillPhase.COMPLETE,
+            gate_report=_matching_gate(parent, candidate),
+        )
+
+    recovered._unfreeze("operator reset after review")
+    assert not recovered.receipt("unfrozen").frozen
+
+    reopened = InferenceService(tmp_path, source_checkout=_source_checkout())
+    assert not reopened.receipt("reopened").frozen
+    kinds = [event.kind for event in reopened.log.events]
+    assert kinds.count("FROZEN") == 1
+    assert kinds.count("UNFROZEN") == 1
+
+
 def test_inference_recovery_aborts_inflight_version_lease(tmp_path: Path) -> None:
     parent, artifact = policy(0)
     service = InferenceService(

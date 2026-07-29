@@ -6427,7 +6427,11 @@ def cmd_forge_validate(args: argparse.Namespace) -> int:
         tests_dir = bundle_path / "tests"
         if not tests_dir.is_dir() or not any(tests_dir.glob("test_*.py")):
             errors.append("Missing generated MCP tests under tests/test_*.py")
-        server_source = (bundle_path / "mcp_server.py").read_text(encoding="utf-8")
+        try:
+            server_source = (bundle_path / "mcp_server.py").read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            errors.append(f"mcp_server.py is not a readable UTF-8 file: {exc}")
+            server_source = ""
         if "list_tools" not in server_source or "call_tool" not in server_source:
             errors.append("MCP server must register both list_tools and call_tool handlers")
         if "GENERATED_ADAPTER_REQUIRED" not in server_source:

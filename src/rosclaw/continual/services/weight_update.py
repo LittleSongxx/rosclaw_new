@@ -92,6 +92,13 @@ class WeightUpdateService:
             lambda: self.inference._freeze(reason),
         )
 
+    def unfreeze(self, *, reason: str) -> WeightUpdateServiceReceipt:
+        return self._run(
+            "unfreeze",
+            {"reason": reason},
+            lambda: self.inference._unfreeze(reason),
+        )
+
     def rollback(self, *, reason: str) -> WeightUpdateServiceReceipt:
         return self._run(
             "rollback",
@@ -178,6 +185,7 @@ class WeightUpdateService:
             "stage": {"STAGED"},
             "activate": {"ACTIVATED", "FROZEN"},
             "freeze": {"FROZEN"},
+            "unfreeze": {"UNFROZEN"},
             "rollback": {"ROLLED_BACK"},
         }
         if operation not in expected or inference_event_hash_before is None:

@@ -195,3 +195,15 @@ class TestScenarioFForgeBundle:
         (tests_dir / "test_generated.py").write_text("def test_stub(): pass\n", encoding="utf-8")
 
         assert cmd_forge_validate(Namespace(bundle_path=str(tmp_path))) == 1
+
+
+def test_forge_compile_rejects_unsafe_bundle_names():
+    from rosclaw.forge.bundle_compiler import BundleCompiler
+
+    compiler = BundleCompiler()
+    for bad in ('evil"name', "single'quote", "new\nline", "../escape", "semi;colon", "", "-lead"):
+        try:
+            compiler.compile("sdk doc", bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"unsafe bundle name accepted: {bad!r}")

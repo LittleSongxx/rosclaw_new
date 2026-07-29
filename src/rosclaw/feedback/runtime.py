@@ -25,6 +25,19 @@ from rosclaw.feedback.safety_projector import FeedbackSafetyProjector
 from rosclaw.feedback.state_estimator import FeedbackStateEstimator
 
 
+def _finite_or_zero(values: Mapping[str, float]) -> dict[str, float]:
+    """Return a finite copy of a signal mapping, zeroing invalid entries."""
+
+    clean: dict[str, float] = {}
+    for key, value in values.items():
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = 0.0
+        clean[str(key)] = number if math.isfinite(number) else 0.0
+    return clean
+
+
 class FeedbackRuntime:
     """Execute one deterministic controller synchronously at L1/L2 rates.
 
@@ -85,18 +98,45 @@ class FeedbackRuntime:
         sequence = self._sequence
         self._sequence += 1
         started_ns = self._compute_clock_ns()
-        input_sample = FeedbackInput(
-            timestamp_ns=timestamp_ns,
-            observation_timestamp_ns=observation_timestamp_ns,
-            phase=phase,
-            reference=reference,
-            actual=actual,
-            base_action=base_action,
-        )
+        invalid_reason: str | None = None
+        try:
+            input_sample = FeedbackInput(
+                timestamp_ns=timestamp_ns,
+                observation_timestamp_ns=observation_timestamp_ns,
+                phase=phase,
+                reference=reference,
+                actual=actual,
+                base_action=base_action,
+            )
+        except ValueError as exc:
+            # Fail closed on non-finite policy/sensor input instead of raising
+            # out of the synchronous control loop.
+            invalid_reason = f"invalid_input:{exc}"
+            reference = _finite_or_zero(reference)
+            actual = _finite_or_zero(actual)
+            base_action = _finite_or_zero(base_action)
+            phase = phase if math.isfinite(phase) else 0.0
+            input_sample = FeedbackInput(
+                timestamp_ns=timestamp_ns,
+                observation_timestamp_ns=observation_timestamp_ns,
+                phase=phase,
+                reference=reference,
+                actual=actual,
+                base_action=base_action,
+            )
         age_ns = timestamp_ns - observation_timestamp_ns
         stale = age_ns < 0 or age_ns > int(self.spec.max_observation_age_ms * 1_000_000.0)
         error = None
-        if stale:
+        if invalid_reason is not None:
+            command = self.projector.fallback(
+                sequence=sequence,
+                timestamp_ns=timestamp_ns,
+                base_action=base_action,
+                reason=invalid_reason,
+                mode=self.spec.fallback_unsafe_projection,
+                deadline_met=True,
+            )
+        elif stale:
             command = self.projector.fallback(
                 sequence=sequence,
                 timestamp_ns=timestamp_ns,

@@ -84,6 +84,7 @@ class InferenceService:
         self._published: PolicyVersion | None = None
         self._published_verified = False
         self._frozen = False
+        self._freeze_kind: str | None = None
         self._motions: dict[str, MotionVersionLease] = {}
         for event in self.log.events:
             self._apply(event.kind, dict(event.payload))
@@ -242,14 +243,22 @@ class InferenceService:
     ) -> InferenceSlotReceipt:
         if self._candidate is None:
             raise RuntimeError("no staged candidate exists")
+        if self._frozen and self._freeze_kind != "transient":
+            raise RuntimeError(
+                "inference service is frozen by a safety event; an explicit "
+                "operator unfreeze is required before activation"
+            )
         if self._motions:
-            self._freeze("activation requested while a motion version lease was active")
+            self._freeze(
+                "activation requested while a motion version lease was active",
+                kind="transient",
+            )
             return self.receipt("activation blocked by active motion lease")
         slot = ResidualWeightSlot(self.active, active_artifact=self._read_blob(self.active))
         slot.stage(self._candidate, artifact=self._read_blob(self._candidate))
         result = slot.activate(phase=phase, gate_report=gate_report)
         if result.state is not WeightSlotState.ACTIVE:
-            self._freeze(result.reason)
+            self._freeze(result.reason, kind="safety")
             return self.receipt(result.reason)
         old = self.active
         new = self._candidate
@@ -265,10 +274,27 @@ class InferenceService:
         self._apply(event.kind, dict(event.payload))
         return self.receipt(result.reason)
 
-    def _freeze(self, reason: str) -> InferenceSlotReceipt:
+    def _freeze(self, reason: str, *, kind: str = "safety") -> InferenceSlotReceipt:
         if not reason.strip():
             raise ValueError("freeze reason must not be empty")
-        event = self.log.append("FROZEN", {"reason": reason})
+        if kind not in {"transient", "safety"}:
+            raise ValueError("freeze kind must be 'transient' or 'safety'")
+        event = self.log.append("FROZEN", {"reason": reason, "kind": kind})
+        self._apply(event.kind, dict(event.payload))
+        return self.receipt(reason)
+
+    def _unfreeze(self, reason: str) -> InferenceSlotReceipt:
+        """Operator reset of a frozen service; journaled and motion-gated."""
+        if not self._frozen:
+            raise RuntimeError("inference service is not frozen")
+        if self._motions:
+            raise RuntimeError("unfreeze is forbidden while a motion lease is active")
+        if not reason.strip():
+            raise ValueError("unfreeze reason must not be empty")
+        event = self.log.append(
+            "UNFROZEN",
+            {"reason": reason, "prior_freeze_kind": self._freeze_kind or "safety"},
+        )
         self._apply(event.kind, dict(event.payload))
         return self.receipt(reason)
 
@@ -384,8 +410,17 @@ class InferenceService:
             self._rollback = rollback
             self._candidate = None
             self._frozen = False
+            self._freeze_kind = None
         elif kind == "FROZEN":
             self._frozen = True
+            # Journals written before freeze kinds existed are treated as
+            # safety freezes (fail-closed).
+            self._freeze_kind = str(payload.get("kind") or "safety")
+        elif kind == "UNFROZEN":
+            if not self._frozen:
+                raise ValueError("unfreeze event without a prior freeze")
+            self._frozen = False
+            self._freeze_kind = None
         elif kind == "ROLLED_BACK":
             active = policy_version_from_dict(dict(payload["active"]))
             rollback = policy_version_from_dict(dict(payload["rollback"]))
@@ -399,6 +434,7 @@ class InferenceService:
             self._published = None
             self._published_verified = False
             self._frozen = False
+            self._freeze_kind = None
         elif kind == "MOTION_BEGAN":
             raw = dict(payload["lease"])
             lease = MotionVersionLease(
