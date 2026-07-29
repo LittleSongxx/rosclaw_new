@@ -35,7 +35,8 @@ def _bounded_artifact_line(entry: dict[str, Any]) -> str:
     size = len((line + "\n").encode("utf-8"))
     if size <= _MAX_ARTIFACT_RECORD_BYTES:
         return line
-    result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+    raw_result: Any = entry.get("result")
+    result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else {}
     bounded = json.dumps(
         {
             "phase": str(entry.get("phase", ""))[:256],

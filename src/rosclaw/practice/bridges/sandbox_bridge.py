@@ -10,7 +10,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 from urllib.parse import unquote, urlparse
 
 from rosclaw.core.event_bus import Event, EventBus, EventPriority
@@ -66,7 +66,7 @@ def _bounded_episode_id(value: Any) -> str:
     return f"{text[:239]}-{digest}"
 
 
-def _is_bounded_file(path: Path | None) -> bool:
+def _is_bounded_file(path: Path | None) -> TypeGuard[Path]:
     try:
         return bool(
             path is not None and path.is_file() and path.stat().st_size <= _MAX_ARTIFACT_BYTES
@@ -98,16 +98,16 @@ def _artifact_quality(receipt: dict[str, Any]) -> dict[str, Any]:
         paths[resolved.name] = resolved
     hash_valid = bool(expected) and contract_bounded and not duplicate_paths
     for name, expected_hash in list(expected.items())[:100]:
-        path = paths.get(str(name))
+        candidate_path = paths.get(str(name))
         if (
             Path(str(name)).name != str(name)
             or not _SHA256_RE.fullmatch(str(expected_hash))
-            or not _is_bounded_file(path)
+            or not _is_bounded_file(candidate_path)
         ):
             hash_valid = False
             break
         try:
-            with path.open("rb") as stream:
+            with candidate_path.open("rb") as stream:
                 actual = hashlib.file_digest(stream, "sha256").hexdigest()
         except OSError:
             hash_valid = False
@@ -138,7 +138,9 @@ def _artifact_quality(receipt: dict[str, Any]) -> dict[str, Any]:
                         for value in times
                     )
                     and all(
-                        float(left) < float(right)
+                        left is not None
+                        and right is not None
+                        and float(left) < float(right)
                         for left, right in zip(times, times[1:], strict=False)
                     )
                 )
