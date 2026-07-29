@@ -61,6 +61,16 @@ def test_boundary_buffer_rejects_ordinary_non_boundary_rollout() -> None:
         )
 
 
+def test_non_boundary_record_rejects_boundary_request_commitment() -> None:
+    v0, _ = policy(0)
+    with pytest.raises(ValueError, match="only boundary"):
+        ExperienceRecord(
+            trajectory(v0),
+            ExperiencePartition.RECENT,
+            boundary_request_hash=digest("boundary-request"),
+        )
+
+
 def test_replay_fails_closed_until_all_partitions_exist() -> None:
     v0, _ = policy(0)
     store = ContinualExperienceStore()
