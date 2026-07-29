@@ -67,7 +67,9 @@ class G1KickSkillFeedbackController:
         if frame.phase < cfg.precontact_start or frame.phase > cfg.recovery_end:
             return {}
         if not self._contact_latched and frame.phase <= cfg.precontact_end:
-            contact_phase_error = float(frame.error.value.get("contact_phase", 0.0))
+            contact_phase_error = cfg.expected_contact_phase - float(
+                frame.actual.get("contact_phase", frame.phase)
+            )
             lateral_error = float(frame.actual.get("ball_lateral_error_m", 0.0))
             lateral_correction = -cfg.ball_lateral_kp * lateral_error
             return {

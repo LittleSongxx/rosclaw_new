@@ -418,6 +418,9 @@ class G1MuJoCoBackend:
             "right_foot_contact": [],
             "ground_reaction_force": [],
             "support_foot_slip": [],
+            "policy_phase": [],
+            "com_y_relative": [],
+            "ball_lateral_error_m": [],
             "ball_pose": [],
             "ball_velocity": [],
             "ball_angular_velocity": [],
@@ -433,6 +436,8 @@ class G1MuJoCoBackend:
                     "feedback_active": [],
                 }
             )
+            if "skill:kick_phase_rate" in feedback_runtime.spec.output_limits:
+                trace["feedback_phase_rate"] = []
         if feedforward is not None:
             trace.update(
                 {
@@ -485,6 +490,9 @@ class G1MuJoCoBackend:
             dtype=np.float64,
         )
         feedback_error_rms = math.nan
+        feedback_phase_rate = 0.0
+        policy_phase = 0.0
+        phase_repeat_accumulator = 0.0
         next_feedback_time = 0.0
         latest_support_slip = 0.0
 
@@ -515,6 +523,11 @@ class G1MuJoCoBackend:
                     else:
                         repeat += phase_advance
                         phase_adjusted = True
+                repeat, phase_repeat_accumulator = _apply_feedback_phase_rate(
+                    repeat=repeat,
+                    phase_rate=feedback_phase_rate,
+                    accumulator=phase_repeat_accumulator,
+                )
                 if repeat:
                     with contextlib.redirect_stdout(io.StringIO()):
                         for _ in range(repeat):
@@ -537,6 +550,10 @@ class G1MuJoCoBackend:
                     kp = np.asarray(policy.kps, dtype=np.float64)
                     kd = np.asarray(policy.kds, dtype=np.float64)
                     policy_frame = current_policy_frame
+                policy_phase = min(
+                    1.0,
+                    policy_frame / max(1, int(motion["joint_pos"].shape[0]) - 1),
+                )
             target_queue.append(target)
             delayed_target = (
                 target_queue.popleft() if len(target_queue) > latency_frames else last_target.copy()
@@ -550,15 +567,23 @@ class G1MuJoCoBackend:
             ball_contact_point: np.ndarray = np.zeros(3, dtype=np.float64)
             for _ in range(10):
                 if feedback_runtime is not None and data.time + 1e-12 >= next_feedback_time:
-                    feedback_residual = _feedback_residual(
+                    feedback_phase = (
+                        policy_phase
+                        if "contact_phase" in feedback_runtime.spec.observation_signals
+                        else min(1.0, frame / max(1, total_control_frames - 1))
+                    )
+                    feedback_effect = _feedback_effect(
                         runtime=feedback_runtime,
                         timestamp_sec=float(data.time),
-                        phase=min(1.0, frame / max(1, total_control_frames - 1)),
+                        phase=feedback_phase,
                         data=data,
                         ids=ids,
                         base_target=delayed_target,
                         support_slip=latest_support_slip,
+                        contact_detected=contact_observed,
                     )
+                    feedback_residual = feedback_effect.joint_residual
+                    feedback_phase_rate = feedback_effect.kick_phase_rate
                     feedback_error_rms = feedback_runtime.records[-1].error_rms
                     next_feedback_time += 1.0 / feedback_runtime.spec.rate_hz
                 raw_combined_residual = feedback_residual + feedforward_residual
@@ -673,6 +698,8 @@ class G1MuJoCoBackend:
                     goal_crossed=goal_crossed,
                     feedback_residual=feedback_residual,
                     feedback_error_rms=feedback_error_rms,
+                    feedback_phase_rate=feedback_phase_rate,
+                    policy_phase=policy_phase,
                     feedforward_residual=feedforward_residual,
                     combined_residual=combined_residual,
                     combined_residual_saturation=combined_residual_saturation,
@@ -702,6 +729,8 @@ class G1MuJoCoBackend:
                 goal_crossed=goal_crossed,
                 feedback_residual=feedback_residual,
                 feedback_error_rms=feedback_error_rms,
+                feedback_phase_rate=feedback_phase_rate,
+                policy_phase=policy_phase,
                 feedforward_residual=feedforward_residual,
                 combined_residual=combined_residual,
                 combined_residual_saturation=combined_residual_saturation,
@@ -833,6 +862,12 @@ class _Contacts:
     ball_contact_point: tuple[float, float, float]
     left_ground_force_n: float
     right_ground_force_n: float
+
+
+@dataclass(frozen=True)
+class _FeedbackEffect:
+    joint_residual: np.ndarray
+    kick_phase_rate: float
 
 
 def _load_robonaldo(root: Path) -> tuple[Any, Any, Any, np.ndarray]:
@@ -1042,6 +1077,8 @@ def _append_trace(
     goal_crossed: bool,
     feedback_residual: np.ndarray | None = None,
     feedback_error_rms: float = math.nan,
+    feedback_phase_rate: float = 0.0,
+    policy_phase: float = 0.0,
     feedforward_residual: np.ndarray | None = None,
     combined_residual: np.ndarray | None = None,
     combined_residual_saturation: int = 0,
@@ -1058,6 +1095,11 @@ def _append_trace(
     trace["right_foot_contact"].append(right_contact)
     trace["ground_reaction_force"].append(ground_reaction_force)
     trace["support_foot_slip"].append(support_slip)
+    trace["policy_phase"].append(policy_phase)
+    trace["com_y_relative"].append(float(com[1]) - float(data.xpos[ids.left_ankle][1]))
+    trace["ball_lateral_error_m"].append(
+        float(data.qpos[ids.ball_qpos + 1]) - float(data.xpos[ids.right_ankle][1])
+    )
     trace["ball_pose"].append(data.qpos[ids.ball_qpos : ids.ball_qpos + 7].copy())
     trace["ball_velocity"].append(data.qvel[ids.ball_qvel : ids.ball_qvel + 3].copy())
     trace["ball_angular_velocity"].append(data.qvel[ids.ball_qvel + 3 : ids.ball_qvel + 6].copy())
@@ -1069,6 +1111,8 @@ def _append_trace(
         trace["feedback_residual"].append(feedback_residual.copy())
         trace["feedback_error_rms"].append(feedback_error_rms)
         trace["feedback_active"].append(bool(np.any(np.abs(feedback_residual) > 0.0)))
+    if "feedback_phase_rate" in trace:
+        trace["feedback_phase_rate"].append(feedback_phase_rate)
     if "feedforward_residual" in trace:
         assert feedforward_residual is not None
         assert combined_residual is not None
@@ -1077,7 +1121,7 @@ def _append_trace(
         trace["combined_residual_saturation"].append(combined_residual_saturation)
 
 
-def _feedback_residual(
+def _feedback_effect(
     *,
     runtime: FeedbackRuntime,
     timestamp_sec: float,
@@ -1086,7 +1130,8 @@ def _feedback_residual(
     ids: _ModelIds,
     base_target: np.ndarray,
     support_slip: float,
-) -> np.ndarray:
+    contact_detected: bool,
+) -> _FeedbackEffect:
     """Run one feedback tick from MuJoCo state without crossing the EventBus."""
 
     roll, pitch = _roll_pitch(data.xquat[ids.torso])
@@ -1097,6 +1142,10 @@ def _feedback_residual(
         "torso_pitch": pitch,
         "com_y_relative": float(com[1]) - support_y,
         "support_slip_m": support_slip,
+        "contact_phase": phase,
+        "ball_lateral_error_m": float(data.qpos[ids.ball_qpos + 1])
+        - float(data.xpos[ids.right_ankle][1]),
+        "contact_detected": float(contact_detected),
     }
     actual.update(
         {
@@ -1119,12 +1168,46 @@ def _feedback_residual(
         base_action=base_action,
     )
     residual = np.zeros(29, dtype=np.float64)
+    kick_phase_rate = 0.0
     joint_index = {name: index for index, name in enumerate(G1_DDS_JOINT_NAMES)}
     for output, value in command.projected.items():
+        if output == "skill:kick_phase_rate":
+            kick_phase_rate = value
+            continue
         joint_name = output.removeprefix("joint:")
         if joint_name in joint_index:
             residual[joint_index[joint_name]] = value
-    return residual
+    return _FeedbackEffect(
+        joint_residual=residual,
+        kick_phase_rate=kick_phase_rate,
+    )
+
+
+def _apply_feedback_phase_rate(
+    *,
+    repeat: int,
+    phase_rate: float,
+    accumulator: float,
+) -> tuple[int, float]:
+    """Convert a bounded L2 phase-rate directive into discrete policy-clock steps."""
+
+    if repeat < 0:
+        raise ValueError("policy repeat count must be non-negative")
+    if not math.isfinite(phase_rate) or not -1.0 <= phase_rate <= 1.0:
+        raise ValueError("feedback phase rate must be finite and in [-1, 1]")
+    if not math.isfinite(accumulator):
+        raise ValueError("feedback phase accumulator must be finite")
+    accumulator += phase_rate
+    if accumulator >= 1.0:
+        extra = int(math.floor(accumulator))
+        repeat += extra
+        accumulator -= extra
+    elif accumulator <= -1.0 and repeat > 0:
+        held = min(repeat, int(math.floor(-accumulator)))
+        repeat -= held
+        accumulator += held
+    accumulator = min(0.999999, max(-0.999999, accumulator))
+    return repeat, accumulator
 
 
 def _classify(

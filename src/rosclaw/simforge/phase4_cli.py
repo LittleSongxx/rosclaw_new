@@ -13,6 +13,13 @@ from rosclaw.auto.g1_kick.continual_runner import (
 from rosclaw.robot_pack.g1.chaos import run_g1_executor_chaos
 from rosclaw.robot_pack.g1.dds_adapter import run_unitree_dds_loopback
 from rosclaw.simforge.backends.unitree_mujoco_backend import qualify_g1_assets
+from rosclaw.simforge.g1_causal_feedback_validation import (
+    run_g1_causal_feedback_validation,
+)
+from rosclaw.simforge.g1_continual_gpu_smoke import run_g1_continual_four_gpu_smoke
+from rosclaw.simforge.g1_continual_physical_validation import (
+    run_g1_continual_physical_foundation,
+)
 from rosclaw.simforge.g1_cpu_gpu_agreement import run_cpu_gpu_label_agreement
 from rosclaw.simforge.g1_doctor import doctor_goalforge, write_doctor_report
 from rosclaw.simforge.g1_feedback_evolution import run_g1_feedback_evolution
@@ -102,9 +109,12 @@ def _recovery_validation(argv: list[str]) -> int:
             "recovery",
             "nominal-success",
             "feedback-reflex",
+            "feedback-causal",
             "feedback-holdout",
             "feedback-ilc",
             "feedback-evolution",
+            "continual-four-gpu-smoke",
+            "continual-physical-foundation",
         ),
         default="recovery",
     )
@@ -118,6 +128,29 @@ def _recovery_validation(argv: list[str]) -> int:
     parser.add_argument("--chaos-evidence", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.profile == "continual-physical-foundation":
+        result = run_g1_continual_physical_foundation(
+            asset_root=args.asset_root,
+            output_dir=args.output,
+            source_checkout=_source_checkout(),
+        )
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        return 0 if result.passed else 2
+    if args.profile == "continual-four-gpu-smoke":
+        result = run_g1_continual_four_gpu_smoke(
+            output_dir=args.output,
+            source_checkout=_source_checkout(),
+        )
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        return 0 if result.passed else 2
+    if args.profile == "feedback-causal":
+        result = run_g1_causal_feedback_validation(
+            asset_root=args.asset_root,
+            output_path=args.output,
+            source_checkout=_source_checkout(),
+        )
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        return 0 if result.passed else 2
     if args.profile == "feedback-evolution":
         evidence_paths = {
             "--feedback-evidence": args.feedback_evidence,

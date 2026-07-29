@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import pytest
+
 from rosclaw.feedback.contracts import ErrorState, FeedbackFrame
-from rosclaw.feedback.controllers.kick_skill import G1KickSkillFeedbackController
+from rosclaw.feedback.controllers.kick_skill import (
+    G1KickSkillFeedbackConfig,
+    G1KickSkillFeedbackController,
+)
 from rosclaw.feedback.profiles.g1_skill import build_g1_kick_skill_runtime
 from rosclaw.feedback.replay import RecordedLatencyClock
 
@@ -80,3 +85,13 @@ def test_skill_runtime_projects_phase_and_joint_directives() -> None:
     assert command.projected["joint:right_hip_yaw_joint"] == -0.035
     assert command.saturation_count == 2
     assert command.deadline_met
+
+
+def test_expected_contact_phase_is_owned_by_the_controller_config() -> None:
+    controller = G1KickSkillFeedbackController(
+        G1KickSkillFeedbackConfig(expected_contact_phase=0.50)
+    )
+
+    residual = controller.compute(_frame(phase=0.4, contact=False), {})
+
+    assert residual["skill:kick_phase_rate"] == pytest.approx(-0.01)
