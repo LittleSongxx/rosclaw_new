@@ -6398,13 +6398,24 @@ def cmd_forge_validate(args: argparse.Namespace) -> int:
 
     print(f"[ROSClaw] Validating bundle: {bundle_path}")
 
-    # Check required files exist
-    required_files = ["robot.eurdf.yaml", "safety.yaml", "capabilities.yaml"]
+    # Forge supports both MCP bundles and e-URDF robot bundles. Detect the
+    # shape before selecting requirements so sdk-to-mcp output can be checked
+    # by the very command it recommends.
+    is_mcp_bundle = (bundle_path / "mcp_server.py").exists()
+    if is_mcp_bundle:
+        required_files = [
+            "mcp_server.py",
+            "skill_manifest.json",
+            "provider_manifest.json",
+            "README.md",
+        ]
+    else:
+        required_files = ["robot.eurdf.yaml", "safety.yaml", "capabilities.yaml"]
     errors = []
     warnings = []
     file_count = 0
 
-    for f in bundle_path.iterdir():
+    for f in bundle_path.rglob("*"):
         if f.is_file():
             file_count += 1
 
@@ -6412,8 +6423,20 @@ def cmd_forge_validate(args: argparse.Namespace) -> int:
         if not (bundle_path / req).exists():
             errors.append(f"Missing required file: {req}")
 
-    # Optional files
-    optional = ["semantic.yaml", "benchmark.yaml", "robot.urdf", "robot.mjcf.xml"]
+    if is_mcp_bundle:
+        tests_dir = bundle_path / "tests"
+        if not tests_dir.is_dir() or not any(tests_dir.glob("test_*.py")):
+            errors.append("Missing generated MCP tests under tests/test_*.py")
+        server_source = (bundle_path / "mcp_server.py").read_text(encoding="utf-8")
+        if "list_tools" not in server_source or "call_tool" not in server_source:
+            errors.append("MCP server must register both list_tools and call_tool handlers")
+        if "GENERATED_ADAPTER_REQUIRED" not in server_source:
+            errors.append("Generated MCP server must fail closed until an adapter is implemented")
+        if 'if __name__ == "__main__"' not in server_source:
+            errors.append("Generated MCP server must provide a runnable module entry point")
+        optional: list[str] = []
+    else:
+        optional = ["semantic.yaml", "benchmark.yaml", "robot.urdf", "robot.mjcf.xml"]
     for opt in optional:
         if not (bundle_path / opt).exists():
             warnings.append(f"Missing optional file: {opt}")
