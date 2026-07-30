@@ -26,8 +26,11 @@ from rosclaw.simforge.g1_recovery_quality import G1RecoveryQuality
 from rosclaw.simforge.g1_temporal_muscle_memory_training import (
     G1TemporalMuscleMemoryTrainingConfig,
     _artifact_from_temporal_genome,
+    _build_temporal_expert_validation_cases,
     _build_temporal_holdout_cases,
+    _calibrate_impact_radius,
     _numpy_temporal_logits,
+    build_g1_temporal_muscle_memory_cases,
 )
 from rosclaw.simforge.models import Partition
 
@@ -59,10 +62,27 @@ def test_training_and_private_holdout_are_partitioned() -> None:
     assert holdout[0].scenario.ball_velocity_x_mps == 0.0
 
     temporal_holdout = _build_temporal_holdout_cases()
+    temporal_training = build_g1_temporal_muscle_memory_cases()
+    expert_validation = _build_temporal_expert_validation_cases()
     assert all(case.scenario.partition is Partition.HOLDOUT for case in temporal_holdout)
+    assert all(case.scenario.partition is Partition.DEVELOPMENT for case in temporal_training)
+    assert all(case.scenario.partition is Partition.VALIDATION for case in expert_validation)
+    assert sum(case.scenario.ball_velocity_x_mps != 0.0 for case in temporal_training) == 3
     assert {case.scenario.scenario_commitment for case in temporal_holdout}.isdisjoint(
         case.scenario.scenario_commitment for case in training
     )
+    assert {case.scenario.scenario_commitment for case in expert_validation}.isdisjoint(
+        case.scenario.scenario_commitment for case in temporal_training + temporal_holdout
+    )
+
+
+def test_temporal_expert_radius_is_calibrated_only_from_development_spacing() -> None:
+    assert _calibrate_impact_radius((2.50,)) == pytest.approx(1e-6)
+    assert _calibrate_impact_radius((2.49, 2.585, 2.587)) == pytest.approx(0.10)
+    assert _calibrate_impact_radius((2.0, 2.4)) == pytest.approx(0.20)
+
+    with pytest.raises(ValueError, match="finite prototypes"):
+        _calibrate_impact_radius(())
 
 
 def test_sparse_genome_builds_bounded_content_addressed_actor() -> None:
@@ -88,7 +108,7 @@ def test_sparse_genome_builds_bounded_content_addressed_actor() -> None:
 def test_temporal_genome_builds_recurrent_safe_json_actor() -> None:
     observations = len(G1_MUSCLE_MEMORY_OBSERVATIONS)
     artifact = _artifact_from_temporal_genome(
-        np.zeros(29, dtype=np.float64),
+        np.zeros(37, dtype=np.float64),
         body_hash="sha256:" + "a" * 64,
         motion_hash="sha256:" + "b" * 64,
         parent_config_hash="sha256:" + "c" * 64,
@@ -119,7 +139,7 @@ def test_temporal_genome_builds_recurrent_safe_json_actor() -> None:
 
 def test_temporal_numpy_export_is_deterministic() -> None:
     observations = len(G1_MUSCLE_MEMORY_OBSERVATIONS)
-    genome = np.zeros(29, dtype=np.float64)
+    genome = np.zeros(37, dtype=np.float64)
     genome[0:4] = (0.03, 0.02, 0.0, -0.01)
     genome[12] = 0.2
     artifact = _artifact_from_temporal_genome(

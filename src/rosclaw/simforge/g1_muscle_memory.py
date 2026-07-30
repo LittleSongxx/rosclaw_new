@@ -63,6 +63,17 @@ G1_MUSCLE_MEMORY_STRUCTURED_PARAMETERS = (
     "target_smoothing_alpha",
 )
 
+G1_MUSCLE_MEMORY_EXPERT_REGIME_FEATURES = (
+    "pelvis_velocity_x_m_s",
+    "pelvis_velocity_y_m_s",
+    "pelvis_velocity_z_m_s",
+    "torso_pitch_rad",
+    "torso_angular_velocity_y_rad_s",
+    "left_ground_force_scale",
+    "right_ground_force_scale",
+    "contact_impulse_ns",
+)
+
 
 @dataclass(frozen=True)
 class G1MuscleMemoryArtifact:
@@ -88,6 +99,9 @@ class G1MuscleMemoryArtifact:
     fallback_recovery_config_hash: str = ""
     expert_impact_prototypes_ns: tuple[float, ...] = ()
     expert_impact_max_distance_ns: float = 0.20
+    expert_regime_feature_names: tuple[str, ...] = ()
+    expert_regime_prototypes: tuple[tuple[float, ...], ...] = ()
+    expert_regime_max_distance: float = 0.25
     structured_recovery_parameters: tuple[float, ...] = ()
     output_smoothing_alpha: float = 0.35
     output_rate_limit_rad: float = 0.012
@@ -121,10 +135,15 @@ class G1MuscleMemoryArtifact:
             raise ValueError("muscle-memory weight matrix shape is invalid")
         if len(self.bias) != actions or len(self.action_limits_rad) != actions:
             raise ValueError("muscle-memory action shape is invalid")
-        temporal = self.schema_version == "rosclaw.g1_goalforge.muscle_memory_artifact.v2"
+        temporal = self.schema_version in {
+            "rosclaw.g1_goalforge.muscle_memory_artifact.v2",
+            "rosclaw.g1_goalforge.muscle_memory_artifact.v3",
+        }
+        regime_prototypes = self.schema_version.endswith(".v3")
         if self.schema_version not in {
             "rosclaw.g1_goalforge.muscle_memory_artifact.v1",
             "rosclaw.g1_goalforge.muscle_memory_artifact.v2",
+            "rosclaw.g1_goalforge.muscle_memory_artifact.v3",
         }:
             raise ValueError("unsupported G1 muscle-memory artifact schema")
         if temporal:
@@ -151,6 +170,20 @@ class G1MuscleMemoryArtifact:
                 raise ValueError("temporal muscle memory requires 1 to 8 impact prototypes")
             if not 1e-6 <= self.expert_impact_max_distance_ns <= 0.50:
                 raise ValueError("temporal impact prototype distance must be in [1e-6, 0.50]")
+            if regime_prototypes:
+                if self.expert_regime_feature_names != G1_MUSCLE_MEMORY_EXPERT_REGIME_FEATURES:
+                    raise ValueError("expert regime feature contract mismatch")
+                if len(self.expert_regime_prototypes) != len(
+                    self.expert_impact_prototypes_ns
+                ) or any(
+                    len(row) != len(G1_MUSCLE_MEMORY_EXPERT_REGIME_FEATURES)
+                    for row in self.expert_regime_prototypes
+                ):
+                    raise ValueError("expert regime prototype shape is invalid")
+                if not 0.01 <= self.expert_regime_max_distance <= 2.0:
+                    raise ValueError("expert regime prototype distance must be in [0.01, 2]")
+            elif self.expert_regime_feature_names or self.expert_regime_prototypes:
+                raise ValueError("v2 muscle memory cannot contain regime prototypes")
             if len(self.structured_recovery_parameters) != len(
                 G1_MUSCLE_MEMORY_STRUCTURED_PARAMETERS
             ):
@@ -169,24 +202,30 @@ class G1MuscleMemoryArtifact:
             or self.policy_architecture != "sparse_linear_v1"
             or self.fallback_recovery_config_hash
             or self.expert_impact_prototypes_ns
+            or self.expert_regime_feature_names
+            or self.expert_regime_prototypes
             or self.structured_recovery_parameters
         ):
             raise ValueError("v1 muscle-memory artifacts cannot contain temporal policy fields")
-        arrays = (
+        arrays: list[np.ndarray] = [
             np.asarray(self.observation_mean),
             np.asarray(self.observation_scale),
             np.asarray(self.weights),
             np.asarray(self.bias),
             np.asarray(self.action_limits_rad),
-        )
+        ]
         if temporal:
-            arrays += (
-                np.asarray(self.temporal_basis_centers_sec),
-                np.asarray(self.temporal_basis_weights),
-                np.asarray(self.proprioceptive_trend_weights),
-                np.asarray(self.expert_impact_prototypes_ns),
-                np.asarray(self.structured_recovery_parameters),
+            arrays.extend(
+                (
+                    np.asarray(self.temporal_basis_centers_sec),
+                    np.asarray(self.temporal_basis_weights),
+                    np.asarray(self.proprioceptive_trend_weights),
+                    np.asarray(self.expert_impact_prototypes_ns),
+                    np.asarray(self.structured_recovery_parameters),
+                )
             )
+            if regime_prototypes:
+                arrays.append(np.asarray(self.expert_regime_prototypes))
         if not all(np.all(np.isfinite(value)) for value in arrays):
             raise ValueError("muscle-memory artifact contains non-finite values")
         if np.any(np.asarray(self.observation_scale) <= 0.0):
@@ -236,7 +275,17 @@ class G1MuscleMemoryArtifact:
                 "fallback_recovery_config_hash",
                 "expert_impact_prototypes_ns",
                 "expert_impact_max_distance_ns",
+                "expert_regime_feature_names",
+                "expert_regime_prototypes",
+                "expert_regime_max_distance",
                 "structured_recovery_parameters",
+            ):
+                value.pop(key)
+        elif self.schema_version.endswith(".v2"):
+            for key in (
+                "expert_regime_feature_names",
+                "expert_regime_prototypes",
+                "expert_regime_max_distance",
             ):
                 value.pop(key)
         value["observation_names"] = list(G1_MUSCLE_MEMORY_OBSERVATIONS)
@@ -246,7 +295,7 @@ class G1MuscleMemoryArtifact:
         value["weights"] = [list(row) for row in self.weights]
         value["bias"] = list(self.bias)
         value["action_limits_rad"] = list(self.action_limits_rad)
-        if self.schema_version.endswith(".v2"):
+        if not self.schema_version.endswith(".v1"):
             value["temporal_basis_centers_sec"] = list(self.temporal_basis_centers_sec)
             value["temporal_basis_weights"] = [list(row) for row in self.temporal_basis_weights]
             value["proprioceptive_trend_weights"] = [
@@ -257,6 +306,9 @@ class G1MuscleMemoryArtifact:
                 G1_MUSCLE_MEMORY_STRUCTURED_PARAMETERS
             )
             value["structured_recovery_parameters"] = list(self.structured_recovery_parameters)
+        if self.schema_version.endswith(".v3"):
+            value["expert_regime_feature_names"] = list(self.expert_regime_feature_names)
+            value["expert_regime_prototypes"] = [list(row) for row in self.expert_regime_prototypes]
         return value
 
     @classmethod
@@ -265,6 +317,7 @@ class G1MuscleMemoryArtifact:
         if schema_version not in {
             "rosclaw.g1_goalforge.muscle_memory_artifact.v1",
             "rosclaw.g1_goalforge.muscle_memory_artifact.v2",
+            "rosclaw.g1_goalforge.muscle_memory_artifact.v3",
         }:
             raise ValueError("unsupported G1 muscle-memory artifact schema")
         if tuple(value.get("observation_names", ())) != G1_MUSCLE_MEMORY_OBSERVATIONS:
@@ -272,7 +325,7 @@ class G1MuscleMemoryArtifact:
         if tuple(value.get("action_names", ())) != G1_MUSCLE_MEMORY_ACTIONS:
             raise ValueError("muscle-memory action contract mismatch")
         if (
-            schema_version.endswith(".v2")
+            not schema_version.endswith(".v1")
             and tuple(value.get("structured_recovery_parameter_names", ()))
             != G1_MUSCLE_MEMORY_STRUCTURED_PARAMETERS
         ):
@@ -308,6 +361,14 @@ class G1MuscleMemoryArtifact:
                 float(item) for item in value.get("expert_impact_prototypes_ns", ())
             ),
             expert_impact_max_distance_ns=float(value.get("expert_impact_max_distance_ns", 0.20)),
+            expert_regime_feature_names=tuple(
+                str(item) for item in value.get("expert_regime_feature_names", ())
+            ),
+            expert_regime_prototypes=tuple(
+                tuple(float(item) for item in row)
+                for row in value.get("expert_regime_prototypes", ())
+            ),
+            expert_regime_max_distance=float(value.get("expert_regime_max_distance", 0.25)),
             structured_recovery_parameters=tuple(
                 float(item) for item in value.get("structured_recovery_parameters", ())
             ),
@@ -375,6 +436,17 @@ class G1MuscleMemoryPolicy:
         )
         self._temporal_basis_weights = np.asarray(artifact.temporal_basis_weights, dtype=np.float64)
         self._trend_weights = np.asarray(artifact.proprioceptive_trend_weights, dtype=np.float64)
+        self._expert_regime_indices = np.asarray(
+            [
+                G1_MUSCLE_MEMORY_OBSERVATIONS.index(name)
+                for name in artifact.expert_regime_feature_names
+            ],
+            dtype=np.int64,
+        )
+        self._expert_regime_prototypes = np.asarray(
+            artifact.expert_regime_prototypes,
+            dtype=np.float64,
+        )
         self._synergies = _muscle_synergies()
         self._joint_limits = np.asarray(
             g1_joint_residual_limits(G1_DDS_JOINT_NAMES), dtype=np.float64
@@ -396,15 +468,16 @@ class G1MuscleMemoryPolicy:
         if parent_recovery_config_hash != self.artifact.parent_recovery_config_hash:
             raise ValueError("muscle-memory parent recovery config hash mismatch")
         if (
-            self.artifact.schema_version.endswith(".v2")
+            not self.artifact.schema_version.endswith(".v1")
             and fallback_recovery_config_hash != self.artifact.fallback_recovery_config_hash
         ):
             raise ValueError("muscle-memory fallback recovery config hash mismatch")
 
     def reset(self) -> None:
-        self._previous_residual = np.zeros(len(G1_DDS_JOINT_NAMES), dtype=np.float64)
+        self._previous_residual: np.ndarray = np.zeros(len(G1_DDS_JOINT_NAMES), dtype=np.float64)
         self._activation_origin_sec: float | None = None
         self._proprioceptive_memory: np.ndarray | None = None
+        self._expert_regime_latched: bool | None = None
         self._inference_count = 0
         self._active_count = 0
         self._ood_count = 0
@@ -428,18 +501,24 @@ class G1MuscleMemoryPolicy:
         normalized = (ordered - self._mean) / self._scale
         if np.max(np.abs(normalized)) > self.artifact.maximum_feature_z:
             return False
-        if not self.artifact.schema_version.endswith(".v2"):
+        if self.artifact.schema_version.endswith(".v1"):
             return True
         impact = ordered[G1_MUSCLE_MEMORY_OBSERVATIONS.index("contact_impulse_ns")]
         full_confidence = (
             self.artifact.sagittal_minimum_impulse_ns + self.artifact.sagittal_impulse_ramp_ns
         )
-        nearest = min(
-            abs(impact - prototype) for prototype in self.artifact.expert_impact_prototypes_ns
+        impact_distances = np.abs(
+            impact - np.asarray(self.artifact.expert_impact_prototypes_ns, dtype=np.float64)
         )
-        return bool(
-            impact >= full_confidence and nearest <= self.artifact.expert_impact_max_distance_ns
-        )
+        covered = impact_distances <= self.artifact.expert_impact_max_distance_ns
+        if self.artifact.schema_version.endswith(".v3"):
+            regime = normalized[self._expert_regime_indices]
+            regime_distances = np.linalg.norm(
+                self._expert_regime_prototypes - regime,
+                axis=1,
+            )
+            covered &= regime_distances <= self.artifact.expert_regime_max_distance
+        return bool(impact >= full_confidence and np.any(covered))
 
     def infer(self, observation: Mapping[str, float]) -> G1MuscleMemoryEffect:
         missing = set(G1_MUSCLE_MEMORY_OBSERVATIONS).difference(observation)
@@ -452,15 +531,17 @@ class G1MuscleMemoryPolicy:
         if not np.all(np.isfinite(ordered)):
             raise ValueError("muscle-memory observations must be finite")
         normalized = (ordered - self._mean) / self._scale
+        if self._expert_regime_latched is None:
+            self._expert_regime_latched = self.expert_regime_confident(observation)
         ood = bool(
             np.max(np.abs(normalized)) > self.artifact.maximum_feature_z
-            or not self.expert_regime_confident(observation)
+            or not self._expert_regime_latched
         )
-        temporal_basis = np.zeros(0, dtype=np.float64)
+        temporal_basis: np.ndarray = np.zeros(0, dtype=np.float64)
         proprioceptive_trend = np.zeros_like(normalized)
         if ood:
-            raw_actions = np.zeros(len(G1_MUSCLE_MEMORY_ACTIONS), dtype=np.float64)
-            raw_residual = np.zeros(len(G1_DDS_JOINT_NAMES), dtype=np.float64)
+            raw_actions: np.ndarray = np.zeros(len(G1_MUSCLE_MEMORY_ACTIONS), dtype=np.float64)
+            raw_residual: np.ndarray = np.zeros(len(G1_DDS_JOINT_NAMES), dtype=np.float64)
             self._ood_count += 1
         else:
             post_contact_time_sec = ordered[
@@ -471,7 +552,7 @@ class G1MuscleMemoryPolicy:
             elapsed = max(0.0, post_contact_time_sec - self._activation_origin_sec)
             envelope = self._activation_envelope(elapsed)
             logits = self._weights @ normalized + self._bias
-            if self.artifact.schema_version.endswith(".v2"):
+            if not self.artifact.schema_version.endswith(".v1"):
                 if self._proprioceptive_memory is None:
                     self._proprioceptive_memory = normalized.copy()
                 proprioceptive_trend = normalized - self._proprioceptive_memory
@@ -501,7 +582,7 @@ class G1MuscleMemoryPolicy:
                 0.0,
                 1.0,
             )
-            if self.artifact.schema_version.endswith(".v2"):
+            if not self.artifact.schema_version.endswith(".v1"):
                 # A temporal whole-body correction is meaningful only after a
                 # confident impact. Low-impulse disturbances therefore fall
                 # back to the retained analytical recovery controller.
@@ -595,7 +676,7 @@ def load_g1_muscle_memory_artifact(path: Path) -> G1MuscleMemoryArtifact:
 
 def _muscle_synergies() -> np.ndarray:
     index = {name: position for position, name in enumerate(G1_DDS_JOINT_NAMES)}
-    value = np.zeros(
+    value: np.ndarray = np.zeros(
         (len(G1_MUSCLE_MEMORY_ACTIONS), len(G1_DDS_JOINT_NAMES)),
         dtype=np.float64,
     )
@@ -632,6 +713,7 @@ def _muscle_synergies() -> np.ndarray:
 
 __all__ = [
     "G1_MUSCLE_MEMORY_ACTIONS",
+    "G1_MUSCLE_MEMORY_EXPERT_REGIME_FEATURES",
     "G1_MUSCLE_MEMORY_OBSERVATIONS",
     "G1_MUSCLE_MEMORY_STRUCTURED_PARAMETERS",
     "G1MuscleMemoryArtifact",

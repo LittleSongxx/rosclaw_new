@@ -12,6 +12,7 @@ from rosclaw.simforge.g1_cerebellar_recovery import (
 )
 from rosclaw.simforge.g1_muscle_memory import (
     G1_MUSCLE_MEMORY_ACTIONS,
+    G1_MUSCLE_MEMORY_EXPERT_REGIME_FEATURES,
     G1_MUSCLE_MEMORY_OBSERVATIONS,
     G1MuscleMemoryArtifact,
     G1MuscleMemoryPolicy,
@@ -126,11 +127,14 @@ def test_temporal_policy_uses_history_and_reset_is_deterministic() -> None:
         expert_impact_prototypes_ns=(3.0,),
         structured_recovery_parameters=(0.42, 0.11, 0.54),
     )
+    payload = artifact.to_dict()
     policy = G1MuscleMemoryPolicy(artifact)
     first = policy.infer(_observation(pelvis_velocity_x_m_s=-0.05, contact_impulse_ns=3.0))
     second = policy.infer(_observation(pelvis_velocity_x_m_s=-0.20, contact_impulse_ns=3.0))
 
     assert not np.array_equal(first.synergy_actions, second.synergy_actions)
+    assert "expert_regime_feature_names" not in payload
+    assert "expert_regime_prototypes" not in payload
     policy.reset()
     replay = policy.infer(_observation(pelvis_velocity_x_m_s=-0.05, contact_impulse_ns=3.0))
     assert np.array_equal(first.residual, replay.residual)
@@ -163,6 +167,42 @@ def test_temporal_policy_falls_back_whole_body_on_low_confidence_impact() -> Non
 
     assert not effect.active
     assert np.count_nonzero(effect.synergy_actions) == 0
+
+
+def test_v3_router_requires_matching_impact_and_proprioceptive_regime() -> None:
+    base = _artifact(parent_config_hash=_controller().config_hash)
+    actions = len(G1_MUSCLE_MEMORY_ACTIONS)
+    observations = len(G1_MUSCLE_MEMORY_OBSERVATIONS)
+    prototype_observation = _observation(contact_impulse_ns=3.0)
+    prototype = tuple(
+        prototype_observation[name] for name in G1_MUSCLE_MEMORY_EXPERT_REGIME_FEATURES
+    )
+    artifact = replace(
+        base,
+        schema_version="rosclaw.g1_goalforge.muscle_memory_artifact.v3",
+        policy_architecture="leaky_rbf_recurrent_v1",
+        temporal_basis_centers_sec=(0.0, 0.3, 0.6),
+        temporal_basis_weights=tuple((0.0,) * 3 for _ in range(actions)),
+        proprioceptive_trend_weights=tuple((0.0,) * observations for _ in range(actions)),
+        fallback_recovery_config_hash=_digest("5"),
+        expert_impact_prototypes_ns=(3.0,),
+        expert_regime_feature_names=G1_MUSCLE_MEMORY_EXPERT_REGIME_FEATURES,
+        expert_regime_prototypes=(prototype,),
+        expert_regime_max_distance=0.25,
+        structured_recovery_parameters=(0.42, 0.11, 0.54),
+    )
+    policy = G1MuscleMemoryPolicy(artifact)
+
+    assert G1MuscleMemoryArtifact.from_dict(artifact.to_dict()) == artifact
+    assert policy.expert_regime_confident(prototype_observation)
+    assert not policy.expert_regime_confident(
+        _observation(contact_impulse_ns=3.0, torso_pitch_rad=0.30)
+    )
+    assert not policy.expert_regime_confident(_observation(contact_impulse_ns=2.7))
+    first = policy.infer(prototype_observation)
+    after_route = policy.infer(_observation(contact_impulse_ns=3.0, torso_pitch_rad=0.30))
+    assert not first.out_of_distribution
+    assert not after_route.out_of_distribution
 
 
 def test_temporal_controller_routes_low_impulse_to_bound_fallback() -> None:

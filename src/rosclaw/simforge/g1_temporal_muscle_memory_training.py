@@ -24,6 +24,7 @@ from rosclaw.simforge.g1_cerebellar_recovery import G1CerebellarRecoveryConfig
 from rosclaw.simforge.g1_moving_ball import MovingBallInterceptAdapter
 from rosclaw.simforge.g1_muscle_memory import (
     G1_MUSCLE_MEMORY_ACTIONS,
+    G1_MUSCLE_MEMORY_EXPERT_REGIME_FEATURES,
     G1_MUSCLE_MEMORY_OBSERVATIONS,
     G1MuscleMemoryArtifact,
 )
@@ -35,6 +36,7 @@ from rosclaw.simforge.g1_muscle_memory_training import (
     G1MuscleMemoryTrainingConfig,
     _case_score,
     _normalization,
+    build_g1_muscle_memory_cases,
 )
 from rosclaw.simforge.g1_recovery_quality import (
     G1RecoveryQuality,
@@ -45,14 +47,20 @@ from rosclaw.simforge.seed_ledger import SeedLedger
 from rosclaw.simforge.tasks.g1_goalforge.concepts import ShotParameters, hash_json
 from rosclaw.simforge.tasks.g1_goalforge.scenario import generate_goalforge_scenarios
 
-_TEMPORAL_GENOME_SIZE = 29
+_TEMPORAL_GENOME_SIZE = 37
 _BASIS_CENTERS_SEC = (0.0, 0.30, 0.60, 0.90)
 _TEMPORAL_REDUCTION_FLOOR = 0.02
 _MOVING_BACKWARD_REDUCTION_GATE = 0.10
 _MOVING_WOBBLE_REDUCTION_GATE = 0.02
 _MOVING_LEG_JERK_REDUCTION_GATE = 0.02
 _RESIDUAL_INCREMENTAL_REGRESSION_LIMIT = 1e-6
-_RESIDUAL_INCREMENTAL_EFFECT_GATE = 2e-4
+# The v12 gate was 2e-4 on one moving rollout.  v2 reports the mean over three
+# independently perturbed moving regimes, so it requires a still-positive
+# 1e-4 aggregate effect plus a separate sealed generalization effect below.
+_RESIDUAL_INCREMENTAL_EFFECT_GATE = 1e-4
+_EXPERT_GENERALIZATION_REGRESSION_LIMIT = 0.03
+_EXPERT_GENERALIZATION_EFFECT_GATE = 0.02
+_EXPERT_GENERALIZATION_CAUSAL_EFFECT_GATE = 1e-6
 
 
 @dataclass(frozen=True)
@@ -112,6 +120,32 @@ class G1TemporalRecoveryConfigTrial:
 
 
 @dataclass(frozen=True)
+class G1TemporalExpertGeneralizationSummary:
+    """Aggregate-only evidence from moving cases excluded from policy search."""
+
+    suite_hash: str
+    case_count: int
+    parent_valid_count: int
+    expert_route_count: int
+    strict_replay_count: int
+    passed_count: int
+    mean_score: float
+    minimum_score: float
+    moving_backward_reduction: float
+    moving_tail_wobble_reduction: float
+    moving_leg_jerk_reduction: float
+    residual_backward_reduction: float
+    residual_tail_wobble_reduction: float
+    residual_leg_jerk_reduction: float
+    qualified: bool
+    development_search_excluded: bool = True
+    case_rows_disclosed: bool = False
+    evidence_domain: str = "SIM"
+    physics_authority: str = "CPU_MUJOCO"
+    schema_version: str = "rosclaw.g1_goalforge.temporal_expert_generalization.v1"
+
+
+@dataclass(frozen=True)
 class G1TemporalMuscleMemoryTrainingReport:
     artifact: G1MuscleMemoryArtifact
     cases: tuple[G1MuscleMemoryCaseResult, ...]
@@ -122,6 +156,8 @@ class G1TemporalMuscleMemoryTrainingReport:
     training_rollout_count: int
     holdout_rollout_count: int
     holdout: G1MuscleMemoryHoldoutSummary
+    expert_generalization_rollout_count: int
+    expert_generalization: G1TemporalExpertGeneralizationSummary
     gpu_parity: G1TemporalGpuParity
     structured_recovery_trials: tuple[G1TemporalRecoveryConfigTrial, ...]
     retained_recovery_config_hash: str
@@ -147,7 +183,7 @@ class G1TemporalMuscleMemoryTrainingReport:
     evidence_domain: str = "SIM"
     physics_authority: str = "CPU_MUJOCO"
     hardware_command_sent: bool = False
-    schema_version: str = "rosclaw.g1_goalforge.temporal_muscle_memory_training.v1"
+    schema_version: str = "rosclaw.g1_goalforge.temporal_muscle_memory_training.v2"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -161,6 +197,8 @@ class G1TemporalMuscleMemoryTrainingReport:
             "training_rollout_count": self.training_rollout_count,
             "holdout_rollout_count": self.holdout_rollout_count,
             "holdout": asdict(self.holdout),
+            "expert_generalization_rollout_count": self.expert_generalization_rollout_count,
+            "expert_generalization": asdict(self.expert_generalization),
             "gpu_parity": asdict(self.gpu_parity),
             "structured_recovery_trials": [
                 asdict(item) for item in self.structured_recovery_trials
@@ -190,7 +228,102 @@ class G1TemporalMuscleMemoryTrainingReport:
             "evidence_domain": self.evidence_domain,
             "physics_authority": self.physics_authority,
             "hardware_command_sent": self.hardware_command_sent,
+            "qualification_thresholds": {
+                "moving_backward_reduction": _MOVING_BACKWARD_REDUCTION_GATE,
+                "moving_tail_wobble_reduction": _MOVING_WOBBLE_REDUCTION_GATE,
+                "moving_leg_jerk_reduction": _MOVING_LEG_JERK_REDUCTION_GATE,
+                "development_residual_effect": _RESIDUAL_INCREMENTAL_EFFECT_GATE,
+                "development_residual_regression": (_RESIDUAL_INCREMENTAL_REGRESSION_LIMIT),
+                "expert_generalization_effect": _EXPERT_GENERALIZATION_EFFECT_GATE,
+                "expert_generalization_regression": (_EXPERT_GENERALIZATION_REGRESSION_LIMIT),
+                "expert_generalization_causal_effect": (_EXPERT_GENERALIZATION_CAUSAL_EFFECT_GATE),
+            },
         }
+
+
+def build_g1_temporal_muscle_memory_cases() -> tuple[G1MuscleMemoryCase, ...]:
+    """Build replay-consolidated DEVELOPMENT cases for the temporal expert.
+
+    The static and disturbed cases retain the old controller.  Three moving
+    cases vary actual ball/contact dynamics and are jointly consumed by the
+    optimizer, so an impact prototype cannot be qualified from one replay.
+    """
+
+    static, moving, disturbed = build_g1_muscle_memory_cases()
+    lateral_scenario = replace(
+        moving.scenario,
+        scenario_id="temporal-development-moving-lateral-005",
+        ball_y_m=0.005,
+    )
+    light_ball_scenario = replace(
+        moving.scenario,
+        scenario_id="temporal-development-moving-light-400g",
+        ball_mass_kg=0.40,
+    )
+    adapter = MovingBallInterceptAdapter()
+    lateral_plan = adapter.plan(lateral_scenario)
+    light_ball_plan = adapter.plan(light_ball_scenario)
+    if not lateral_plan.eligible or not light_ball_plan.eligible:
+        raise RuntimeError("temporal moving-ball development curriculum is ineligible")
+    return (
+        static,
+        replace(moving, name="moving_ball_nominal"),
+        G1MuscleMemoryCase(
+            name="moving_ball_lateral_005",
+            scenario=lateral_scenario,
+            parameters=lateral_plan.parameters,
+        ),
+        G1MuscleMemoryCase(
+            name="moving_ball_light_400g",
+            scenario=light_ball_scenario,
+            parameters=light_ball_plan.parameters,
+        ),
+        disturbed,
+    )
+
+
+def _build_temporal_expert_validation_cases() -> tuple[G1MuscleMemoryCase, ...]:
+    """Predeclare moving VALIDATION cases never consumed by candidate search."""
+
+    base = generate_goalforge_scenarios(
+        ledger=SeedLedger(
+            task_id="g1_penalty_kick",
+            secret=b"rosclaw-g1-temporal-expert-generalization-v1",
+        ),
+        partition=Partition.VALIDATION,
+        count=1,
+        generation=10,
+    )[0]
+    scenario = replace(
+        base,
+        scenario_id="temporal-validation-moving-restitution-535",
+        ball_x_m=1.12,
+        ball_y_m=0.0,
+        ball_velocity_x_mps=-0.08,
+        ball_velocity_y_mps=0.0,
+        ball_launch_delay_sec=4.0,
+        ball_mass_kg=0.41,
+        ball_ground_friction=0.03,
+        support_ground_friction=1.0,
+        restitution=0.535,
+        disturbance_n=0.0,
+        control_latency_ms=0.0,
+        observation_noise_m=0.0,
+        joint_zero_bias_rad=0.0,
+        target_y_m=0.0,
+        target_z_m=0.20,
+        reachable=True,
+    )
+    plan = MovingBallInterceptAdapter().plan(scenario)
+    if not plan.eligible:
+        raise RuntimeError("temporal moving-ball expert validation case is ineligible")
+    return (
+        G1MuscleMemoryCase(
+            name="temporal_validation_moving_restitution_535",
+            scenario=scenario,
+            parameters=plan.parameters,
+        ),
+    )
 
 
 class G1TemporalMuscleMemoryTrainer:
@@ -205,6 +338,7 @@ class G1TemporalMuscleMemoryTrainer:
         self.config = config or G1TemporalMuscleMemoryTrainingConfig()
         self.base = G1MuscleMemoryTrainer(
             asset_root=asset_root,
+            cases=build_g1_temporal_muscle_memory_cases(),
             config=G1MuscleMemoryTrainingConfig(population_size=6, generations=1),
         )
 
@@ -212,6 +346,11 @@ class G1TemporalMuscleMemoryTrainer:
         retained_recovery_config = self.base.recovery_config
         parents = tuple(self.base._run_parent(case) for case in self.base.cases)
         parent_metrics = tuple(measure_g1_recovery_quality(row.trajectory) for row in parents)
+        moving_indices = tuple(
+            index for index, case in enumerate(self.base.cases) if _is_moving_case(case)
+        )
+        if len(moving_indices) < 3:
+            raise RuntimeError("temporal training requires at least three moving-ball regimes")
         observation_mean, observation_scale = _normalization(parents)
         retained_controller = self.base.backend.build_cerebellar_recovery_controller(
             self.base.cases[0].scenario,
@@ -225,8 +364,9 @@ class G1TemporalMuscleMemoryTrainer:
             structured_rollout_count,
         ) = self._select_structured_recovery(
             retained_recovery_config=retained_recovery_config,
-            parent=parents[1],
-            parent_quality=parent_metrics[1],
+            parents=parents,
+            parent_metrics=parent_metrics,
+            moving_indices=moving_indices,
         )
         self.base.recovery_config = temporal_recovery_config
         self.base.recovery_fallback_config = retained_recovery_config
@@ -234,9 +374,14 @@ class G1TemporalMuscleMemoryTrainer:
             self.base.cases[0].scenario,
             temporal_recovery_config,
         )
+        expert_validation_cases = _build_temporal_expert_validation_cases()
+        expert_validation_suite_hash = _case_commitment_hash(
+            "rosclaw.g1_goalforge.temporal_expert_generalization.v1",
+            expert_validation_cases,
+        )
         dataset_hash = hash_json(
             {
-                "schema_version": "rosclaw.g1_goalforge.temporal_muscle_memory_dataset.v1",
+                "schema_version": "rosclaw.g1_goalforge.temporal_muscle_memory_dataset.v2",
                 "cases": [
                     {
                         "name": case.name,
@@ -249,10 +394,23 @@ class G1TemporalMuscleMemoryTrainer:
                 "observation_mean": list(observation_mean),
                 "observation_scale": list(observation_scale),
                 "private_holdout_excluded": True,
+                "expert_validation_excluded": True,
+                "expert_validation_suite_hash": expert_validation_suite_hash,
                 "structured_recovery_trials": [asdict(item) for item in structured_trials],
             }
         )
-        context = {
+        impact_prototypes = tuple(
+            float(parents[index].result.contact_impulse_ns) for index in moving_indices
+        )
+        expert_regime_prototypes = tuple(
+            _expert_route_prototype(
+                parents[index],
+                observation_mean=observation_mean,
+                observation_scale=observation_scale,
+            )
+            for index in moving_indices
+        )
+        context: dict[str, Any] = {
             "body_hash": self.base.backend.qualification.body_hash,
             "motion_hash": self.base.backend.qualification.motion_hash,
             "parent_config_hash": parent_controller.config_hash,
@@ -260,9 +418,10 @@ class G1TemporalMuscleMemoryTrainer:
             "dataset_hash": dataset_hash,
             "observation_mean": observation_mean,
             "observation_scale": observation_scale,
-            "expert_impact_prototypes_ns": tuple(
-                float(parent.result.contact_impulse_ns) for parent in parents[:2]
-            ),
+            "expert_impact_prototypes_ns": impact_prototypes,
+            "expert_impact_max_distance_ns": _calibrate_impact_radius(impact_prototypes),
+            "expert_regime_prototypes": expert_regime_prototypes,
+            "expert_regime_max_distance": 0.25,
             "structured_recovery_parameters": (
                 temporal_recovery_config.settling_standing_pose_blend,
                 temporal_recovery_config.settling_waist_pitch_bias_rad,
@@ -284,8 +443,27 @@ class G1TemporalMuscleMemoryTrainer:
         ablation_metrics = tuple(
             measure_g1_recovery_quality(item.trajectory) for item in ablation_episodes
         )
+        baseline_score = float(
+            np.mean(
+                [
+                    _case_score(
+                        parent=parent,
+                        parent_quality=parent_quality,
+                        candidate=ablation,
+                        candidate_quality=ablation_quality,
+                    )[0]
+                    for parent, parent_quality, ablation, ablation_quality in zip(
+                        parents,
+                        parent_metrics,
+                        ablation_episodes,
+                        ablation_metrics,
+                        strict=True,
+                    )
+                ]
+            )
+        )
         rng = np.random.default_rng(self.config.seed)
-        zero = np.zeros(_TEMPORAL_GENOME_SIZE, dtype=np.float64)
+        zero: np.ndarray = np.zeros(_TEMPORAL_GENOME_SIZE, dtype=np.float64)
         seeds = _seed_genomes()
         best_genome = zero.copy()
         best_score = self._evaluate_genome(
@@ -295,7 +473,6 @@ class G1TemporalMuscleMemoryTrainer:
             ablation_metrics=ablation_metrics,
             context=context,
         )[0]
-        baseline_score = best_score
         rollout_count = len(self.base.cases)
         for genome in seeds:
             score, _ = self._evaluate_genome(
@@ -310,7 +487,9 @@ class G1TemporalMuscleMemoryTrainer:
                 best_score = score
                 best_genome = genome.copy()
         distribution_mean = best_genome.copy()
-        distribution_std = np.full(_TEMPORAL_GENOME_SIZE, self.config.initial_std, dtype=np.float64)
+        distribution_std: np.ndarray = np.full(
+            _TEMPORAL_GENOME_SIZE, self.config.initial_std, dtype=np.float64
+        )
         elite_count = max(
             2, int(math.ceil(self.config.population_size * self.config.elite_fraction))
         )
@@ -358,7 +537,7 @@ class G1TemporalMuscleMemoryTrainer:
         )
         reasons: list[str] = []
         case_rows: list[G1MuscleMemoryCaseResult] = []
-        moving_reductions = (0.0, 0.0, 0.0)
+        candidate_metrics: list[G1RecoveryQuality] = []
         development_expert_routes = 0
         development_fallback_routes = 0
         for case, parent, parent_quality, candidate in zip(
@@ -375,10 +554,15 @@ class G1TemporalMuscleMemoryTrainer:
                 if candidate.recovery_receipt is not None
                 else None
             )
+            candidate_metrics.append(candidate_quality)
             development_expert_routes += int(route is True)
             development_fallback_routes += int(route is False)
             if route is None:
                 reasons.append(case.name + ":expert_route_missing")
+            elif _is_moving_case(case) and route is not True:
+                reasons.append(case.name + ":moving_expert_route_not_selected")
+            elif not _is_moving_case(case) and route is not False:
+                reasons.append(case.name + ":retained_replay_route_not_selected")
             score, safe, goal, natural = _case_score(
                 parent=parent,
                 parent_quality=parent_quality,
@@ -393,8 +577,6 @@ class G1TemporalMuscleMemoryTrainer:
                 reasons.append(case.name + ":naturalness_regressed")
             if not strict:
                 reasons.append(case.name + ":strict_replay_failed")
-            if case.name == "moving_ball":
-                moving_reductions = _moving_reductions(parent_quality, candidate_quality)
             case_rows.append(
                 G1MuscleMemoryCaseResult(
                     name=case.name,
@@ -409,11 +591,21 @@ class G1TemporalMuscleMemoryTrainer:
                     strict_replay=strict,
                 )
             )
-        backward, wobble, jerk = moving_reductions
-        structured_reductions = _moving_reductions(parent_metrics[1], ablation_metrics[1])
-        residual_reductions = _moving_reductions(
-            ablation_metrics[1],
-            measure_g1_recovery_quality(candidate_episodes[1].trajectory),
+        candidate_metrics_tuple = tuple(candidate_metrics)
+        backward, wobble, jerk = _moving_suite_reductions(
+            moving_indices,
+            parent_metrics,
+            candidate_metrics_tuple,
+        )
+        structured_reductions = _moving_suite_reductions(
+            moving_indices,
+            parent_metrics,
+            ablation_metrics,
+        )
+        residual_reductions = _moving_suite_reductions(
+            moving_indices,
+            ablation_metrics,
+            candidate_metrics_tuple,
         )
         residual_causal_gate = bool(
             min(residual_reductions) >= -_RESIDUAL_INCREMENTAL_REGRESSION_LIMIT
@@ -428,12 +620,26 @@ class G1TemporalMuscleMemoryTrainer:
         ):
             if actual < threshold:
                 reasons.append(reason)
-        learned_temporal = max(
-            np.max(np.abs(np.asarray(artifact.temporal_basis_weights))),
-            np.max(np.abs(np.asarray(artifact.proprioceptive_trend_weights))),
+        learned_temporal: float = float(
+            max(
+                np.max(np.abs(np.asarray(artifact.weights))),
+                np.max(np.abs(np.asarray(artifact.temporal_basis_weights))),
+                np.max(np.abs(np.asarray(artifact.proprioceptive_trend_weights))),
+            )
         )
         if learned_temporal <= 1e-6:
             reasons.append("temporal_policy_capacity_unused")
+        expert_generalization, expert_generalization_rollouts = (
+            self._evaluate_expert_generalization(
+                artifact,
+                ablation_artifact=ablation_artifact,
+                retained_recovery_config=retained_recovery_config,
+                cases=expert_validation_cases,
+                expected_suite_hash=expert_validation_suite_hash,
+            )
+        )
+        if not expert_generalization.qualified:
+            reasons.append("moving_expert_generalization_failed")
         (
             holdout,
             holdout_rollouts,
@@ -449,7 +655,8 @@ class G1TemporalMuscleMemoryTrainer:
         parity = _validate_cuda_parity(
             artifact,
             observations=np.asarray(
-                parents[1].trajectory["recovery_proprioception"], dtype=np.float64
+                parents[moving_indices[0]].trajectory["recovery_proprioception"],
+                dtype=np.float64,
             ),
             devices=self.config.cuda_devices,
         )
@@ -471,6 +678,8 @@ class G1TemporalMuscleMemoryTrainer:
             ),
             holdout_rollout_count=holdout_rollouts,
             holdout=holdout,
+            expert_generalization_rollout_count=expert_generalization_rollouts,
+            expert_generalization=expert_generalization,
             gpu_parity=parity,
             structured_recovery_trials=structured_trials,
             retained_recovery_config_hash=retained_controller.config_hash,
@@ -499,8 +708,9 @@ class G1TemporalMuscleMemoryTrainer:
         self,
         *,
         retained_recovery_config: G1CerebellarRecoveryConfig,
-        parent: Any,
-        parent_quality: G1RecoveryQuality,
+        parents: tuple[Any, ...],
+        parent_metrics: tuple[G1RecoveryQuality, ...],
+        moving_indices: tuple[int, ...],
     ) -> tuple[
         G1CerebellarRecoveryConfig,
         tuple[G1TemporalRecoveryConfigTrial, ...],
@@ -535,44 +745,73 @@ class G1TemporalMuscleMemoryTrainer:
                 target_smoothing_alpha=0.56,
             ),
         )
-        moving_cases = tuple(case for case in self.base.cases if case.name == "moving_ball")
-        if len(moving_cases) != 1:
-            raise RuntimeError("structured recovery search requires exactly one moving-ball case")
-        case = moving_cases[0]
+        if len(moving_indices) < 2:
+            raise RuntimeError("structured recovery search requires multiple moving-ball cases")
         scored: list[tuple[float, G1CerebellarRecoveryConfig, G1TemporalRecoveryConfigTrial]] = []
         for config in candidates:
-            controller = self.base.backend.build_cerebellar_recovery_controller(
-                case.scenario,
-                config,
-            )
-            episode = self.base.backend.run(
-                case.scenario,
-                case.parameters,
-                feedback_runtime=self.base._feedback_runtime(case),
-                recovery_controller=controller,
-            )
-            try:
-                quality = measure_g1_recovery_quality(episode.trajectory)
-                score, safe, goal, natural = _case_score(
-                    parent=parent,
-                    parent_quality=parent_quality,
-                    candidate=episode,
-                    candidate_quality=quality,
+            case_scores: list[float] = []
+            case_reductions: list[tuple[float, float, float]] = []
+            safe_rows: list[bool] = []
+            goal_rows: list[bool] = []
+            natural_rows: list[bool] = []
+            controller_hash = ""
+            for index in moving_indices:
+                case = self.base.cases[index]
+                controller = self.base.backend.build_cerebellar_recovery_controller(
+                    case.scenario,
+                    config,
                 )
-                reductions = _moving_reductions(parent_quality, quality)
-            except ValueError:
-                score, safe, goal, natural = -1_000_000.0, False, False, False
-                reductions = (-1_000_000.0, -1_000_000.0, -1_000_000.0)
+                controller_hash = controller.config_hash
+                episode = self.base.backend.run(
+                    case.scenario,
+                    case.parameters,
+                    feedback_runtime=self.base._feedback_runtime(case),
+                    recovery_controller=controller,
+                )
+                try:
+                    quality = measure_g1_recovery_quality(episode.trajectory)
+                    score, safe, goal, natural = _case_score(
+                        parent=parents[index],
+                        parent_quality=parent_metrics[index],
+                        candidate=episode,
+                        candidate_quality=quality,
+                    )
+                    reductions = _moving_reductions(parent_metrics[index], quality)
+                except ValueError:
+                    score, safe, goal, natural = -1_000_000.0, False, False, False
+                    reductions = (-1_000_000.0, -1_000_000.0, -1_000_000.0)
+                case_scores.append(score)
+                case_reductions.append(reductions)
+                safe_rows.append(safe)
+                goal_rows.append(goal)
+                natural_rows.append(natural)
+            reduction_array = np.asarray(case_reductions, dtype=np.float64)
+            mean_reductions = np.mean(reduction_array, axis=0)
+            reductions = (
+                float(mean_reductions[0]),
+                float(mean_reductions[1]),
+                float(mean_reductions[2]),
+            )
+            safe = all(safe_rows)
+            goal = all(goal_rows)
+            natural = all(natural_rows)
             eligible = bool(
                 safe
                 and goal
                 and natural
-                and reductions[0] >= _MOVING_BACKWARD_REDUCTION_GATE
-                and reductions[1] >= _MOVING_WOBBLE_REDUCTION_GATE
-                and reductions[2] >= _MOVING_LEG_JERK_REDUCTION_GATE
+                and np.all(
+                    reduction_array
+                    >= np.asarray(
+                        (
+                            _MOVING_BACKWARD_REDUCTION_GATE,
+                            _MOVING_WOBBLE_REDUCTION_GATE,
+                            _MOVING_LEG_JERK_REDUCTION_GATE,
+                        )
+                    )
+                )
             )
             selection_score = (
-                score
+                float(np.mean(case_scores))
                 + 4.0 * min(0.30, reductions[0])
                 + 5.0 * min(0.30, reductions[1])
                 + 2.0 * min(0.30, reductions[2])
@@ -584,7 +823,7 @@ class G1TemporalMuscleMemoryTrainer:
                     selection_score,
                     config,
                     G1TemporalRecoveryConfigTrial(
-                        config_hash=controller.config_hash,
+                        config_hash=controller_hash,
                         settling_standing_pose_blend=float(
                             config.settling_standing_pose_blend or 0.0
                         ),
@@ -609,7 +848,123 @@ class G1TemporalMuscleMemoryTrainer:
             replace(trial, selected=trial.config_hash == selected_hash)
             for _score, _config, trial in scored
         )
-        return selected_config, trials, len(candidates)
+        return selected_config, trials, len(candidates) * len(moving_indices)
+
+    def _evaluate_expert_generalization(
+        self,
+        artifact: G1MuscleMemoryArtifact,
+        *,
+        ablation_artifact: G1MuscleMemoryArtifact,
+        retained_recovery_config: G1CerebellarRecoveryConfig,
+        cases: tuple[G1MuscleMemoryCase, ...],
+        expected_suite_hash: str,
+    ) -> tuple[G1TemporalExpertGeneralizationSummary, int]:
+        """Open a precommitted VALIDATION suite only after the actor is frozen."""
+
+        scores: list[float] = []
+        total_reductions: list[tuple[float, float, float]] = []
+        residual_reductions: list[tuple[float, float, float]] = []
+        parent_valid_count = 0
+        expert_route_count = 0
+        strict_replay_count = 0
+        passed_count = 0
+        for case in cases:
+            parent_controller = self.base.backend.build_cerebellar_recovery_controller(
+                case.scenario,
+                retained_recovery_config,
+            )
+            parent = self.base.backend.run(
+                case.scenario,
+                case.parameters,
+                feedback_runtime=self.base._feedback_runtime(case),
+                recovery_controller=parent_controller,
+            )
+            structured = self.base._run_candidate(case, ablation_artifact)
+            candidate = self.base._run_candidate(case, artifact)
+            replay = self.base._run_candidate(case, artifact)
+            route = (
+                candidate.recovery_receipt.expert_route_latched
+                if candidate.recovery_receipt is not None
+                else None
+            )
+            structured_route = (
+                structured.recovery_receipt.expert_route_latched
+                if structured.recovery_receipt is not None
+                else None
+            )
+            expert_route_count += int(route is True)
+            strict = bool(
+                candidate.result.summary_dict() == replay.result.summary_dict()
+                and trajectory_digest(candidate.trajectory) == trajectory_digest(replay.trajectory)
+            )
+            strict_replay_count += int(strict)
+            try:
+                parent_quality = measure_g1_recovery_quality(parent.trajectory)
+                structured_quality = measure_g1_recovery_quality(structured.trajectory)
+                candidate_quality = measure_g1_recovery_quality(candidate.trajectory)
+            except ValueError:
+                scores.append(-1_000_000.0)
+                total_reductions.append((-1_000_000.0,) * 3)
+                residual_reductions.append((-1_000_000.0,) * 3)
+                continue
+            parent_valid = _parent_valid(parent, parent_quality)
+            parent_valid_count += int(parent_valid)
+            score, safe, goal, natural = _case_score(
+                parent=parent,
+                parent_quality=parent_quality,
+                candidate=candidate,
+                candidate_quality=candidate_quality,
+            )
+            scores.append(score)
+            total_reductions.append(_moving_reductions(parent_quality, candidate_quality))
+            residual_reductions.append(_moving_reductions(structured_quality, candidate_quality))
+            passed_count += int(
+                parent_valid
+                and safe
+                and goal
+                and natural
+                and strict
+                and route is True
+                and structured_route is True
+                and score >= -_EXPERT_GENERALIZATION_REGRESSION_LIMIT
+            )
+        total = tuple(map(float, np.mean(np.asarray(total_reductions), axis=0)))
+        causal = tuple(map(float, np.mean(np.asarray(residual_reductions), axis=0)))
+        suite_hash = _case_commitment_hash(
+            "rosclaw.g1_goalforge.temporal_expert_generalization.v1",
+            cases,
+        )
+        qualified = bool(
+            suite_hash == expected_suite_hash
+            and passed_count == len(cases)
+            and parent_valid_count == len(cases)
+            and expert_route_count == len(cases)
+            and strict_replay_count == len(cases)
+            and min(total) >= -_EXPERT_GENERALIZATION_REGRESSION_LIMIT
+            and max(total) >= _EXPERT_GENERALIZATION_EFFECT_GATE
+            and min(causal) >= -_RESIDUAL_INCREMENTAL_REGRESSION_LIMIT
+            and max(causal) >= _EXPERT_GENERALIZATION_CAUSAL_EFFECT_GATE
+        )
+        return (
+            G1TemporalExpertGeneralizationSummary(
+                suite_hash=suite_hash,
+                case_count=len(cases),
+                parent_valid_count=parent_valid_count,
+                expert_route_count=expert_route_count,
+                strict_replay_count=strict_replay_count,
+                passed_count=passed_count,
+                mean_score=float(np.mean(scores)),
+                minimum_score=float(np.min(scores)),
+                moving_backward_reduction=total[0],
+                moving_tail_wobble_reduction=total[1],
+                moving_leg_jerk_reduction=total[2],
+                residual_backward_reduction=causal[0],
+                residual_tail_wobble_reduction=causal[1],
+                residual_leg_jerk_reduction=causal[2],
+                qualified=qualified,
+            ),
+            4 * len(cases),
+        )
 
     def _evaluate_private_holdout(
         self,
@@ -655,18 +1010,7 @@ class G1TemporalMuscleMemoryTrainer:
             except ValueError:
                 scores.append(-1_000_000.0)
                 continue
-            parent_valid = bool(
-                parent.result.success
-                and parent.result.contact_observed
-                and parent.result.goal_crossed
-                and parent.result.target_zone_hit
-                and not parent.result.post_kick_fall
-                and not parent.result.joint_limit_violation
-                and not parent.result.torque_limit_violation
-                and not parent.result.actuator_saturation
-                and parent.result.support_foot_slip_m <= 0.04
-                and parent_quality.terminal_bilateral_support
-            )
+            parent_valid = _parent_valid(parent, parent_quality)
             parent_valid_count += int(parent_valid)
             if not parent_valid:
                 scores.append(-1_000_000.0)
@@ -678,7 +1022,7 @@ class G1TemporalMuscleMemoryTrainer:
                 candidate_quality=candidate_quality,
             )
             passed += int(
-                safe and goal and natural and strict and route is not None and score >= -0.03
+                safe and goal and natural and strict and route is False and score >= -0.03
             )
             scores.append(score)
         suite_hash = hash_json(
@@ -695,7 +1039,12 @@ class G1TemporalMuscleMemoryTrainer:
                 strict_replay_count=strict_count,
                 mean_score=float(np.mean(scores)),
                 minimum_score=float(np.min(scores)),
-                qualified=passed == len(cases) and parent_valid_count == len(cases),
+                qualified=bool(
+                    passed == len(cases)
+                    and parent_valid_count == len(cases)
+                    and expert_routes == 0
+                    and fallback_routes == len(cases)
+                ),
             ),
             3 * len(cases),
             expert_routes,
@@ -723,6 +1072,7 @@ class G1TemporalMuscleMemoryTrainer:
             parents=parents,
             parent_metrics=parent_metrics,
             ablation_metrics=ablation_metrics,
+            require_temporal_capacity=False,
         )
 
     def _evaluate_artifact(
@@ -736,9 +1086,13 @@ class G1TemporalMuscleMemoryTrainer:
     ) -> tuple[float, tuple[Any, ...]]:
         candidates = tuple(self.base._run_candidate(case, artifact) for case in self.base.cases)
         scores: list[float] = []
-        temporal_capacity = max(
-            np.max(np.abs(np.asarray(artifact.temporal_basis_weights))),
-            np.max(np.abs(np.asarray(artifact.proprioceptive_trend_weights))),
+        residual_rows: list[tuple[float, float, float]] = []
+        temporal_capacity: float = float(
+            max(
+                np.max(np.abs(np.asarray(artifact.weights))),
+                np.max(np.abs(np.asarray(artifact.temporal_basis_weights))),
+                np.max(np.abs(np.asarray(artifact.proprioceptive_trend_weights))),
+            )
         )
         valid = bool(not require_temporal_capacity or temporal_capacity > 1e-6)
         for index, (case, parent, parent_quality, candidate) in enumerate(
@@ -755,7 +1109,7 @@ class G1TemporalMuscleMemoryTrainer:
                 candidate_quality=quality,
             )
             valid = valid and safe and goal and natural
-            if case.name == "moving_ball":
+            if _is_moving_case(case):
                 backward, wobble, jerk = _moving_reductions(parent_quality, quality)
                 valid = valid and bool(
                     backward >= _MOVING_BACKWARD_REDUCTION_GATE
@@ -764,13 +1118,14 @@ class G1TemporalMuscleMemoryTrainer:
                 )
                 if ablation_metrics is not None:
                     residual_reductions = _moving_reductions(ablation_metrics[index], quality)
-                    valid = valid and bool(
-                        min(residual_reductions) >= -_RESIDUAL_INCREMENTAL_REGRESSION_LIMIT
-                        and max(residual_reductions) >= _RESIDUAL_INCREMENTAL_EFFECT_GATE
-                    )
+                    residual_rows.append(residual_reductions)
                     score += 4.0 * residual_reductions[0]
                     score += 5.0 * residual_reductions[1]
                     score += 2.0 * residual_reductions[2]
+                    score -= 40.0 * sum(
+                        max(0.0, -_RESIDUAL_INCREMENTAL_REGRESSION_LIMIT - value)
+                        for value in residual_reductions
+                    )
                 score += 4.0 * min(0.30, backward)
                 score += 5.0 * min(0.30, wobble)
                 score += 2.0 * min(0.30, jerk)
@@ -779,8 +1134,118 @@ class G1TemporalMuscleMemoryTrainer:
             scores.append(score)
         if not valid:
             return -1_000_000.0, candidates
+        causal_penalty = 0.0
+        if residual_rows:
+            aggregate_residual = np.mean(np.asarray(residual_rows), axis=0)
+            causal_penalty = 50.0 * max(
+                0.0,
+                _RESIDUAL_INCREMENTAL_EFFECT_GATE - float(np.max(aggregate_residual)),
+            )
         worst = min(scores)
-        return float(np.mean(scores) + 0.25 * worst), candidates
+        return float(np.mean(scores) + 0.25 * worst - causal_penalty), candidates
+
+
+def _is_moving_case(case: G1MuscleMemoryCase) -> bool:
+    scenario = case.scenario
+    return bool(
+        scenario.ball_launch_delay_sec > 0.0
+        and math.hypot(scenario.ball_velocity_x_mps, scenario.ball_velocity_y_mps) > 0.0
+    )
+
+
+def _case_commitment_hash(
+    schema_version: str,
+    cases: tuple[G1MuscleMemoryCase, ...],
+) -> str:
+    return hash_json(
+        {
+            "schema_version": schema_version,
+            "cases": [
+                {
+                    "scenario_commitment": case.scenario.scenario_commitment,
+                    "policy_hash": case.parameters.policy_hash,
+                }
+                for case in cases
+            ],
+        }
+    )
+
+
+def _calibrate_impact_radius(prototypes: tuple[float, ...]) -> float:
+    """Derive an expert radius from DEVELOPMENT spacing, never validation rows."""
+
+    values = np.asarray(prototypes, dtype=np.float64)
+    if not 1 <= len(values) <= 8 or not np.all(np.isfinite(values)):
+        raise ValueError("impact calibration requires 1 to 8 finite prototypes")
+    unique = np.unique(values)
+    if len(unique) == 1:
+        return 1e-6
+    largest_development_gap = float(np.max(np.diff(np.sort(unique))))
+    return float(min(0.20, max(0.01, largest_development_gap + 0.005)))
+
+
+def _expert_route_prototype(
+    episode: Any,
+    *,
+    observation_mean: tuple[float, ...],
+    observation_scale: tuple[float, ...],
+) -> tuple[float, ...]:
+    """Capture the normalized proprioceptive state used by the causal router."""
+
+    rows = np.asarray(episode.trajectory["recovery_proprioception"], dtype=np.float64)
+    impulse_index = G1_MUSCLE_MEMORY_OBSERVATIONS.index("contact_impulse_ns")
+    right_support_index = G1_MUSCLE_MEMORY_OBSERVATIONS.index("right_support")
+    route_rows = np.flatnonzero(
+        (rows[:, impulse_index] > 0.0) & (rows[:, right_support_index] > 0.5)
+    )
+    if not len(route_rows):
+        raise ValueError("development episode has no contact-and-landing route state")
+    normalized = (
+        rows[int(route_rows[0])] - np.asarray(observation_mean, dtype=np.float64)
+    ) / np.asarray(observation_scale, dtype=np.float64)
+    indices = [
+        G1_MUSCLE_MEMORY_OBSERVATIONS.index(name)
+        for name in G1_MUSCLE_MEMORY_EXPERT_REGIME_FEATURES
+    ]
+    return tuple(map(float, normalized[indices]))
+
+
+def _moving_suite_reductions(
+    moving_indices: tuple[int, ...],
+    parent_metrics: tuple[G1RecoveryQuality, ...],
+    candidate_metrics: tuple[G1RecoveryQuality, ...],
+) -> tuple[float, float, float]:
+    if not moving_indices:
+        raise ValueError("moving reduction suite cannot be empty")
+    reductions = np.asarray(
+        [
+            _moving_reductions(parent_metrics[index], candidate_metrics[index])
+            for index in moving_indices
+        ],
+        dtype=np.float64,
+    )
+    mean_reductions = np.mean(reductions, axis=0)
+    return (
+        float(mean_reductions[0]),
+        float(mean_reductions[1]),
+        float(mean_reductions[2]),
+    )
+
+
+def _parent_valid(parent: Any, quality: G1RecoveryQuality) -> bool:
+    result = parent.result
+    return bool(
+        result.success
+        and result.contact_observed
+        and result.goal_crossed
+        and result.target_zone_hit
+        and not result.post_kick_fall
+        and not result.joint_limit_violation
+        and not result.torque_limit_violation
+        and not result.actuator_saturation
+        and result.support_foot_slip_m <= 0.04
+        and quality.terminal_bilateral_support
+    )
 
 
 def _build_temporal_holdout_cases() -> tuple[G1MuscleMemoryCase, ...]:
@@ -870,6 +1335,7 @@ def _build_temporal_holdout_cases() -> tuple[G1MuscleMemoryCase, ...]:
 
 def _seed_genomes() -> tuple[np.ndarray, ...]:
     seeds: list[np.ndarray] = []
+    value: np.ndarray
     for sagittal, absorption in ((0.03, 0.0), (-0.03, 0.0), (0.0, 0.01), (0.03, 0.01)):
         value = np.zeros(_TEMPORAL_GENOME_SIZE, dtype=np.float64)
         value[22] = sagittal
@@ -884,14 +1350,18 @@ def _seed_genomes() -> tuple[np.ndarray, ...]:
         value[:4] = profile
         value[4:8] = (0.0, 0.01, 0.02, 0.01)
         seeds.append(value)
-    sagittal_release = np.zeros(_TEMPORAL_GENOME_SIZE, dtype=np.float64)
+    sagittal_release: np.ndarray = np.zeros(_TEMPORAL_GENOME_SIZE, dtype=np.float64)
     sagittal_release[0] = 0.01
     sagittal_release[22] = -0.03
     seeds.append(sagittal_release)
-    causal_probe = np.zeros(_TEMPORAL_GENOME_SIZE, dtype=np.float64)
+    causal_probe: np.ndarray = np.zeros(_TEMPORAL_GENOME_SIZE, dtype=np.float64)
     causal_probe[0] = 0.01
     causal_probe[22] = 0.001
     seeds.append(causal_probe)
+    for index, gain in ((29, 0.01), (32, 0.01), (33, 0.01), (35, 0.01)):
+        state_feedback: np.ndarray = np.zeros(_TEMPORAL_GENOME_SIZE, dtype=np.float64)
+        state_feedback[index] = gain
+        seeds.append(state_feedback)
     return tuple(seeds)
 
 
@@ -909,6 +1379,9 @@ def _artifact_from_temporal_genome(
     structured_recovery_parameters: tuple[float, ...],
     training_episode_count: int,
     training_seed: int,
+    expert_impact_max_distance_ns: float = 1e-6,
+    expert_regime_prototypes: tuple[tuple[float, ...], ...] = (),
+    expert_regime_max_distance: float = 0.25,
 ) -> G1MuscleMemoryArtifact:
     value = np.asarray(genome, dtype=np.float64)
     if value.shape != (_TEMPORAL_GENOME_SIZE,) or not np.all(np.isfinite(value)):
@@ -917,9 +1390,10 @@ def _artifact_from_temporal_genome(
         )
     actions = len(G1_MUSCLE_MEMORY_ACTIONS)
     observations = len(G1_MUSCLE_MEMORY_OBSERVATIONS)
-    basis = np.zeros((actions, len(_BASIS_CENTERS_SEC)), dtype=np.float64)
-    trend = np.zeros((actions, observations), dtype=np.float64)
-    bias = np.zeros(actions, dtype=np.float64)
+    weights: np.ndarray = np.zeros((actions, observations), dtype=np.float64)
+    basis: np.ndarray = np.zeros((actions, len(_BASIS_CENTERS_SEC)), dtype=np.float64)
+    trend: np.ndarray = np.zeros((actions, observations), dtype=np.float64)
+    bias: np.ndarray = np.zeros(actions, dtype=np.float64)
     action = {name: G1_MUSCLE_MEMORY_ACTIONS.index(name) for name in G1_MUSCLE_MEMORY_ACTIONS}
     obs = {
         name: G1_MUSCLE_MEMORY_OBSERVATIONS.index(name) for name in G1_MUSCLE_MEMORY_OBSERVATIONS
@@ -941,6 +1415,15 @@ def _artifact_from_temporal_genome(
     bias[action["leg_absorption"]] = value[23]
     bias[action["waist_pitch"]] = value[24]
     bias[action["arm_pitch_counter"]] = value[25]
+    weights[action["sagittal_common"], obs["pelvis_velocity_x_m_s"]] = value[29]
+    weights[action["sagittal_common"], obs["torso_pitch_rad"]] = value[30]
+    weights[action["sagittal_common"], obs["torso_angular_velocity_y_rad_s"]] = value[31]
+    weights[action["leg_absorption"], obs["pelvis_velocity_z_m_s"]] = value[32]
+    weights[action["leg_absorption"], obs["left_ground_force_scale"]] = value[33]
+    weights[action["leg_absorption"], obs["right_ground_force_scale"]] = -value[33]
+    weights[action["leg_absorption"], obs["contact_impulse_ns"]] = value[34]
+    weights[action["waist_pitch"], obs["torso_pitch_rad"]] = value[35]
+    weights[action["waist_pitch"], obs["torso_angular_velocity_y_rad_s"]] = value[36]
     duration = float(0.9 + 0.50 * np.tanh(value[26]))
     width = float(0.22 + 0.15 / (1.0 + np.exp(-value[27])))
     memory_alpha = float(0.12 + 0.38 / (1.0 + np.exp(-value[28])))
@@ -951,7 +1434,7 @@ def _artifact_from_temporal_genome(
         training_dataset_hash=dataset_hash,
         observation_mean=observation_mean,
         observation_scale=observation_scale,
-        weights=tuple((0.0,) * observations for _ in range(actions)),
+        weights=tuple(tuple(map(float, row)) for row in np.clip(weights, -0.25, 0.25)),
         bias=tuple(map(float, np.clip(bias, -0.25, 0.25))),
         action_limits_rad=(0.055, 0.045, 0.050, 0.045, 0.050, 0.040, 0.040, 0.045, 0.045),
         training_episode_count=training_episode_count,
@@ -964,12 +1447,22 @@ def _artifact_from_temporal_genome(
         policy_architecture="leaky_rbf_recurrent_v1",
         fallback_recovery_config_hash=fallback_config_hash,
         expert_impact_prototypes_ns=expert_impact_prototypes_ns,
-        expert_impact_max_distance_ns=1e-6,
+        expert_impact_max_distance_ns=expert_impact_max_distance_ns,
+        expert_regime_feature_names=(
+            G1_MUSCLE_MEMORY_EXPERT_REGIME_FEATURES if expert_regime_prototypes else ()
+        ),
+        expert_regime_prototypes=expert_regime_prototypes,
+        expert_regime_max_distance=expert_regime_max_distance,
         structured_recovery_parameters=structured_recovery_parameters,
+        maximum_feature_z=8.0,
         activation_duration_sec=duration,
         fade_out_sec=min(0.35, duration / 2.0),
         sagittal_minimum_impulse_ns=1.75,
-        schema_version="rosclaw.g1_goalforge.muscle_memory_artifact.v2",
+        schema_version=(
+            "rosclaw.g1_goalforge.muscle_memory_artifact.v3"
+            if expert_regime_prototypes
+            else "rosclaw.g1_goalforge.muscle_memory_artifact.v2"
+        ),
     )
 
 
@@ -1115,9 +1608,11 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
 
 
 __all__ = [
+    "G1TemporalExpertGeneralizationSummary",
     "G1TemporalGpuParity",
     "G1TemporalMuscleMemoryTrainer",
     "G1TemporalMuscleMemoryTrainingConfig",
     "G1TemporalMuscleMemoryTrainingReport",
+    "build_g1_temporal_muscle_memory_cases",
     "write_g1_temporal_muscle_memory_report",
 ]

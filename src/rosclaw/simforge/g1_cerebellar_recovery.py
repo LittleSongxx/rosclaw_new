@@ -230,7 +230,7 @@ class G1CerebellarRecoveryController:
         )
         if self.muscle_memory is not None:
             if (
-                self.muscle_memory.artifact.schema_version.endswith(".v2")
+                not self.muscle_memory.artifact.schema_version.endswith(".v1")
                 and self.fallback_config is None
             ):
                 raise ValueError("temporal muscle memory requires a fallback recovery config")
@@ -240,7 +240,7 @@ class G1CerebellarRecoveryController:
                 parent_recovery_config_hash=self.config_hash,
                 fallback_recovery_config_hash=(self.fallback_config_hash or ""),
             )
-            if self.muscle_memory.artifact.schema_version.endswith(".v2"):
+            if not self.muscle_memory.artifact.schema_version.endswith(".v1"):
                 structured = (
                     float(self.config.settling_standing_pose_blend or 0.0),
                     self.config.settling_waist_pitch_bias_rad,
@@ -446,7 +446,7 @@ class G1CerebellarRecoveryController:
         muscle_memory_active = False
         muscle_memory_ood = False
         muscle_memory_residual_rms = 0.0
-        muscle_memory_actions = np.zeros(0, dtype=np.float64)
+        muscle_memory_actions: np.ndarray = np.zeros(0, dtype=np.float64)
         if self.muscle_memory is not None and causal_gate:
             if muscle_memory_observation is None:
                 raise ValueError("learned muscle memory requires proprioceptive observations")

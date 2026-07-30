@@ -43,3 +43,5 @@ def test_inspect_validates_and_summarizes_safe_json(tmp_path, capsys) -> None:
     assert result == 0
     assert payload["artifact_hash"] == artifact.artifact_hash
     assert payload["activation_ceiling"] == "SIM_ONLY"
+    assert payload["expert_regime_feature_names"] == []
+    assert payload["expert_regime_prototype_count"] == 0
