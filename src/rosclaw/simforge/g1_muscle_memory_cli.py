@@ -22,6 +22,23 @@ def dispatch_muscle_memory_argv(argv: list[str]) -> int | None:
     train.add_argument("--population", type=int, default=16)
     train.add_argument("--generations", type=int, default=5)
     train.add_argument("--seed", type=int, default=20260730)
+    temporal_train = commands.add_parser(
+        "temporal-train",
+        help="train and qualify a recurrent proprioceptive recovery residual",
+    )
+    temporal_train.add_argument("--asset-root", type=Path, required=True)
+    temporal_train.add_argument("--output-dir", type=Path, required=True)
+    temporal_train.add_argument("--source-checkout", type=Path, default=Path.cwd())
+    temporal_train.add_argument("--population", type=int, default=10)
+    temporal_train.add_argument("--generations", type=int, default=3)
+    temporal_train.add_argument("--seed", type=int, default=20260731)
+    temporal_train.add_argument(
+        "--cuda-devices",
+        type=int,
+        nargs="*",
+        default=(0, 1, 2, 3),
+        help="CUDA devices used only for exported-policy parity, never physics authority",
+    )
     inspect = commands.add_parser(
         "inspect",
         help="validate a safe JSON artifact and print its commitments",
@@ -43,6 +60,9 @@ def dispatch_muscle_memory_argv(argv: list[str]) -> int | None:
                     "parent_recovery_config_hash": artifact.parent_recovery_config_hash,
                     "training_dataset_hash": artifact.training_dataset_hash,
                     "training_episode_count": artifact.training_episode_count,
+                    "policy_architecture": artifact.policy_architecture,
+                    "temporal_basis_count": len(artifact.temporal_basis_centers_sec),
+                    "structured_recovery_parameters": list(artifact.structured_recovery_parameters),
                     "activation_duration_sec": artifact.activation_duration_sec,
                     "sagittal_minimum_impulse_ns": (artifact.sagittal_minimum_impulse_ns),
                     "activation_ceiling": artifact.activation_ceiling,
@@ -52,6 +72,34 @@ def dispatch_muscle_memory_argv(argv: list[str]) -> int | None:
             )
         )
         return 0
+
+    if args.command == "temporal-train":
+        from rosclaw.simforge.g1_temporal_muscle_memory_training import (
+            G1TemporalMuscleMemoryTrainer,
+            G1TemporalMuscleMemoryTrainingConfig,
+            write_g1_temporal_muscle_memory_report,
+        )
+
+        temporal_trainer = G1TemporalMuscleMemoryTrainer(
+            asset_root=args.asset_root,
+            config=G1TemporalMuscleMemoryTrainingConfig(
+                population_size=args.population,
+                generations=args.generations,
+                seed=args.seed,
+                cuda_devices=tuple(args.cuda_devices),
+            ),
+        )
+        temporal_report = temporal_trainer.train()
+        artifact_path, report_path = write_g1_temporal_muscle_memory_report(
+            temporal_report,
+            output_dir=args.output_dir,
+            source_checkout=args.source_checkout,
+        )
+        value = temporal_report.to_dict()
+        value["artifact_path"] = str(artifact_path)
+        value["report_path"] = str(report_path)
+        print(json.dumps(value, indent=2, sort_keys=True))
+        return 0 if temporal_report.qualified else 2
 
     from rosclaw.simforge.g1_muscle_memory_training import (
         G1MuscleMemoryTrainer,

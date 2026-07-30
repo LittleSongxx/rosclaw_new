@@ -222,6 +222,7 @@ class G1MuJoCoBackend:
         scenario: GoalForgeScenario,
         config: G1CerebellarRecoveryConfig | None = None,
         muscle_memory_artifact: G1MuscleMemoryArtifact | None = None,
+        fallback_config: G1CerebellarRecoveryConfig | None = None,
     ) -> G1CerebellarRecoveryController:
         """Bind the recovery segment to the exact qualified Body and motion."""
 
@@ -247,6 +248,7 @@ class G1MuJoCoBackend:
             standing_pose=standing_pose,
             config=resolved,
             muscle_memory_artifact=muscle_memory_artifact,
+            fallback_config=fallback_config,
         )
 
     def run(

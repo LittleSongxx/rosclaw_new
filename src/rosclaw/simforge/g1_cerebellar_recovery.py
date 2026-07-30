@@ -115,6 +115,15 @@ class G1CerebellarRecoveryConfig:
             raise ValueError("calibrated disturbance bounds must be positive and ordered")
 
 
+def _recovery_config_hash(config: G1CerebellarRecoveryConfig) -> str:
+    return hash_json(
+        {
+            "schema_version": "rosclaw.g1_goalforge.cerebellar_recovery_config.v1",
+            "config": asdict(config),
+        }
+    )
+
+
 @dataclass(frozen=True)
 class G1CerebellarRecoveryEffect:
     target: np.ndarray
@@ -155,8 +164,12 @@ class G1CerebellarRecoveryReceipt:
     strict_replay: bool
     evidence_domain: str
     config: dict[str, Any]
+    fallback_config_hash: str | None
+    fallback_config: dict[str, Any] | None
+    fallback_routed_count: int
+    expert_route_latched: bool | None
     muscle_memory_receipt: dict[str, Any] | None = None
-    schema_version: str = "rosclaw.g1_goalforge.cerebellar_recovery_receipt.v5"
+    schema_version: str = "rosclaw.g1_goalforge.cerebellar_recovery_receipt.v6"
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -184,6 +197,7 @@ class G1CerebellarRecoveryController:
         standing_pose: np.ndarray,
         config: G1CerebellarRecoveryConfig | None = None,
         muscle_memory_artifact: G1MuscleMemoryArtifact | None = None,
+        fallback_config: G1CerebellarRecoveryConfig | None = None,
     ) -> None:
         for label, value in (
             ("body_hash", body_hash),
@@ -206,6 +220,7 @@ class G1CerebellarRecoveryController:
         self.standing_pose.setflags(write=False)
         self.standing_pose_hash = hash_bytes(np.ascontiguousarray(pose).tobytes())
         self.config = config or G1CerebellarRecoveryConfig()
+        self.fallback_config = fallback_config
         self._roll_pattern = _roll_posture_pattern()
         self._waist_pitch_pattern = _waist_pitch_pattern()
         self.muscle_memory = (
@@ -214,28 +229,43 @@ class G1CerebellarRecoveryController:
             else None
         )
         if self.muscle_memory is not None:
+            if (
+                self.muscle_memory.artifact.schema_version.endswith(".v2")
+                and self.fallback_config is None
+            ):
+                raise ValueError("temporal muscle memory requires a fallback recovery config")
             self.muscle_memory.require_compatible(
                 body_hash=self.body_hash,
                 motion_hash=self.motion_hash,
                 parent_recovery_config_hash=self.config_hash,
+                fallback_recovery_config_hash=(self.fallback_config_hash or ""),
             )
+            if self.muscle_memory.artifact.schema_version.endswith(".v2"):
+                structured = (
+                    float(self.config.settling_standing_pose_blend or 0.0),
+                    self.config.settling_waist_pitch_bias_rad,
+                    self.config.target_smoothing_alpha,
+                )
+                if structured != self.muscle_memory.artifact.structured_recovery_parameters:
+                    raise ValueError("muscle-memory structured recovery parameters mismatch")
         self.reset()
 
     @property
     def config_hash(self) -> str:
-        return hash_json(
-            {
-                "schema_version": "rosclaw.g1_goalforge.cerebellar_recovery_config.v1",
-                "config": asdict(self.config),
-            }
-        )
+        return _recovery_config_hash(self.config)
+
+    @property
+    def fallback_config_hash(self) -> str | None:
+        if self.fallback_config is None:
+            return None
+        return _recovery_config_hash(self.fallback_config)
 
     @property
     def base_controller_hash(self) -> str:
         return hash_json(
             {
                 "controller_type": "g1_cerebellar_post_kick_recovery",
-                "version": 3,
+                "version": 4,
                 "body_hash": self.body_hash,
                 "motion_hash": self.motion_hash,
                 "standing_pose_hash": self.standing_pose_hash,
@@ -243,6 +273,9 @@ class G1CerebellarRecoveryController:
                 "regime_eligible": self.regime_eligible,
                 "regime_reasons": list(self.regime_reasons),
                 "config": asdict(self.config),
+                "fallback_config": (
+                    asdict(self.fallback_config) if self.fallback_config is not None else None
+                ),
             }
         )
 
@@ -253,7 +286,7 @@ class G1CerebellarRecoveryController:
         return hash_json(
             {
                 "controller_type": "g1_cerebellar_post_kick_recovery_with_muscle_memory",
-                "version": 1,
+                "version": 2,
                 "base_controller_hash": self.base_controller_hash,
                 "muscle_memory_artifact_hash": self.muscle_memory.artifact.artifact_hash,
             }
@@ -286,6 +319,8 @@ class G1CerebellarRecoveryController:
         self._peak_blend_fraction = 0.0
         self._peak_settling_fraction = 0.0
         self._peak_smoothing_residual_rms_rad = 0.0
+        self._fallback_routed_count = 0
+        self._expert_route_latched: bool | None = None
         if self.muscle_memory is not None:
             self.muscle_memory.reset()
 
@@ -309,38 +344,54 @@ class G1CerebellarRecoveryController:
         self._contact_latched = self._contact_latched or bool(ball_contact_detected)
         if self._contact_latched and right_support:
             self._landing_latched = True
+        config = self.config
+        if self.fallback_config is not None and self.muscle_memory is not None:
+            if muscle_memory_observation is None:
+                raise ValueError("temporal recovery routing requires proprioceptive observations")
+            if (
+                self._expert_route_latched is None
+                and self._contact_latched
+                and self._landing_latched
+            ):
+                self._expert_route_latched = self.muscle_memory.expert_regime_confident(
+                    muscle_memory_observation
+                )
+            if self._expert_route_latched is not True:
+                config = self.fallback_config
+            if self._expert_route_latched is False:
+                self._fallback_routed_count += 1
         causal_gate = (
             self.regime_eligible
-            and (self._contact_latched or not self.config.contact_required)
-            and (self._landing_latched or not self.config.kick_foot_landing_required)
+            and (self._contact_latched or not config.contact_required)
+            and (self._landing_latched or not config.kick_foot_landing_required)
         )
-        eligible = causal_gate and policy_frame >= self.config.start_policy_frame
+        eligible = causal_gate and policy_frame >= config.start_policy_frame
         if eligible:
             linear = min(
                 1.0,
                 max(
                     0.0,
-                    (policy_frame - self.config.start_policy_frame) / self.config.blend_frames,
+                    (policy_frame - config.start_policy_frame) / config.blend_frames,
                 ),
             )
             fraction = linear * linear * (3.0 - 2.0 * linear)
             settling_fraction = 0.0
-            standing_pose_blend = self.config.standing_pose_blend
-            roll_posture_bias = self.config.roll_posture_bias_rad
+            standing_pose_blend = config.standing_pose_blend
+            roll_posture_bias = config.roll_posture_bias_rad
             if (
-                self.config.settling_start_policy_frame is not None
-                and policy_frame >= self.config.settling_start_policy_frame
+                config.settling_start_policy_frame is not None
+                and policy_frame >= config.settling_start_policy_frame
             ):
-                settling_standing_pose_blend = self.config.settling_standing_pose_blend
-                settling_roll_posture_bias = self.config.settling_roll_posture_bias_rad
+                settling_standing_pose_blend = config.settling_standing_pose_blend
+                settling_roll_posture_bias = config.settling_roll_posture_bias_rad
                 if settling_standing_pose_blend is None or settling_roll_posture_bias is None:
                     raise RuntimeError("validated settling recovery config became incomplete")
                 settling_linear = min(
                     1.0,
                     max(
                         0.0,
-                        (policy_frame - self.config.settling_start_policy_frame)
-                        / self.config.settling_blend_frames,
+                        (policy_frame - config.settling_start_policy_frame)
+                        / config.settling_blend_frames,
                     ),
                 )
                 settling_fraction = (
@@ -358,7 +409,7 @@ class G1CerebellarRecoveryController:
                 + standing_weight * self.standing_pose
                 + fraction * roll_posture_bias * self._roll_pattern
                 + settling_fraction
-                * self.config.settling_waist_pitch_bias_rad
+                * config.settling_waist_pitch_bias_rad
                 * self._waist_pitch_pattern
             )
         else:
@@ -367,16 +418,16 @@ class G1CerebellarRecoveryController:
             adapted = value.copy()
         smoothing_active = bool(
             causal_gate
-            and self.config.target_smoothing_alpha < 1.0
-            and policy_frame >= self.config.target_smoothing_start_policy_frame
+            and config.target_smoothing_alpha < 1.0
+            and policy_frame >= config.target_smoothing_start_policy_frame
         )
         previous = self._smoothed_target if self._smoothed_target is not None else value
         if smoothing_active:
-            alpha = self.config.target_smoothing_alpha
+            alpha = config.target_smoothing_alpha
             first_joint = {
                 "upper_body": 12,
                 "arms": 15,
-            }[self.config.target_smoothing_joint_group]
+            }[config.target_smoothing_joint_group]
             smoothed = adapted.copy()
             smoothed[first_joint:] = previous[first_joint:] + alpha * (
                 adapted[first_joint:] - previous[first_joint:]
@@ -459,6 +510,12 @@ class G1CerebellarRecoveryController:
             strict_replay=strict_replay,
             evidence_domain=evidence_domain,
             config=asdict(self.config),
+            fallback_config_hash=self.fallback_config_hash,
+            fallback_config=(
+                asdict(self.fallback_config) if self.fallback_config is not None else None
+            ),
+            fallback_routed_count=self._fallback_routed_count,
+            expert_route_latched=self._expert_route_latched,
             muscle_memory_receipt=(
                 self.muscle_memory.build_receipt().to_dict()
                 if self.muscle_memory is not None

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 from typing import cast
 
@@ -23,14 +23,25 @@ from rosclaw.simforge.g1_muscle_memory_training import (
     build_g1_muscle_memory_cases,
 )
 from rosclaw.simforge.g1_recovery_quality import G1RecoveryQuality
+from rosclaw.simforge.g1_temporal_muscle_memory_training import (
+    G1TemporalMuscleMemoryTrainingConfig,
+    _artifact_from_temporal_genome,
+    _build_temporal_holdout_cases,
+    _numpy_temporal_logits,
+)
 from rosclaw.simforge.models import Partition
 
 
 def test_training_config_rejects_unbounded_search() -> None:
+    assert G1TemporalMuscleMemoryTrainingConfig().minimum_std == pytest.approx(0.015)
+
     with pytest.raises(ValueError, match="population"):
         G1MuscleMemoryTrainingConfig(population_size=5)
     with pytest.raises(ValueError, match="std"):
         G1MuscleMemoryTrainingConfig(initial_std=0.04)
+
+    with pytest.raises(ValueError, match="population"):
+        G1TemporalMuscleMemoryTrainingConfig(population_size=5)
 
 
 def test_training_and_private_holdout_are_partitioned() -> None:
@@ -46,6 +57,12 @@ def test_training_and_private_holdout_are_partitioned() -> None:
     assert training[0].scenario.ball_velocity_x_mps == 0.0
     assert training[0].scenario.ball_launch_delay_sec == 0.0
     assert holdout[0].scenario.ball_velocity_x_mps == 0.0
+
+    temporal_holdout = _build_temporal_holdout_cases()
+    assert all(case.scenario.partition is Partition.HOLDOUT for case in temporal_holdout)
+    assert {case.scenario.scenario_commitment for case in temporal_holdout}.isdisjoint(
+        case.scenario.scenario_commitment for case in training
+    )
 
 
 def test_sparse_genome_builds_bounded_content_addressed_actor() -> None:
@@ -66,6 +83,68 @@ def test_sparse_genome_builds_bounded_content_addressed_actor() -> None:
     assert artifact.activation_ceiling == "SIM_ONLY"
     assert artifact.artifact_hash.startswith("sha256:")
     assert len(artifact.artifact_hash) == 71
+
+
+def test_temporal_genome_builds_recurrent_safe_json_actor() -> None:
+    observations = len(G1_MUSCLE_MEMORY_OBSERVATIONS)
+    artifact = _artifact_from_temporal_genome(
+        np.zeros(29, dtype=np.float64),
+        body_hash="sha256:" + "a" * 64,
+        motion_hash="sha256:" + "b" * 64,
+        parent_config_hash="sha256:" + "c" * 64,
+        fallback_config_hash="sha256:" + "e" * 64,
+        expert_impact_prototypes_ns=(2.5, 3.4),
+        structured_recovery_parameters=(0.42, 0.11, 0.54),
+        dataset_hash="sha256:" + "d" * 64,
+        observation_mean=(0.0,) * observations,
+        observation_scale=(1.0,) * observations,
+        training_episode_count=3,
+        training_seed=7,
+    )
+
+    assert artifact.schema_version.endswith(".v2")
+    assert artifact.policy_architecture == "leaky_rbf_recurrent_v1"
+    assert len(artifact.temporal_basis_centers_sec) == 4
+    assert artifact.activation_ceiling == "SIM_ONLY"
+    assert artifact.to_dict()["policy_architecture"] == "leaky_rbf_recurrent_v1"
+    assert artifact.to_dict()["structured_recovery_parameter_names"] == [
+        "settling_standing_pose_blend",
+        "settling_waist_pitch_bias_rad",
+        "target_smoothing_alpha",
+    ]
+    assert artifact.to_dict()["structured_recovery_parameters"] == [0.42, 0.11, 0.54]
+    with pytest.raises(ValueError, match="standing blend"):
+        replace(artifact, structured_recovery_parameters=(0.51, 0.11, 0.54))
+
+
+def test_temporal_numpy_export_is_deterministic() -> None:
+    observations = len(G1_MUSCLE_MEMORY_OBSERVATIONS)
+    genome = np.zeros(29, dtype=np.float64)
+    genome[0:4] = (0.03, 0.02, 0.0, -0.01)
+    genome[12] = 0.2
+    artifact = _artifact_from_temporal_genome(
+        genome,
+        body_hash="sha256:" + "a" * 64,
+        motion_hash="sha256:" + "b" * 64,
+        parent_config_hash="sha256:" + "c" * 64,
+        fallback_config_hash="sha256:" + "e" * 64,
+        expert_impact_prototypes_ns=(2.5, 3.4),
+        structured_recovery_parameters=(0.42, 0.11, 0.54),
+        dataset_hash="sha256:" + "d" * 64,
+        observation_mean=(0.0,) * observations,
+        observation_scale=(1.0,) * observations,
+        training_episode_count=3,
+        training_seed=7,
+    )
+    rows = np.zeros((8, observations), dtype=np.float64)
+    rows[:, 0] = np.linspace(0.0, 0.7, len(rows))
+    rows[:, 2] = np.linspace(0.0, -0.2, len(rows))
+
+    first = _numpy_temporal_logits(artifact, rows, rows[:, 0])
+    second = _numpy_temporal_logits(artifact, rows, rows[:, 0])
+
+    assert np.array_equal(first, second)
+    assert not np.array_equal(first[0], first[-1])
 
 
 def test_holdout_summary_cannot_disclose_case_rows() -> None:

@@ -358,6 +358,7 @@ class G1MuscleMemoryTrainer:
         asset_root: Path,
         cases: tuple[G1MuscleMemoryCase, ...] | None = None,
         recovery_config: G1CerebellarRecoveryConfig | None = None,
+        recovery_fallback_config: G1CerebellarRecoveryConfig | None = None,
         config: G1MuscleMemoryTrainingConfig | None = None,
     ) -> None:
         self.backend = G1MuJoCoBackend(asset_root=asset_root, trace_stride=1)
@@ -365,6 +366,7 @@ class G1MuscleMemoryTrainer:
         if not self.cases:
             raise ValueError("muscle-memory training requires at least one case")
         self.recovery_config = recovery_config or g1_muscle_memory_parent_config()
+        self.recovery_fallback_config = recovery_fallback_config
         self.config = config or G1MuscleMemoryTrainingConfig()
 
     def train(self) -> G1MuscleMemoryTrainingReport:
@@ -634,6 +636,7 @@ class G1MuscleMemoryTrainer:
             case.scenario,
             self.recovery_config,
             artifact,
+            self.recovery_fallback_config,
         )
         return self.backend.run(
             case.scenario,

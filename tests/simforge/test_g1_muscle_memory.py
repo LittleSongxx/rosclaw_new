@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from rosclaw.simforge.g1_cerebellar_recovery import (
+    G1CerebellarRecoveryConfig,
     G1CerebellarRecoveryController,
 )
 from rosclaw.simforge.g1_muscle_memory import (
@@ -73,6 +74,15 @@ def test_artifact_roundtrips_as_safe_json(tmp_path) -> None:
     assert loaded.activation_ceiling == "SIM_ONLY"
 
 
+def test_v1_artifact_serialization_omits_temporal_fields() -> None:
+    artifact = _artifact(parent_config_hash=_controller().config_hash)
+    payload = artifact.to_dict()
+
+    assert payload["schema_version"].endswith(".v1")
+    assert "policy_architecture" not in payload
+    assert "temporal_basis_weights" not in payload
+
+
 def test_policy_is_rate_limited_bounded_and_ood_fail_closed() -> None:
     parent = _controller()
     artifact = _artifact(parent_config_hash=parent.config_hash)
@@ -95,6 +105,156 @@ def test_policy_is_rate_limited_bounded_and_ood_fail_closed() -> None:
     assert receipt.inference_count == 1
     assert receipt.out_of_distribution_count == 1
     assert not receipt.hardware_command_sent
+
+
+def test_temporal_policy_uses_history_and_reset_is_deterministic() -> None:
+    base = _artifact(parent_config_hash=_controller().config_hash)
+    actions = len(G1_MUSCLE_MEMORY_ACTIONS)
+    observations = len(G1_MUSCLE_MEMORY_OBSERVATIONS)
+    basis = np.zeros((actions, 3), dtype=np.float64)
+    trend = np.zeros((actions, observations), dtype=np.float64)
+    velocity_index = G1_MUSCLE_MEMORY_OBSERVATIONS.index("pelvis_velocity_x_m_s")
+    trend[0, velocity_index] = 0.5
+    artifact = replace(
+        base,
+        schema_version="rosclaw.g1_goalforge.muscle_memory_artifact.v2",
+        policy_architecture="leaky_rbf_recurrent_v1",
+        temporal_basis_centers_sec=(0.0, 0.3, 0.6),
+        temporal_basis_weights=tuple(tuple(map(float, row)) for row in basis),
+        proprioceptive_trend_weights=tuple(tuple(map(float, row)) for row in trend),
+        fallback_recovery_config_hash=_digest("5"),
+        expert_impact_prototypes_ns=(3.0,),
+        structured_recovery_parameters=(0.42, 0.11, 0.54),
+    )
+    policy = G1MuscleMemoryPolicy(artifact)
+    first = policy.infer(_observation(pelvis_velocity_x_m_s=-0.05, contact_impulse_ns=3.0))
+    second = policy.infer(_observation(pelvis_velocity_x_m_s=-0.20, contact_impulse_ns=3.0))
+
+    assert not np.array_equal(first.synergy_actions, second.synergy_actions)
+    policy.reset()
+    replay = policy.infer(_observation(pelvis_velocity_x_m_s=-0.05, contact_impulse_ns=3.0))
+    assert np.array_equal(first.residual, replay.residual)
+
+
+def test_temporal_policy_falls_back_whole_body_on_low_confidence_impact() -> None:
+    base = _artifact(parent_config_hash=_controller().config_hash)
+    actions = len(G1_MUSCLE_MEMORY_ACTIONS)
+    observations = len(G1_MUSCLE_MEMORY_OBSERVATIONS)
+    basis = np.ones((actions, 3), dtype=np.float64)
+    trend = np.zeros((actions, observations), dtype=np.float64)
+    artifact = replace(
+        base,
+        schema_version="rosclaw.g1_goalforge.muscle_memory_artifact.v2",
+        policy_architecture="leaky_rbf_recurrent_v1",
+        temporal_basis_centers_sec=(0.0, 0.3, 0.6),
+        temporal_basis_weights=tuple(tuple(map(float, row)) for row in basis),
+        proprioceptive_trend_weights=tuple(tuple(map(float, row)) for row in trend),
+        fallback_recovery_config_hash=_digest("5"),
+        expert_impact_prototypes_ns=(3.0,),
+        structured_recovery_parameters=(0.42, 0.11, 0.54),
+    )
+
+    effect = G1MuscleMemoryPolicy(artifact).infer(
+        _observation(
+            pelvis_velocity_x_m_s=-0.20,
+            contact_impulse_ns=artifact.sagittal_minimum_impulse_ns - 0.1,
+        )
+    )
+
+    assert not effect.active
+    assert np.count_nonzero(effect.synergy_actions) == 0
+
+
+def test_temporal_controller_routes_low_impulse_to_bound_fallback() -> None:
+    primary = G1CerebellarRecoveryConfig(target_smoothing_alpha=0.54)
+    fallback = G1CerebellarRecoveryConfig(target_smoothing_alpha=0.60)
+    primary_controller = G1CerebellarRecoveryController(
+        body_hash=_digest("1"),
+        motion_hash=_digest("2"),
+        regime_commitment=_digest("3"),
+        regime_eligible=True,
+        regime_reasons=(),
+        standing_pose=np.zeros(29),
+        config=primary,
+    )
+    fallback_controller = G1CerebellarRecoveryController(
+        body_hash=_digest("1"),
+        motion_hash=_digest("2"),
+        regime_commitment=_digest("3"),
+        regime_eligible=True,
+        regime_reasons=(),
+        standing_pose=np.zeros(29),
+        config=fallback,
+    )
+    base = _artifact(parent_config_hash=primary_controller.config_hash)
+    actions = len(G1_MUSCLE_MEMORY_ACTIONS)
+    observations = len(G1_MUSCLE_MEMORY_OBSERVATIONS)
+    artifact = replace(
+        base,
+        schema_version="rosclaw.g1_goalforge.muscle_memory_artifact.v2",
+        policy_architecture="leaky_rbf_recurrent_v1",
+        temporal_basis_centers_sec=(0.0, 0.3, 0.6),
+        temporal_basis_weights=tuple((0.0,) * 3 for _ in range(actions)),
+        proprioceptive_trend_weights=tuple((0.0,) * observations for _ in range(actions)),
+        fallback_recovery_config_hash=fallback_controller.config_hash,
+        expert_impact_prototypes_ns=(3.0,),
+        structured_recovery_parameters=(0.0, 0.0, 0.54),
+    )
+    controller = G1CerebellarRecoveryController(
+        body_hash=_digest("1"),
+        motion_hash=_digest("2"),
+        regime_commitment=_digest("3"),
+        regime_eligible=True,
+        regime_reasons=(),
+        standing_pose=np.zeros(29),
+        config=primary,
+        muscle_memory_artifact=artifact,
+        fallback_config=fallback,
+    )
+
+    controller.adapt_target(
+        target=np.zeros(29),
+        policy_frame=500,
+        timestamp_sec=5.0,
+        ball_contact_detected=True,
+        left_support=True,
+        right_support=True,
+        muscle_memory_observation=_observation(contact_impulse_ns=1.0),
+    )
+    receipt = controller.build_receipt(strict_replay=True)
+
+    assert receipt.fallback_config_hash == fallback_controller.config_hash
+    assert receipt.fallback_routed_count == 1
+
+    controller.reset()
+    controller.adapt_target(
+        target=np.zeros(29),
+        policy_frame=500,
+        timestamp_sec=5.0,
+        ball_contact_detected=True,
+        left_support=True,
+        right_support=True,
+        muscle_memory_observation=_observation(contact_impulse_ns=3.0),
+    )
+    expert_receipt = controller.build_receipt(strict_replay=True)
+    assert expert_receipt.expert_route_latched is True
+    assert expert_receipt.fallback_routed_count == 0
+
+    with pytest.raises(ValueError, match="structured recovery parameters mismatch"):
+        G1CerebellarRecoveryController(
+            body_hash=_digest("1"),
+            motion_hash=_digest("2"),
+            regime_commitment=_digest("3"),
+            regime_eligible=True,
+            regime_reasons=(),
+            standing_pose=np.zeros(29),
+            config=primary,
+            muscle_memory_artifact=replace(
+                artifact,
+                structured_recovery_parameters=(0.42, 0.11, 0.54),
+            ),
+            fallback_config=fallback,
+        )
 
 
 def test_policy_fades_out_instead_of_shifting_the_terminal_standing_pose() -> None:
