@@ -227,11 +227,11 @@ def test_daemon_loader_registers_limo_initial_pose_executor(tmp_path) -> None:
             server_name="limo-ros-mcp",
             manifest_id="limo-ros-mcp",
             name="limo-ros-mcp",
-            version="0.6.5",
+            version="0.7.0",
             installed_at="2026-07-30T00:00:00Z",
             artifact_type="test",
             server_dir=str(home / "mcp"),
-            extra={"repo_commit": "fd9275c9de22f6158a38edc4b299e6657bce38bb"},
+            extra={"repo_commit": "8242a33991187c62020000f8faf51dc44f0f9d44"},
         )
     )
     configure_robot_instance(
@@ -249,7 +249,7 @@ def test_daemon_loader_registers_limo_initial_pose_executor(tmp_path) -> None:
     status = load_daemon_robot_pack(runtime, robot_id="limo", home=home)
 
     assert status is not None
-    assert status["pack_ref"].endswith("limo-ros1@0.1.4")
+    assert status["pack_ref"].endswith("limo-ros1@0.1.5")
     assert status["registered_executors"] == [
         "limo.set_initial_pose:SHADOW",
         "limo.set_initial_pose:REAL",

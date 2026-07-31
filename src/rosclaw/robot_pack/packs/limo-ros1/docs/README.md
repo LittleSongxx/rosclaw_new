@@ -2,7 +2,7 @@
 
 This Pack binds the `limo` e-URDF Body to the independently versioned
 `ros-claw/limo-ros-mcp` adapter at commit
-`fd9275c9de22f6158a38edc4b299e6657bce38bb` (MCP 0.6.5).
+`8242a33991187c62020000f8faf51dc44f0f9d44` (MCP 0.7.0).
 
 The first REAL capability is `limo.set_initial_pose`. The Agent submits a
 validated map-frame estimate to `rosclawd`; the daemon validates an exact
@@ -29,3 +29,13 @@ Revision 0.1.4 matches the Dabai U3 streams launched by
 metadata summaries and never exposes the raw image or point-cloud arrays.
 ROS CLI array placeholders are decoded into their true bounded byte and field
 counts, rather than reporting the placeholder string length.
+
+Revision 0.1.5 locks the adapter revision that expands read-only inspection to
+29 MCP tools and 27 ROS observations. It adds bounded Dabai device and
+color/depth/IR camera-state summaries, host audio playback/capture inventory,
+in-memory microphone level measurement, display/touch inventory, USB peripheral
+inventory, and platform health. Microphone samples are discarded immediately:
+no recording or raw audio content is retained or returned. IR endpoints may be
+present but are reported inactive when the driver publishes no frames. Front
+OLED and chassis RGB lights remain declared but unbound until a stable host or
+ROS interface is available.
