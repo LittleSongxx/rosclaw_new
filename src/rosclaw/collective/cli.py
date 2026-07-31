@@ -111,6 +111,38 @@ def _parser() -> argparse.ArgumentParser:
     repair.add_argument("--source-checkout", type=Path, default=Path.cwd())
     repair.add_argument("--force", action="store_true")
     repair.set_defaults(handler=_repair)
+
+    contact = commands.add_parser(
+        "contact",
+        help="infer kinematic foot contact and support phases from repaired motion",
+    )
+    contact.add_argument("adapter", choices=["motiondecode"])
+    contact.add_argument("--registration", type=Path, required=True)
+    contact.add_argument("--ingest-report", type=Path, required=True)
+    contact.add_argument("--repair-report", type=Path, required=True)
+    contact.add_argument("--dataset-root", type=Path, required=True)
+    contact.add_argument("--target-model", type=Path, required=True)
+    contact.add_argument("--output", type=Path, required=True)
+    contact.add_argument("--source-checkout", type=Path, default=Path.cwd())
+    contact.add_argument("--force", action="store_true")
+    contact.set_defaults(handler=_contact)
+
+    qualify = commands.add_parser(
+        "qualify",
+        help="run strict CPU MuJoCo qualification for eligible motion references",
+    )
+    qualify.add_argument("adapter", choices=["motiondecode"])
+    qualify.add_argument("--registration", type=Path, required=True)
+    qualify.add_argument("--ingest-report", type=Path, required=True)
+    qualify.add_argument("--repair-report", type=Path, required=True)
+    qualify.add_argument("--contact-report", type=Path, required=True)
+    qualify.add_argument("--dataset-root", type=Path, required=True)
+    qualify.add_argument("--target-model", type=Path, required=True)
+    qualify.add_argument("--scene", type=Path, required=True)
+    qualify.add_argument("--output", type=Path, required=True)
+    qualify.add_argument("--source-checkout", type=Path, default=Path.cwd())
+    qualify.add_argument("--force", action="store_true")
+    qualify.set_defaults(handler=_qualify)
     return parser
 
 
@@ -236,25 +268,10 @@ def _repair(args: argparse.Namespace) -> int:
 
     output = _output_path(args.output, args.source_checkout, force=args.force)
     registration = _read_registration(args.registration)
-    ingest = _read_object(args.ingest_report)
-    report_value = ingest.get("report")
-    if not isinstance(report_value, dict):
-        raise ValueError("ingest artifact lacks a report object")
-    expected_ingest_hash = ingest.get("report_hash")
-    if not isinstance(expected_ingest_hash, str) or expected_ingest_hash != canonical_hash(
-        report_value
-    ):
-        raise ValueError("ingest report_hash does not replay")
-    thresholds_value = report_value.get("thresholds")
-    if not isinstance(thresholds_value, dict):
-        raise ValueError("ingest report lacks audit thresholds")
-    expected_fields = set(MotionDecodeAuditThresholds().to_dict())
-    if set(thresholds_value) != expected_fields or any(
-        isinstance(value, bool) or not isinstance(value, (int, float))
-        for value in thresholds_value.values()
-    ):
-        raise ValueError("ingest report audit thresholds are invalid")
-    thresholds = MotionDecodeAuditThresholds(**thresholds_value)
+    expected_ingest_hash, thresholds = _read_ingest_commitment(
+        args.ingest_report,
+        MotionDecodeAuditThresholds,
+    )
     report = repair_motiondecode_snapshot(
         registration,
         args.dataset_root,
@@ -294,6 +311,126 @@ def _repair(args: argparse.Namespace) -> int:
     return 0 if report.q1_after_count > 0 else 1
 
 
+def _contact(args: argparse.Namespace) -> int:
+    from rosclaw.collective.sources.motiondecode.audit import (
+        MotionDecodeAuditThresholds,
+    )
+    from rosclaw.collective.sources.motiondecode.contact import (
+        infer_motiondecode_contacts,
+    )
+
+    output = _output_path(args.output, args.source_checkout, force=args.force)
+    registration = _read_registration(args.registration)
+    expected_ingest_hash, audit_thresholds = _read_ingest_commitment(
+        args.ingest_report,
+        MotionDecodeAuditThresholds,
+    )
+    expected_repair_hash = _read_report_commitment(
+        args.repair_report,
+        label="repair",
+    )
+    report = infer_motiondecode_contacts(
+        registration,
+        args.dataset_root,
+        target_model_path=args.target_model,
+        expected_ingest_report_hash=expected_ingest_hash,
+        expected_repair_report_hash=expected_repair_hash,
+        audit_thresholds=audit_thresholds,
+    )
+    artifact = {
+        "schema_version": "rosclaw.collective.motiondecode_contact_artifact.v1",
+        "report": report.to_dict(),
+        "report_hash": report.report_hash,
+    }
+    atomic_write_json(output, artifact)
+    _print(
+        {
+            "schema_version": "rosclaw.collective.contact_receipt.v1",
+            "ok": report.phase_candidate_count > 0,
+            "output": str(output),
+            "report_hash": report.report_hash,
+            "repair_report_hash": report.repair_report_hash,
+            "threshold_hash": report.thresholds.threshold_hash,
+            "clip_count": len(report.clips),
+            "inferred_count": report.inferred_count,
+            "phase_candidate_count": report.phase_candidate_count,
+            "issue_clip_counts": report.issue_clip_counts,
+            "quality_commitment": report.quality_commitment,
+            "frame_level_trace_persisted": False,
+            "training_eligible": False,
+            "training_blockers": report.training_blockers,
+            "activation_authorized": False,
+            "hardware_authorized": False,
+        }
+    )
+    return 0 if report.phase_candidate_count > 0 else 1
+
+
+def _qualify(args: argparse.Namespace) -> int:
+    from rosclaw.collective.sources.motiondecode.audit import (
+        MotionDecodeAuditThresholds,
+    )
+    from rosclaw.collective.sources.motiondecode.qualification import (
+        qualify_motiondecode_snapshot,
+    )
+
+    output = _output_path(args.output, args.source_checkout, force=args.force)
+    registration = _read_registration(args.registration)
+    expected_ingest_hash, audit_thresholds = _read_ingest_commitment(
+        args.ingest_report,
+        MotionDecodeAuditThresholds,
+    )
+    expected_repair_hash = _read_report_commitment(
+        args.repair_report,
+        label="repair",
+    )
+    expected_contact_hash = _read_report_commitment(
+        args.contact_report,
+        label="contact",
+    )
+    report = qualify_motiondecode_snapshot(
+        registration,
+        args.dataset_root,
+        target_model_path=args.target_model,
+        scene_path=args.scene,
+        expected_ingest_report_hash=expected_ingest_hash,
+        expected_repair_report_hash=expected_repair_hash,
+        expected_contact_report_hash=expected_contact_hash,
+        audit_thresholds=audit_thresholds,
+    )
+    artifact = {
+        "schema_version": "rosclaw.collective.motiondecode_qualification_artifact.v1",
+        "report": report.to_dict(),
+        "report_hash": report.report_hash,
+    }
+    atomic_write_json(output, artifact)
+    _print(
+        {
+            "schema_version": "rosclaw.collective.qualification_receipt.v1",
+            "ok": report.q3_count > 0,
+            "output": str(output),
+            "report_hash": report.report_hash,
+            "contact_report_hash": report.contact_report_hash,
+            "scene_file_hash": report.scene_file_hash,
+            "compiled_scene_hash": report.compiled_scene_hash,
+            "threshold_hash": report.thresholds.threshold_hash,
+            "clip_count": len(report.clips),
+            "status_counts": report.status_counts,
+            "qualification_counts": report.qualification_counts,
+            "physics_executed_count": report.physics_executed_count,
+            "physics_step_count": report.physics_step_count,
+            "q3_count": report.q3_count,
+            "quality_commitment": report.quality_commitment,
+            "training_eligible": False,
+            "training_blockers": report.training_blockers,
+            "promotion_truth_eligible": False,
+            "activation_authorized": False,
+            "hardware_authorized": False,
+        }
+    )
+    return 0 if report.q3_count > 0 else 1
+
+
 def _families(value: str) -> tuple[MotionFamily, ...]:
     from rosclaw.collective.sources.motiondecode.taxonomy import MotionFamily
 
@@ -329,6 +466,40 @@ def _read_registration(path: Path) -> MotionDecodeRegistration:
     if value.get("registration_hash") != registration.registration_hash:
         raise ValueError("registration_hash does not replay")
     return registration
+
+
+def _read_ingest_commitment(
+    path: Path,
+    thresholds_type: Any,
+) -> tuple[str, Any]:
+    value = _read_object(path)
+    report_value = value.get("report")
+    if not isinstance(report_value, dict):
+        raise ValueError("ingest artifact lacks a report object")
+    expected_hash = value.get("report_hash")
+    if not isinstance(expected_hash, str) or expected_hash != canonical_hash(report_value):
+        raise ValueError("ingest report_hash does not replay")
+    thresholds_value = report_value.get("thresholds")
+    if not isinstance(thresholds_value, dict):
+        raise ValueError("ingest report lacks audit thresholds")
+    expected_fields = set(thresholds_type().to_dict())
+    if set(thresholds_value) != expected_fields or any(
+        isinstance(item, bool) or not isinstance(item, (int, float))
+        for item in thresholds_value.values()
+    ):
+        raise ValueError("ingest report audit thresholds are invalid")
+    return expected_hash, thresholds_type(**thresholds_value)
+
+
+def _read_report_commitment(path: Path, *, label: str) -> str:
+    value = _read_object(path)
+    report_value = value.get("report")
+    if not isinstance(report_value, dict):
+        raise ValueError(f"{label} artifact lacks a report object")
+    expected_hash = value.get("report_hash")
+    if not isinstance(expected_hash, str) or expected_hash != canonical_hash(report_value):
+        raise ValueError(f"{label} report_hash does not replay")
+    return expected_hash
 
 
 def _read_object(path: Path) -> Mapping[str, Any]:
