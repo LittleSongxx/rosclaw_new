@@ -593,6 +593,14 @@ def run() -> int:
     parser.add_argument("--pairs", default="index_index", help="comma list; pilot is index_index")
     parser.add_argument("--modes", default="passive_active,active_passive,mutual")
     parser.add_argument("--repeats", type=int, default=2)
+    parser.add_argument(
+        "--pregate-only",
+        action="store_true",
+        help="stop after the effect-gate pregate — validates identity, "
+        "pose-hash gate, baselines, collector+watchdog, gateway dispatch "
+        "(open-pose hold only, zero approach) and the v3-lesson effect "
+        "gate on live hardware without any approach motion",
+    )
     args = parser.parse_args()
     pairs = [p.strip() for p in args.pairs.split(",") if p.strip()]
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
@@ -748,6 +756,15 @@ def run() -> int:
             )
             print(json.dumps(report, indent=2, default=str))
             return 2
+        if args.pregate_only:
+            report["pregate_only"] = True
+            (out_dir / "t1_calibration_report.json").write_text(
+                json.dumps(report, indent=2, ensure_ascii=False, default=str)
+            )
+            print(json.dumps({"run_id": run_id, "pregate_only": True,
+                              "pregate_effects": effect_results, "aborts": []},
+                             indent=2, ensure_ascii=False))
+            return 0
 
         # ---- calibration episodes
         tuning = SupervisorTuning(
