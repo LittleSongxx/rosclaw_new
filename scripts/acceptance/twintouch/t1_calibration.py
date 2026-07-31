@@ -593,7 +593,13 @@ def _min_pairwise_distance(a: np.ndarray, b: np.ndarray, *, max_points: int = 80
 # priors as index until their own pilots measure them)
 PRESENT_RAW = {"index": 450, "middle": 450, "ring": 450, "little": 450, "thumb": 450}
 PREAPPROACH_RAW = {"index": 680, "middle": 680, "ring": 680, "little": 680, "thumb": 550}
-MUTUAL_PRESENT_RAW = {"index": 720, "middle": 720, "ring": 720, "little": 720, "thumb": 500}  # 720/720: arcs never cross during present; convergence happens INSIDE the supervisor
+MUTUAL_PRESENT_RAW = {"index": 720, "middle": 720, "ring": 720, "little": 720, "thumb": 500}
+# v4 §3.2: 其余手指保持收回或安全位 — non-target contact fingers
+# RETRACT out of the contact zone on BOTH hands (campaign
+# active_passive_0/1 UNINTENDED_CONTACT: the presented hand's open
+# middle finger stuck up right beside the target tip and the
+# approaching finger grazed it — the guard's correct first catch).
+RETRACT_RAW = 350
 THUMB_TUCK_RAW = 250
 THUMB_ROT_TUCK_RAW = 250
 # Per-hand tuck policy for non-thumb pairs (measured on index):
@@ -605,7 +611,11 @@ def _present_targets(pair_id: str, mode: str) -> dict[str, dict[str, int]]:
     finger = pair_id.split("_")[0]
     targets = {"left": dict(OPEN_RAW), "right": dict(OPEN_RAW)}
 
-    def _tuck(side: str, side_targets: dict[str, int]) -> None:
+    def _shape(side: str, side_targets: dict[str, int]) -> None:
+        # retract every non-target contact finger; thumb per-hand policy
+        for other in ("index", "middle", "ring", "little"):
+            if other != finger:
+                side_targets[other] = RETRACT_RAW
         if finger != "thumb" and HAND_TUCK_POLICY[side]:
             side_targets["thumb"] = THUMB_TUCK_RAW
             side_targets["thumb_rot"] = THUMB_ROT_TUCK_RAW
@@ -613,7 +623,7 @@ def _present_targets(pair_id: str, mode: str) -> dict[str, dict[str, int]]:
     if mode == "mutual":
         for side in ("left", "right"):
             targets[side][finger] = MUTUAL_PRESENT_RAW[finger]
-            _tuck(side, targets[side])
+            _shape(side, targets[side])
         return targets
     # single-side: passive presents horizontally, active pre-approaches
     active, passive = (
@@ -621,8 +631,8 @@ def _present_targets(pair_id: str, mode: str) -> dict[str, dict[str, int]]:
     )
     targets[passive][finger] = PRESENT_RAW[finger]
     targets[active][finger] = PREAPPROACH_RAW[finger]
-    _tuck(passive, targets[passive])
-    _tuck(active, targets[active])
+    _shape(passive, targets[passive])
+    _shape(active, targets[active])
     return targets
 
 
@@ -948,15 +958,15 @@ def run() -> int:
                         report["aborts"].append(f"thermal continue gate: {max(temps_now)}°C")
                         print(json.dumps(report, indent=2, default=str))
                         return 3
-                    # per-EPISODE tuning: mutual enters FINE immediately
-                    # (present 720 sits at the bulge edge — a 40-raw
-                    # coarse step skips through it, pilot 20); single-
-                    # side keeps the 2cm coarse->fine switch.
+                    # per-EPISODE tuning: ALL modes fine-only — a
+                    # 40-raw coarse step skips through every contact
+                    # zone in one servo swing (EARLY_CONTACT on pilot
+                    # 20 mutual AND campaign passive_active x2).
                     episode_tuning = SupervisorTuning(
                         **{
                             **tuning.__dict__,
-                            "max_fine_steps": 16 if mode == "mutual" else 12,
-                            "coarse_to_fine_distance_m": 0.06 if mode == "mutual" else 0.02,
+                            "max_fine_steps": 16,
+                            "coarse_to_fine_distance_m": 0.10,
                         }
                     )
                     record = _run_episode(
