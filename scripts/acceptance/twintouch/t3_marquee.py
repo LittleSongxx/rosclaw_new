@@ -167,12 +167,14 @@ def run_marquee(
         )
 
         # one choreography contract + one Sequence Permit for the WHOLE
-        # marquee (v4 §18): the canonical sequence, ultra_light, bound to
-        # the current camera pose + per-side snapshot hashes
+        # marquee (v4 §18): the canonical sequence is the APPROVAL
+        # SCOPE; execution is gated pair-by-pair by T1 calibration —
+        # uncalibrated pairs are recorded as skipped cells, never
+        # silently dropped and never attempted.
         snapshot_hashes = {"left": f"t3_{run_id}_left", "right": f"t3_{run_id}_right"}
         contract = ContactChoreographyContract(
             pattern="fingertip_marquee",
-            pairs=tuple(pairs),
+            pairs=tuple(CANONICAL_MARQUEE_PAIRS),
             cycles=cycles,
             force_level="ultra_light",
             left_body_hash=snapshot_hashes["left"],
@@ -221,6 +223,10 @@ def run_marquee(
         sequence_ok = True
         cell_index = 0
         t_sequence_start = time.time()
+        # pairs the supervisor may attempt TODAY (T1-calibrated only);
+        # every other canonical pair in the execution subset is an
+        # explicit skipped cell, never silently dropped
+        calibrated_pairs = {"index_index"}
         for cycle in range(cycles):
             if not sequence_ok:
                 break
@@ -240,6 +246,12 @@ def run_marquee(
                     "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 }
                 cell_index += 1
+                if pair_id not in calibrated_pairs:
+                    cell["outcome"] = "SKIPPED_UNCALIBRATED"
+                    cell["notes"] = ["pair has no T1 envelope — skipped, never attempted"]
+                    _emit_state(cell)
+                    report["cells"].append(cell)
+                    continue
                 sequence_ok = _run_cell(
                     cell=cell,
                     run_id=run_id,
