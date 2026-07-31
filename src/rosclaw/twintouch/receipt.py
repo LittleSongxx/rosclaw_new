@@ -36,6 +36,9 @@ OUTCOME_RELEASE_FAILED = "RELEASE_FAILED"
 OUTCOME_THERMAL_ABORT = "THERMAL_ABORT"
 OUTCOME_PARTIAL_DISPATCH = "PARTIAL_DISPATCH"
 OUTCOME_ABORTED_BEFORE_DISPATCH = "ABORTED_BEFORE_DISPATCH"
+# Gateway success: both commands delivered inside the barrier window.
+# NOT a contact verdict — contact is the Contact Supervisor's call.
+OUTCOME_DISPATCHED = "DISPATCHED"
 
 
 def _all_outcomes() -> frozenset[str]:
