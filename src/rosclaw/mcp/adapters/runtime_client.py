@@ -712,7 +712,9 @@ class RuntimeClient:
                 "A trusted operator principal is required for REAL confirmation.",
             )
         reason = str(confirmation.get("reason") or "Accepted through MCP elicitation")
+        armed_by_confirmation = False
         try:
+            runtime_status = await asyncio.to_thread(self._daemon_client.get_runtime_status)
             await asyncio.to_thread(
                 self._daemon_client.create_session,
                 session_id=action.session_id,
@@ -722,6 +724,12 @@ class RuntimeClient:
                 capability_scope=[action.capability_id],
                 ttl_ms=60_000,
             )
+            if str(runtime_status.get("supervision_state")) != "ARMED":
+                await asyncio.to_thread(
+                    self._daemon_client.arm_runtime,
+                    f"Operator confirmed exact REAL action {action.action_id} through MCP elicitation",
+                )
+                armed_by_confirmation = True
             issued = await asyncio.to_thread(
                 self._daemon_client.issue_execution_permit,
                 action,
@@ -744,9 +752,17 @@ class RuntimeClient:
                     action.action_id,
                     timeout_sec=wait_timeout_sec,
                 )
-        except MCPError:
-            raise
         except Exception as exc:  # noqa: BLE001
+            if armed_by_confirmation:
+                try:
+                    await asyncio.to_thread(
+                        self._daemon_client.disarm_runtime,
+                        f"Automatic rollback after confirmed action {action.action_id} failed",
+                    )
+                except Exception as rollback_exc:  # noqa: BLE001
+                    self._raise_daemon_error("confirm_operator_action_rollback", rollback_exc)
+            if isinstance(exc, MCPError):
+                raise
             self._raise_daemon_error("confirm_operator_action", exc)
         return {
             **self._action_result_metadata(result, "REAL"),
@@ -754,6 +770,8 @@ class RuntimeClient:
                 "schema_version": "rosclaw.operator_confirmation_result.v1",
                 "accepted": True,
                 "action_intent_hash": expected_hash,
+                "supervision_armed": armed_by_confirmation,
+                "separate_arm_required": False,
                 "permit_injected": True,
                 "permit_exposed": False,
             },
@@ -817,8 +835,7 @@ class RuntimeClient:
         action_kwargs: dict[str, Any] = {
             "actor_id": os.environ.get("ROSCLAW_AGENT_ACTOR", "rosclaw-mcp"),
             "agent_framework": os.environ.get("ROSCLAW_AGENT_CLIENT", "mcp"),
-            "session_id": session_id
-            or os.environ.get("ROSCLAW_AGENT_SESSION", default_session_id),
+            "session_id": session_id or os.environ.get("ROSCLAW_AGENT_SESSION", default_session_id),
             "body_id": body_id or self.robot_id,
             "body_snapshot_hash": body_snapshot_hash,
             "capability_id": capability_id,
