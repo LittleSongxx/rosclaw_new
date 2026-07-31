@@ -235,6 +235,26 @@ class InferenceService:
         self._apply(event.kind, dict(event.payload))
         return self.receipt("verified candidate staged; active policy unchanged")
 
+    def _discard_candidate(self, reason: str) -> InferenceSlotReceipt:
+        """Remove a rejected published/staged successor without touching active."""
+        if self._motions:
+            raise RuntimeError("candidate discard is forbidden while a motion lease is active")
+        if not reason.strip():
+            raise ValueError("candidate discard requires a reason")
+        pending = self._candidate or self._published
+        if pending is None:
+            raise RuntimeError("no published or staged candidate exists")
+        event = self.log.append(
+            "DISCARDED",
+            {
+                "policy_version_hash": pending.version_hash,
+                "reason": reason,
+                "active_policy_hash": self.active.version_hash,
+            },
+        )
+        self._apply(event.kind, dict(event.payload))
+        return self.receipt("rejected candidate discarded; active policy unchanged")
+
     def _activate(
         self,
         *,
@@ -395,6 +415,17 @@ class InferenceService:
             ):
                 raise ValueError("staged inference policy does not match published candidate")
             self._candidate = self._published
+            self._published = None
+            self._published_verified = False
+        elif kind == "DISCARDED":
+            pending = self._candidate or self._published
+            if (
+                pending is None
+                or payload["policy_version_hash"] != pending.version_hash
+                or payload["active_policy_hash"] != self.active.version_hash
+            ):
+                raise ValueError("candidate discard event does not match inference slots")
+            self._candidate = None
             self._published = None
             self._published_verified = False
         elif kind == "ACTIVATED":
