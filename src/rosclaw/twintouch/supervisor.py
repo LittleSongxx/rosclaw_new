@@ -129,6 +129,8 @@ class SupervisorTuning:
     release_margin_raw: int = 60
     release_force_epsilon_raw: float = 20.0
     max_release_steps: int = 4
+    max_clear_wait_cycles: int = 20  # VERIFY_CLEAR bounded wait (hysteresis decays in seconds)
+    release_visual_clear_m: float = 0.02  # separation corroborating clearance
     camera_freshness_ms: float = 500.0
     temperature_abort_c: float = 49.0
     saturation_delta_raw: int = 2  # |Δactual| below this while stepping = saturated
@@ -237,19 +239,27 @@ def bilateral_force_consensus(
     except the target finger is a non-target — including thumb_rot:
     even for thumb_thumb, fingertip contact force shows on ``thumb``;
     a thumb_rot rise means something is pressing the thumb base, which
-    is unintended by definition."""
+    is unintended by definition.
+
+    Target-rise detection uses MAGNITUDE: the RH56 force channel is
+    signed along the finger's flexion direction, so a pad-onto-back
+    contact reads POSITIVE on the pressing side but NEGATIVE on the
+    receiving side (measured 2026-07-31: right +212 / left −44 for the
+    same contact).  A signed-rise-only rule reads exactly that contact
+    as ONE_SIDED_FORCE.  The signed deltas are kept on the evidence for
+    agency (who pressed whom)."""
     violations: list[str] = []
     for side, deltas in (("left", left_delta), ("right", right_delta)):
         for finger, delta in deltas.items():
             if finger == target_finger:
                 continue
-            if delta >= abort_threshold:
-                violations.append(f"{side}.{finger} +{delta:.0f} raw (non-target)")
+            if abs(delta) >= abort_threshold:
+                violations.append(f"{side}.{finger} {delta:+.0f} raw (non-target)")
     left_target = left_delta.get(target_finger, 0.0)
     right_target = right_delta.get(target_finger, 0.0)
     return BilateralForceEvidence(
-        left_target_rise=left_target >= contact_threshold,
-        right_target_rise=right_target >= contact_threshold,
+        left_target_rise=abs(left_target) >= contact_threshold,
+        right_target_rise=abs(right_target) >= contact_threshold,
         non_target_violations=tuple(violations),
         left_target_delta=left_target,
         right_target_delta=right_target,
@@ -278,6 +288,7 @@ class _EpisodeTrack:
     last_angles: dict[str, int] = field(default_factory=dict)
     saturated_frames: int = 0
     dwell_actual_ms: float | None = None
+    clear_wait_cycles: int = 0
 
 
 class ContactSupervisor:
@@ -367,12 +378,14 @@ class ContactSupervisor:
         return out
 
     def _update_peaks(self, deltas: dict[str, dict[str, float]]) -> None:
+        # peak = the SIGNED value with the largest magnitude (contact
+        # evidence; sign carries who-pressed-whom)
         for side, key in (("left", "left_force_peak"), ("right", "right_force_peak")):
             value = deltas.get(side, {}).get(self.target_finger)
             if value is None:
                 continue
             current = getattr(self.track, key)
-            if current is None or value > current:
+            if current is None or abs(value) > abs(current):
                 setattr(self.track, key, value)
 
     def _update_visual_min(self, obs: SupervisorObservation) -> None:
@@ -584,10 +597,26 @@ class ContactSupervisor:
         return self._approach_step(fine=False)
 
     def _step_fine(self, obs, deltas, consensus) -> SupervisorDecision:
-        if consensus.left_target_rise or consensus.right_target_rise:
+        # CANDIDATE only on a DECISIVE first touch (>= 2x threshold on
+        # either side): a marginal one-sided graze is not worth a
+        # candidate cycle — keep approaching and let the press build
+        # (pilot 15: right −37 receive / left 0 at the first graze; the
+        # behind-hand only feels it as the press builds).  Bilateral
+        # evaluation happens in CANDIDATE; a graze that never builds
+        # dies honestly inside the fine budget as NO_CONTACT.
+        decisive = (abs(consensus.left_target_delta) >= 2 * self.tuning.contact_force_delta_raw) or (
+            abs(consensus.right_target_delta) >= 2 * self.tuning.contact_force_delta_raw
+        )
+        if decisive:
             self.track.contact_candidate_ts = obs.ts_s
             self._transition(CONTACT_CANDIDATE)
-            return SupervisorDecision(kind=DECISION_NONE, note="first target force rise")
+            return SupervisorDecision(
+                kind=DECISION_NONE,
+                note=(
+                    f"decisive first touch (L {consensus.left_target_delta:+.0f} "
+                    f"R {consensus.right_target_delta:+.0f})"
+                ),
+            )
         if self.track.fine_steps >= self.tuning.max_fine_steps:
             return self._enter_recovery(
                 OUTCOME_NO_CONTACT,
@@ -688,19 +717,33 @@ class ContactSupervisor:
         return SupervisorDecision(kind=DECISION_NONE, note="dwelling")
 
     def _step_release(self, obs, deltas, consensus) -> SupervisorDecision:
-        # released = both target forces back near baseline
-        released = (
+        # released = forces back near baseline OR the camera sees clear
+        # physical separation (CLEARANCE_VERIFIED is about separation;
+        # force readings carry pose offsets and hysteresis, so a
+        # separated pair must not be held hostage to a residual force
+        # channel — pilots 16/17)
+        forces_clear = (
             abs(consensus.left_target_delta) <= self.tuning.release_force_epsilon_raw
             and abs(consensus.right_target_delta) <= self.tuning.release_force_epsilon_raw
         )
-        if released:
+        visual = obs.visual
+        visual_clear = (
+            visual is not None
+            and visual.min_distance_m is not None
+            and visual.min_distance_m >= self.tuning.release_visual_clear_m
+        )
+        if forces_clear or visual_clear:
             self._transition(CLEARANCE_VERIFIED)
-            return SupervisorDecision(kind=DECISION_NONE, note="forces returned to baseline")
+            return SupervisorDecision(
+                kind=DECISION_NONE,
+                note=f"clearance: forces_clear={forces_clear} visual_clear={visual_clear}",
+            )
         if self.track.release_steps >= self.tuning.max_release_steps:
             return self._enter_recovery(
                 OUTCOME_RELEASE_FAILED,
                 f"forces still L {consensus.left_target_delta:.0f} "
-                f"R {consensus.right_target_delta:.0f} after "
+                f"R {consensus.right_target_delta:.0f}, visual "
+                f"{None if visual is None else visual.min_distance_m} after "
                 f"{self.tuning.max_release_steps} release steps",
             )
         self.track.release_steps += 1
@@ -745,7 +788,10 @@ class ContactSupervisor:
             return SupervisorDecision(kind=DECISION_NONE, note="verify clearance")
         # VERIFY_CLEAR: hands retreated when target forces near baseline
         # (or unknown — a hand we cannot read is retreated by decree of
-        # the transport guard, and we do not wait forever on forces)
+        # the transport guard, and we do not wait forever on forces).
+        # Bounded wait: hysteresis on this rig decays over seconds, so
+        # the gate gets a cycle budget; exhausting it records the TRUTH
+        # (clearance_unverified) instead of hanging the episode.
         deltas = self._deltas(obs)
         left_delta = deltas["left"].get(self.target_finger, 0.0)
         right_delta = deltas["right"].get(self.target_finger, 0.0)
@@ -757,7 +803,19 @@ class ContactSupervisor:
             obs.left is None or not obs.left.ok or obs.right is None or not obs.right.ok
         )
         if not (forces_clear or transport_down):
-            return SupervisorDecision(kind=DECISION_NONE, note="awaiting force clearance")
+            self.track.clear_wait_cycles += 1
+            if self.track.clear_wait_cycles <= self.tuning.max_clear_wait_cycles:
+                return SupervisorDecision(
+                    kind=DECISION_NONE,
+                    note=(
+                        f"awaiting force clearance (L {left_delta:+.0f} R {right_delta:+.0f}, "
+                        f"cycle {self.track.clear_wait_cycles}/{self.tuning.max_clear_wait_cycles})"
+                    ),
+                )
+            self.track.anomaly_detail += (
+                f" | clearance unverified after {self.track.clear_wait_cycles} cycles "
+                f"(L {left_delta:+.0f} R {right_delta:+.0f})"
+            )
         self._transition(RECORD_FAILURE)
         receipt = self._build_receipt(
             outcome=self.track.anomaly or OUTCOME_TRANSPORT_FAILURE, obs=obs, consensus=None

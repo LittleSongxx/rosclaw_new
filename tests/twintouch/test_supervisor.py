@@ -144,12 +144,12 @@ def test_happy_path_full_cycle_and_receipt():
     ts += 0.1
 
     # first force rise on the left -> candidate
-    left_rising = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 70.0})
+    left_rising = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 130.0})
     sup.step(_obs(ts, left=left_rising, visual=_visual(0.006)))
     assert sup.state == CONTACT_CANDIDATE
     ts += 0.1
     # bilateral rise + visual near -> confirmed
-    both_rising = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 72.0})
+    both_rising = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 132.0})
     decision = sup.step(_obs(ts, left=both_rising, right=both_rising, visual=_visual(0.004)))
     assert sup.state == CONTACT_CONFIRMED
     ts += 0.1
@@ -172,8 +172,8 @@ def test_happy_path_full_cycle_and_receipt():
     assert receipt.contact_confirmed is True
     assert receipt.outcome == "CONTACT_CONFIRMED"
     assert receipt.clearance_verified is True
-    assert receipt.left_force_peak == 72.0
-    assert receipt.right_force_peak == 72.0
+    assert receipt.left_force_peak == 132.0
+    assert receipt.right_force_peak == 132.0
     assert receipt.visual_distance_min_m == 0.004
     assert receipt.contact_latency_ms is not None
     assert 300.0 <= receipt.dwell_ms < 400.0
@@ -194,12 +194,12 @@ def test_motion_response_can_substitute_visual_near():
         sup.step(_obs(ts, left=_hand(angle=left_angle), visual=_visual(None)))
         ts += 0.1
     assert sup.track.saturated_frames >= 2
-    left_rising = _hand(angle=left_angle, force={**dict.fromkeys(JOINTS, 0.0), "index": 70.0})
+    left_rising = _hand(angle=left_angle, force={**dict.fromkeys(JOINTS, 0.0), "index": 130.0})
     sup.step(_obs(ts, left=left_rising, visual=_visual(None)))
     ts += 0.1
     both = {
         "left": left_rising,
-        "right": _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 71.0}),
+        "right": _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 131.0}),
     }
     sup.step(_obs(ts, left=both["left"], right=both["right"], visual=_visual(None)))
     assert sup.state == CONTACT_CONFIRMED
@@ -239,7 +239,7 @@ def test_thumb_rot_force_aborts_as_unintended():
 def test_early_contact_during_coarse():
     sup = _supervisor()
     ts = _drive_to_coarse(sup)
-    rising = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 75.0})
+    rising = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 130.0})
     sup.step(_obs(ts, left=rising))
     assert sup.track.anomaly == "EARLY_CONTACT"
 
@@ -260,7 +260,7 @@ def test_one_sided_force_budget():
     ts = _drive_to_coarse(sup)
     sup.step(_obs(ts, visual=_visual(0.015)))  # -> FINE
     ts += 0.1
-    left_rising = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 70.0})
+    left_rising = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 130.0})
     sup.step(_obs(ts, left=left_rising, visual=_visual(0.006)))  # -> CANDIDATE
     ts += 0.1
     for _ in range(5):  # one_sided_frame_budget
@@ -274,11 +274,11 @@ def test_visual_force_conflict():
     ts = _drive_to_coarse(sup)
     sup.step(_obs(ts, visual=_visual(0.015)))  # -> FINE
     ts += 0.1
-    left_rising = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 70.0})
+    left_rising = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 130.0})
     sup.step(_obs(ts, left=left_rising, visual=_visual(0.04)))  # -> CANDIDATE
     ts += 0.1
     # forces rise but camera says 6cm apart — conflict
-    both_rising = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 71.0})
+    both_rising = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 131.0})
     sup.step(_obs(ts, left=both_rising, right=both_rising, visual=_visual(0.06)))
     assert sup.track.anomaly == "VISUAL_FORCE_CONFLICT"
 
@@ -331,7 +331,7 @@ def test_release_failed_when_forces_stay_high():
     # drive to confirmed quickly
     sup.step(_obs(ts, visual=_visual(0.015)))
     ts += 0.1
-    both = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 70.0})
+    both = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 130.0})
     sup.step(_obs(ts, left=both, right=both, visual=_visual(0.005)))
     ts += 0.1
     sup.step(_obs(ts, left=both, right=both, visual=_visual(0.004)))
@@ -347,6 +347,26 @@ def test_release_failed_when_forces_stay_high():
         ts += 0.1
     sup.step(_obs(ts, left=both, right=both, visual=_visual(0.004)))
     assert sup.track.anomaly == "RELEASE_FAILED"
+
+
+def test_signed_direction_contact_is_bilateral_evidence():
+    """Regression for the 2026-07-31 geometry probes: right +296
+    pressing, left −98 receiving — the same contact.  The RH56 force
+    channel is signed along flexion; a magnitude-blind rule reads this
+    as ONE_SIDED_FORCE."""
+    from rosclaw.twintouch.supervisor import bilateral_force_consensus
+
+    evidence = bilateral_force_consensus(
+        target_finger="index",
+        left_delta={"index": -98.0, "thumb": 3.0},
+        right_delta={"index": 296.0, "thumb": -5.0},
+        contact_threshold=60.0,
+        abort_threshold=60.0,
+    )
+    assert evidence.left_target_rise is True
+    assert evidence.right_target_rise is True
+    assert evidence.left_target_delta == -98.0  # sign kept for agency
+    assert evidence.non_target_violations == ()
 
 
 def test_recovery_spine_shape_and_failure_receipt():
