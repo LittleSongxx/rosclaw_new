@@ -591,7 +591,14 @@ def _min_pairwise_distance(a: np.ndarray, b: np.ndarray, *, max_points: int = 80
 #
 # (middle/ring/little pairs: per-hand tuck policy unverified — same
 # priors as index until their own pilots measure them)
-PRESENT_RAW = {"index": 550, "middle": 550, "ring": 550, "little": 550, "thumb": 500}  # 550: active side only needs ~500-560 to meet — below the left OK zone (left index <500 meets its own tucked thumb, campaign active_passive UNINTENDED)
+PRESENT_RAW = {"index": 550, "middle": 550, "ring": 550, "little": 550, "thumb": 500}  # default present
+# Per-hand present for the PASSIVE side (measured receive sensitivity):
+# LEFT at 550 is a receive dead zone (−8..−12) but reads −47..−55 at
+# 600-650 (pad-up) and −40 at 450; RIGHT reads −40..−43 fine at 550.
+HAND_PRESENT_RAW = {
+    "left": {"index": 600, "middle": 600, "ring": 600, "little": 600, "thumb": 500},
+    "right": {"index": 550, "middle": 550, "ring": 550, "little": 550, "thumb": 500},
+}
 PREAPPROACH_RAW = {"index": 680, "middle": 680, "ring": 680, "little": 680, "thumb": 550}
 MUTUAL_PRESENT_RAW = {"index": 850, "middle": 850, "ring": 850, "little": 850, "thumb": 500}  # 850/850: arcs never cross; the bulge approach happens INSIDE the supervisor (campaign mutual_0: staging through ~700 bulge grazed right ring +252)
 # v4 §3.2 其余手指保持收回或安全位 — analysis after three watchdog
@@ -640,7 +647,7 @@ def _present_targets(pair_id: str, mode: str) -> dict[str, dict[str, int]]:
     active, passive = (
         ("left", "right") if mode == "active_passive" else ("right", "left")
     )
-    targets[passive][finger] = PRESENT_RAW[finger]
+    targets[passive][finger] = HAND_PRESENT_RAW[passive][finger]
     targets[active][finger] = PREAPPROACH_RAW[finger]
     _shape(passive, targets[passive])
     _shape(active, targets[active])
