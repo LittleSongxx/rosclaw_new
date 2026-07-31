@@ -1243,6 +1243,22 @@ def _run_episode(
             first_rise_targets = {s: dict(t) for s, t in current_targets.items()}
         if supervisor.state == "CONTACT_CONFIRMED" and confirm_targets is None:
             confirm_targets = {s: dict(t) for s, t in current_targets.items()}
+        if supervisor.state == "RELEASE":
+            # per-cycle release diagnostics (the release kept failing
+            # blind — record which condition actually fails)
+            if sum(1 for n in record.notes if n.startswith("release[")) < 10:
+                finger = pair_id.split("_")[0]
+                lv = obs.left.force_act.get(finger) if obs.left else None
+                rv = obs.right.force_act.get(finger) if obs.right else None
+                lb = baselines["left"].medians.get(finger, 0.0)
+                rb = baselines["right"].medians.get(finger, 0.0)
+                record.notes.append(
+                    f"release[{supervisor.track.release_steps}]: "
+                    f"L {None if lv is None else lv - lb:+.0f} "
+                    f"R {None if rv is None else rv - rb:+.0f} "
+                    f"visual {None if obs.visual is None else round(obs.visual.min_distance_m or -1, 4)} "
+                    f"age {None if obs.visual is None else round(obs.visual.age_ms)}ms"
+                )
         if decision.kind in (DECISION_COMMIT, DECISION_FAIL):
             record.outcome = decision.receipt.outcome if decision.receipt else "UNKNOWN"
             record.receipt = decision.receipt.to_record() if decision.receipt else None
