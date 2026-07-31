@@ -380,3 +380,25 @@ def test_safe_reset_retreats_when_hand_not_open():
     assert decision.kind == DECISION_RETREAT
     assert sup.state == RETREAT_BOTH  # posture correction, not an anomaly
     assert sup.track.anomaly is None
+
+
+def test_declared_present_pose_is_accepted_undeclared_is_retreated():
+    """The passive hand presenting its fingertip at 550 raw is a valid
+    start ONLY when declared — an undeclared mid-pose is retreated."""
+    presented = _hand(angle={"index": 550, **{j: 1000 for j in JOINTS if j != "index"}})
+    # undeclared: default expectation is all-open -> retreat
+    sup_plain = _supervisor()
+    decision = sup_plain.step(_obs(0.0, left=presented))
+    assert decision.kind == DECISION_RETREAT
+    # declared: the same pose passes SAFE_RESET
+    sup_declared = ContactSupervisor(
+        interaction_id="int_present",
+        pair_id="index_index",
+        active_mode="active_passive",
+        baselines=_baselines(),
+        reachability_calibrated=True,
+        expected_start={"left": {"index": 550}},
+    )
+    decision = sup_declared.step(_obs(0.0, left=presented))
+    assert sup_declared.state == PAIR_SELECTED
+    assert decision.kind == DECISION_NONE

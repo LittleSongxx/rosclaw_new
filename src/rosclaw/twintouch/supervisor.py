@@ -292,6 +292,7 @@ class ContactSupervisor:
         baselines: dict[str, ForceBaseline],
         reachability_calibrated: bool,
         tuning: SupervisorTuning | None = None,
+        expected_start: dict[str, dict[str, int]] | None = None,
     ) -> None:
         if not is_valid_pair_id(pair_id):
             raise ValueError(f"{pair_id!r} is not a permitted contact pair")
@@ -309,6 +310,25 @@ class ContactSupervisor:
         self.baselines = baselines
         self.reachability_calibrated = reachability_calibrated
         self.tuning = tuning or SupervisorTuning()
+        # Declared starting pose per side (joint -> raw).  Default is
+        # all-open; pair/mode-specific presents (e.g. passive hand
+        # presents its fingertip toward the peer) are DECLARED here so
+        # SAFE_RESET verifies the actual pose against the declaration —
+        # an episode that starts from an undeclared pose is a setup
+        # fault, not a surprise mid-approach.
+        self.expected_start: dict[str, dict[str, int]] = {
+            "left": dict.fromkeys(
+                ("little", "ring", "middle", "index", "thumb", "thumb_rot"), 1000
+            ),
+            "right": dict.fromkeys(
+                ("little", "ring", "middle", "index", "thumb", "thumb_rot"), 1000
+            ),
+        }
+        if expected_start is not None:
+            for side, joints in expected_start.items():
+                if side not in ("left", "right"):
+                    raise ValueError(f"expected_start side {side!r} unknown")
+                self.expected_start[side].update(joints)
         self.state = SAFE_RESET
         self.track = _EpisodeTrack()
         self.history: list[str] = [SAFE_RESET]
@@ -460,22 +480,26 @@ class ContactSupervisor:
     # --------------------------------------------------- state handlers
 
     def _step_safe_reset(self, obs, deltas, consensus) -> SupervisorDecision:
-        # both hands must be near-open with no force anomalies (the
-        # global guard already cleared force; check posture coarsely)
+        # both hands must match the DECLARED start pose (default all-open;
+        # a presented passive finger is declared via expected_start) with
+        # no force anomalies (the global guard already cleared those)
         for side, hand in (("left", obs.left), ("right", obs.right)):
             assert hand is not None
-            for joint in ("little", "ring", "middle", "index"):
-                angle = hand.angle_actual.get(joint)
-                if angle is not None and angle < 700:
-                    # not near open — retreat first, not an anomaly
+            for joint, expected in self.expected_start[side].items():
+                actual = hand.angle_actual.get(joint)
+                if actual is not None and abs(actual - expected) > 150:
+                    # not at the declared start — retreat first, not an anomaly
                     self._transition(RETREAT_BOTH)
                     self.track.anomaly = None
                     return SupervisorDecision(
                         kind=DECISION_RETREAT,
-                        note=f"{side}.{joint} at {angle} not near safe_open — retreat before pair",
+                        note=(
+                            f"{side}.{joint} at {actual} vs declared start {expected} "
+                            "— retreat before pair"
+                        ),
                     )
         self._transition(PAIR_SELECTED)
-        return SupervisorDecision(kind=DECISION_NONE, note="both hands at safe_open")
+        return SupervisorDecision(kind=DECISION_NONE, note="both hands at declared start pose")
 
     def _step_pair_selected(self, obs, deltas, consensus) -> SupervisorDecision:
         if not self.reachability_calibrated:
