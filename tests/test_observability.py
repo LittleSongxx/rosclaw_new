@@ -10,7 +10,7 @@ from rosclaw.core.event_bus import Event, EventBus
 from rosclaw.observability.context import current_trace_context
 from rosclaw.observability.exporters.jsonl import JsonlTraceExporter
 from rosclaw.observability.redaction import TraceRedactor
-from rosclaw.observability.schema import ObservabilityConfig
+from rosclaw.observability.schema import CaptureMode, ObservabilityConfig
 from rosclaw.observability.store import TraceStore
 from rosclaw.observability.tracer import Tracer
 from rosclaw.provider.core.manifest import ProviderManifest
@@ -145,6 +145,30 @@ def test_redactor_removes_secrets_and_large_artifacts():
     assert result["image"]["artifact"] == "array-omitted"
     assert result["blob"]["artifact"] == "inline-binary-omitted"
     assert result["prompt"]["truncated"] is True
+
+
+def test_redactor_strips_think_blocks_in_all_modes():
+    payload = {
+        "output": "<think>private chain of thought</think> visible answer",
+        "unclosed": "prefix <think> trailing private reasoning",
+        "nested": {"text": "a <think>hidden</think> b <think>more</think> c"},
+    }
+    for mode in (CaptureMode.MINIMAL, CaptureMode.STANDARD, CaptureMode.RESEARCH):
+        result = TraceRedactor(mode=mode).redact(payload)
+        serialized = str(result)
+        assert "<think>" not in serialized, mode
+        assert "private chain of thought" not in serialized, mode
+        assert "trailing private reasoning" not in serialized, mode
+        if mode != CaptureMode.MINIMAL:
+            assert "THINK_BLOCK_OMITTED" in serialized, mode
+            assert "visible answer" in result["output"], mode
+
+
+def test_redactor_think_block_hash_is_stable():
+    redactor = TraceRedactor(mode=CaptureMode.RESEARCH)
+    first = redactor.redact({"t": "<think>same thoughts</think>"})
+    second = redactor.redact({"t": "<think>same thoughts</think>"})
+    assert first == second
 
 
 def test_span_tree_event_context_and_nonblocking_export(tmp_path):
