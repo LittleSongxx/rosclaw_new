@@ -923,14 +923,14 @@ class LimoNavigationExecutor(_LimoFixedWorkerExecutor):
 
 
 class LimoToneExecutor(_LimoFixedWorkerExecutor):
-    """Daemon-owned bounded ALSA tone executor."""
+    """Daemon-owned bounded tone executor with microphone loopback verification."""
 
     capability_id = "limo.play_tone"
     schema = "limo.tone.v1"
     operation = "TONE"
     worker_name = "limo_tone_worker.py"
     policy_name = "robot-pack/limo-tone-v1"
-    evidence_level = EvidenceLevel.DRIVER_CONFIRMED
+    evidence_level = EvidenceLevel.TASK_VERIFIED
     argument_keys = frozenset(
         {
             "schema_version",
@@ -960,6 +960,7 @@ class LimoToneExecutor(_LimoFixedWorkerExecutor):
             "kind": "speaker_tone",
             "playback_required": True,
             "mixer_restore_required": True,
+            "microphone_loopback_required": True,
         }:
             return code, "Expected tone effect is not exact"
         return None
@@ -1015,6 +1016,50 @@ class LimoToneExecutor(_LimoFixedWorkerExecutor):
             or not isinstance(result.get("original_output_state"), dict)
         ):
             return "Tone output-gain acknowledgement is missing or invalid"
+        loopback = result.get("acoustic_loopback")
+        if result.get("acoustic_loopback_detected") is not True or not isinstance(loopback, dict):
+            return "Onboard microphone did not observe the requested speaker tone"
+        if (
+            loopback.get("detected") is not True
+            or loopback.get("sensor") != "onboard_usb_microphone"
+            or loopback.get("target_frequency_hz") != action.arguments["frequency_hz"]
+            or loopback.get("audio_retained") is not False
+            or loopback.get("audio_content_returned") is not False
+            or not isinstance(loopback.get("baseline"), dict)
+            or not isinstance(loopback.get("during_playback"), dict)
+            or not isinstance(loopback.get("thresholds"), dict)
+        ):
+            return "Microphone loopback acknowledgement is missing or invalid"
+        try:
+            target_gain_db = float(loopback["target_gain_db"])
+            observed_target_dbfs = float(loopback["during_playback"]["target_dbfs"])
+            observed_prominence_db = float(loopback["during_playback"]["target_prominence_db"])
+            minimum_target_dbfs = float(loopback["thresholds"]["minimum_target_dbfs"])
+            minimum_gain_db = float(loopback["thresholds"]["minimum_gain_db"])
+            minimum_prominence_db = float(loopback["thresholds"]["minimum_prominence_db"])
+        except (KeyError, TypeError, ValueError):
+            return "Microphone loopback metrics are malformed"
+        if not all(
+            math.isfinite(value)
+            for value in (
+                target_gain_db,
+                observed_target_dbfs,
+                observed_prominence_db,
+                minimum_target_dbfs,
+                minimum_gain_db,
+                minimum_prominence_db,
+            )
+        ):
+            return "Microphone loopback metrics are not finite"
+        if (
+            minimum_target_dbfs != -45.0
+            or minimum_gain_db != 10.0
+            or minimum_prominence_db != 8.0
+            or observed_target_dbfs < minimum_target_dbfs
+            or target_gain_db < minimum_gain_db
+            or observed_prominence_db < minimum_prominence_db
+        ):
+            return "Microphone loopback evidence does not satisfy the fixed thresholds"
         return None
 
     def _success_result(
@@ -1022,7 +1067,7 @@ class LimoToneExecutor(_LimoFixedWorkerExecutor):
     ) -> ActionExecutionResult:
         return ActionExecutionResult(
             final_state=ActionState.COMPLETED,
-            evidence_level=EvidenceLevel.DRIVER_CONFIRMED,
+            evidence_level=EvidenceLevel.TASK_VERIFIED,
             policy_decision={
                 "allowed": True,
                 "policy": self.policy_name,
@@ -1047,6 +1092,7 @@ class LimoToneExecutor(_LimoFixedWorkerExecutor):
                 "volume_mapping": result["volume_mapping"],
                 "digital_peak_scale": result["digital_peak_scale"],
                 "reference_output_gain_percent": result["reference_output_gain_percent"],
+                "acoustic_loopback_detected": True,
             },
             observations=[
                 {
@@ -1060,15 +1106,24 @@ class LimoToneExecutor(_LimoFixedWorkerExecutor):
                     "started_wall_time": result["started_wall_time"],
                     "completed_wall_time": result["completed_wall_time"],
                     "human_hearing_confirmed": False,
+                    "acoustic_loopback": result["acoustic_loopback"],
                 }
             ],
             verification_result={
                 "success": True,
                 "predicate": (
-                    "the fixed backend accepted single-stage PCM volume playback and the prior "
-                    "output state was restored"
+                    "the fixed backend accepted single-stage PCM playback, the onboard "
+                    "microphone observed the requested frequency above fixed thresholds, and "
+                    "the prior output state was restored"
                 ),
-                "acoustic_output_independently_observed": False,
+                "acoustic_output_independently_observed": True,
+                "observer": "onboard_usb_microphone",
+                "target_gain_db": result["acoustic_loopback"]["target_gain_db"],
+                "target_dbfs": result["acoustic_loopback"]["during_playback"]["target_dbfs"],
+                "target_prominence_db": result["acoustic_loopback"]["during_playback"][
+                    "target_prominence_db"
+                ],
+                "human_hearing_confirmed": False,
             },
         )
 
