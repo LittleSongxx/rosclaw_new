@@ -265,3 +265,158 @@ class TestScanHubRegistry:
         registries = self._write_hub_registry(tmp_path, asset_dir)
         loader = ProviderLoader(ProviderRegistry())
         assert loader.scan_hub_registry(registries) == []
+
+
+class TestOpenAICompatGaps:
+    """Gap fixes validated on the TY1200 model stack:
+
+    - multimodal content_parts (video_url / image_url) in chat requests
+    - pass-through of mm_processor_kwargs and sampling extras
+    - structured RuntimeAdapterError.kind for router fallback policies
+    - non-JSON responses classified as invalid_response
+    - health matching: exact match authoritative, substring only as hint
+    """
+
+    @pytest.fixture(autouse=True)
+    def cleanup_modules(self):
+        yield
+        sys.modules.pop("aiohttp", None)
+
+    @pytest.mark.asyncio
+    async def test_chat_with_content_parts(self):
+        mock_aiohttp, mock_session = _mock_aiohttp(
+            {"model": "m", "choices": [{"message": {"content": "ok"}}]}
+        )
+        sys.modules["aiohttp"] = mock_aiohttp
+        rt = OpenAICompatRuntime("t", "http://127.0.0.1:8001/v1", model="m")
+        await rt.start()
+        parts = [{"type": "video_url",
+                  "video_url": {"url": "file:///media/abc.mp4"}}]
+        await rt.invoke({"inputs": {"prompt": "describe", "content_parts": parts}})
+        body = mock_session.post.call_args[1]["json"]
+        content = body["messages"][-1]["content"]
+        assert content[0] == parts[0]
+        assert content[-1] == {"type": "text", "text": "describe"}
+        await rt.stop()
+
+    @pytest.mark.asyncio
+    async def test_mm_processor_kwargs_passthrough(self):
+        mock_aiohttp, mock_session = _mock_aiohttp(
+            {"model": "m", "choices": [{"message": {"content": "ok"}}]}
+        )
+        sys.modules["aiohttp"] = mock_aiohttp
+        rt = OpenAICompatRuntime("t", "http://127.0.0.1:8001/v1", model="m")
+        await rt.start()
+        await rt.invoke({"inputs": {
+            "prompt": "x",
+            "mm_processor_kwargs": {"fps": 4},
+            "seed": 7,
+            "repetition_penalty": 1.1,
+        }})
+        body = mock_session.post.call_args[1]["json"]
+        assert body["mm_processor_kwargs"] == {"fps": 4}
+        assert body["seed"] == 7
+        assert body["repetition_penalty"] == 1.1
+        await rt.stop()
+
+    @pytest.mark.asyncio
+    async def test_error_kind_http_error(self):
+        from rosclaw.provider.core.errors import RuntimeAdapterError
+
+        resp_500 = MagicMock()
+        resp_500.status = 500
+        resp_500.json = AsyncMock(return_value={"error": "boom"})
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=resp_500)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_aiohttp, mock_session = _mock_aiohttp({})
+        mock_session.post.side_effect = None
+        mock_session.post.return_value = ctx
+        sys.modules["aiohttp"] = mock_aiohttp
+        rt = OpenAICompatRuntime("t", "http://127.0.0.1:8001/v1",
+                                 model="m", retries=0)
+        await rt.start()
+        with pytest.raises(RuntimeAdapterError) as exc_info:
+            await rt.invoke({"inputs": {"prompt": "hi"}})
+        assert exc_info.value.kind == RuntimeAdapterError.KIND_HTTP_ERROR
+        await rt.stop()
+
+    @pytest.mark.asyncio
+    async def test_error_kind_invalid_response(self):
+        from rosclaw.provider.core.errors import RuntimeAdapterError
+
+        resp_bad = MagicMock()
+        resp_bad.status = 200
+        resp_bad.json = AsyncMock(side_effect=ValueError("not json"))
+        resp_bad.text = AsyncMock(return_value="<html>proxy error</html>")
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=resp_bad)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_aiohttp, mock_session = _mock_aiohttp({})
+        mock_session.post.side_effect = None
+        mock_session.post.return_value = ctx
+        sys.modules["aiohttp"] = mock_aiohttp
+        rt = OpenAICompatRuntime("t", "http://127.0.0.1:8001/v1",
+                                 model="m", retries=0)
+        await rt.start()
+        with pytest.raises(RuntimeAdapterError) as exc_info:
+            await rt.invoke({"inputs": {"prompt": "hi"}})
+        assert exc_info.value.kind == RuntimeAdapterError.KIND_INVALID_RESPONSE
+        await rt.stop()
+
+    @pytest.mark.asyncio
+    async def test_error_kind_timeout(self):
+        import asyncio
+
+        from rosclaw.provider.core.errors import RuntimeAdapterError
+
+        mock_aiohttp, mock_session = _mock_aiohttp({})
+        mock_session.post.side_effect = asyncio.TimeoutError()
+        sys.modules["aiohttp"] = mock_aiohttp
+        rt = OpenAICompatRuntime("t", "http://127.0.0.1:8001/v1",
+                                 model="m", retries=0)
+        await rt.start()
+        with pytest.raises(RuntimeAdapterError) as exc_info:
+            await rt.invoke({"inputs": {"prompt": "hi"}})
+        assert exc_info.value.kind == RuntimeAdapterError.KIND_TIMEOUT
+        await rt.stop()
+
+    @pytest.mark.asyncio
+    async def test_error_kind_unavailable(self):
+        from rosclaw.provider.core.errors import RuntimeAdapterError
+
+        mock_aiohttp, mock_session = _mock_aiohttp({})
+        mock_session.post.side_effect = ConnectionError("refused")
+        sys.modules["aiohttp"] = mock_aiohttp
+        rt = OpenAICompatRuntime("t", "http://127.0.0.1:9/v1",
+                                 model="m", retries=0)
+        await rt.start()
+        with pytest.raises(RuntimeAdapterError) as exc_info:
+            await rt.invoke({"inputs": {"prompt": "hi"}})
+        assert exc_info.value.kind == RuntimeAdapterError.KIND_UNAVAILABLE
+        await rt.stop()
+
+    @pytest.mark.asyncio
+    async def test_health_exact_match_beats_substring(self):
+        # served id "qwen3.5" must NOT satisfy expected model "qwen3"
+        mock_aiohttp, _ = _mock_aiohttp({"data": [{"id": "qwen3.5"}]})
+        sys.modules["aiohttp"] = mock_aiohttp
+        rt = OpenAICompatRuntime("t", "http://127.0.0.1:8000/v1", model="qwen3")
+        await rt.start()
+        detail = await rt.health_detail()
+        assert detail["reachable"] is True
+        assert detail["expected_model_present"] is False
+        assert detail.get("expected_model_present_fuzzy") is True
+        await rt.stop()
+
+    @pytest.mark.asyncio
+    async def test_health_exact_match_hit(self):
+        mock_aiohttp, _ = _mock_aiohttp({"data": [{"id": "qwen3-embedding-0.6b"}]})
+        sys.modules["aiohttp"] = mock_aiohttp
+        rt = OpenAICompatRuntime("t", "http://127.0.0.1:8000/v1",
+                                 model="qwen3-embedding-0.6b")
+        await rt.start()
+        detail = await rt.health_detail()
+        assert detail["expected_model_present"] is True
+        assert "expected_model_present_fuzzy" not in detail
+        await rt.stop()
