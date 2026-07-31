@@ -148,12 +148,15 @@ class OpenAICompatRuntime(RuntimeAdapter):
     @staticmethod
     def _parse_chat_response(raw: dict[str, Any]) -> dict[str, Any]:
         choices = raw.get("choices") or []
-        content = ""
-        finish_reason = None
-        if choices:
-            message = choices[0].get("message") or {}
-            content = message.get("content") or ""
-            finish_reason = choices[0].get("finish_reason")
+        if not choices:
+            # An empty choices array is an invalid upstream response, never a
+            # fabricated empty success (fail closed: invalid_response).
+            raise RuntimeAdapterError(
+                "OpenAI-compatible server returned an empty choices array"
+            )
+        message = choices[0].get("message") or {}
+        content = message.get("content") or ""
+        finish_reason = choices[0].get("finish_reason")
         return {
             "result": content,
             "model": raw.get("model", ""),
@@ -166,7 +169,11 @@ class OpenAICompatRuntime(RuntimeAdapter):
         data = raw.get("data") or []
         vectors = [item.get("embedding") for item in data]
         vectors = [v for v in vectors if v is not None]
-        dimension = len(vectors[0]) if vectors else 0
+        if not vectors:
+            raise RuntimeAdapterError(
+                "OpenAI-compatible server returned no embedding vectors"
+            )
+        dimension = len(vectors[0])
         result: Any = vectors[0] if len(vectors) == 1 else vectors
         return {
             "result": result,
@@ -231,12 +238,12 @@ class OpenAICompatRuntime(RuntimeAdapter):
                                 f"HTTP {resp.status}: {preview}",
                                 provider=self.name,
                                 kind=RuntimeAdapterError.KIND_HTTP_ERROR,
-                            )
+                            ) from None
                         raise RuntimeAdapterError(
                             f"Non-JSON response from {url}: {preview[:120]}",
                             provider=self.name,
                             kind=RuntimeAdapterError.KIND_INVALID_RESPONSE,
-                        )
+                        ) from None
                     if resp.status >= 400:
                         raise RuntimeAdapterError(
                             f"HTTP {resp.status}: {resp_body}",
@@ -246,7 +253,7 @@ class OpenAICompatRuntime(RuntimeAdapter):
                     return resp_body
             except RuntimeAdapterError as e:
                 last_error = e
-            except (asyncio.TimeoutError, TimeoutError):
+            except TimeoutError:
                 last_error = RuntimeAdapterError(
                     f"Timeout calling {url} after {self.timeout_sec}s",
                     provider=self.name,

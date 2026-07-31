@@ -366,12 +366,11 @@ class TestOpenAICompatGaps:
 
     @pytest.mark.asyncio
     async def test_error_kind_timeout(self):
-        import asyncio
 
         from rosclaw.provider.core.errors import RuntimeAdapterError
 
         mock_aiohttp, mock_session = _mock_aiohttp({})
-        mock_session.post.side_effect = asyncio.TimeoutError()
+        mock_session.post.side_effect = TimeoutError()
         sys.modules["aiohttp"] = mock_aiohttp
         rt = OpenAICompatRuntime("t", "http://127.0.0.1:8001/v1",
                                  model="m", retries=0)
@@ -419,4 +418,37 @@ class TestOpenAICompatGaps:
         detail = await rt.health_detail()
         assert detail["expected_model_present"] is True
         assert "expected_model_present_fuzzy" not in detail
+        await rt.stop()
+
+
+class TestInvalidResponses:
+    @pytest.fixture(autouse=True)
+    def cleanup_modules(self):
+        yield
+        sys.modules.pop("aiohttp", None)
+
+    @pytest.mark.asyncio
+    async def test_empty_choices_raises_invalid_response(self):
+        from rosclaw.provider.core.errors import RuntimeAdapterError
+
+        mock_aiohttp, _ = _mock_aiohttp({"choices": [], "model": "m"})
+        sys.modules["aiohttp"] = mock_aiohttp
+        rt = OpenAICompatRuntime("t", "http://127.0.0.1:9/v1", model="m")
+        await rt.start()
+        with pytest.raises(RuntimeAdapterError):
+            await rt.invoke({"inputs": {"prompt": "hi"}})
+        await rt.stop()
+
+    @pytest.mark.asyncio
+    async def test_empty_embedding_data_raises_invalid_response(self):
+        from rosclaw.provider.core.errors import RuntimeAdapterError
+
+        mock_aiohttp, _ = _mock_aiohttp({"data": [], "model": "m"})
+        sys.modules["aiohttp"] = mock_aiohttp
+        rt = OpenAICompatRuntime(
+            "t", "http://127.0.0.1:9/v1", api_kind="embeddings", model="m"
+        )
+        await rt.start()
+        with pytest.raises(RuntimeAdapterError):
+            await rt.invoke({"inputs": {"text": "hi"}})
         await rt.stop()
