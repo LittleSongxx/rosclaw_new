@@ -593,7 +593,7 @@ def _min_pairwise_distance(a: np.ndarray, b: np.ndarray, *, max_points: int = 80
 # priors as index until their own pilots measure them)
 PRESENT_RAW = {"index": 450, "middle": 450, "ring": 450, "little": 450, "thumb": 450}
 PREAPPROACH_RAW = {"index": 680, "middle": 680, "ring": 680, "little": 680, "thumb": 550}
-MUTUAL_PRESENT_RAW = {"index": 720, "middle": 720, "ring": 720, "little": 720, "thumb": 500}
+MUTUAL_PRESENT_RAW = {"index": 850, "middle": 850, "ring": 850, "little": 850, "thumb": 500}  # 850/850: arcs never cross; the bulge approach happens INSIDE the supervisor (campaign mutual_0: staging through ~700 bulge grazed right ring +252)
 # v4 §3.2: 其余手指保持收回或安全位 — non-target contact fingers
 # RETRACT out of the contact zone on BOTH hands (campaign
 # active_passive_0/1 UNINTENDED_CONTACT: the presented hand's open
