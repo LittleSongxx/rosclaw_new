@@ -140,8 +140,16 @@ def test_verifier_strict_detects_missing_envelope_fields():
 
         verifier = PracticeVerifier(tmp)
         normal_report = verifier.verify(practice_id)
-        assert normal_report.passed
+        # The envelope regressions are still reported as warnings, and the
+        # modified events.jsonl is additionally caught by the catalog v2
+        # integrity hash — tampering with the raw event stream is an error
+        # in every mode, not just strict.
+        assert not normal_report.passed
         assert any(i.level == "warning" and "event_id" in i.message for i in normal_report.issues)
+        assert any(
+            i.level == "error" and "sha256 mismatch" in i.message
+            for i in normal_report.issues
+        )
 
         strict_report = verifier.verify(practice_id, strict=True)
         assert not strict_report.passed

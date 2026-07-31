@@ -4371,10 +4371,23 @@ def cmd_provider_health(args: argparse.Namespace) -> int:
 
 
 def cmd_provider_route(args: argparse.Namespace) -> int:
-    """Explain how a capability would route through the built-in provider catalog."""
+    """Explain how a capability would route.
+
+    Operator-installed providers (workspace ``providers/`` dir or Hub
+    registry) take precedence over the built-in provider contract catalog —
+    they are what the runtime will actually dispatch to.
+    """
     capability = args.capability
-    providers = _builtin_provider_contracts()
-    candidates = [provider for provider in providers if capability in provider["capabilities"]]
+    installed = [
+        provider for provider in _discover_installed_providers() if provider.get("capabilities")
+    ]
+    installed_candidates = [
+        provider for provider in installed if capability in provider["capabilities"]
+    ]
+    builtin_candidates = [
+        provider for provider in _builtin_provider_contracts() if capability in provider["capabilities"]
+    ]
+    candidates = installed_candidates + builtin_candidates
 
     if not candidates:
         payload = {
@@ -4382,7 +4395,9 @@ def cmd_provider_route(args: argparse.Namespace) -> int:
             "capability": capability,
             "selected_provider": None,
             "fallbacks": [],
-            "reason": f"No built-in provider declares capability '{capability}'",
+            "reason": (
+                f"No installed or built-in provider declares capability '{capability}'"
+            ),
         }
         if args.json:
             print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -4392,26 +4407,26 @@ def cmd_provider_route(args: argparse.Namespace) -> int:
 
     selected = candidates[0]
     fallbacks = [provider["name"] for provider in candidates[1:3]]
+    selected_safety = selected.get("safety") or {}
+    origin = "installed provider manifest" if selected in installed_candidates else "built-in provider contract"
     payload = {
         "ok": True,
         "capability": capability,
         "selected_provider": selected["name"],
         "selected_type": selected["type"],
         "fallbacks": fallbacks,
-        "reason": (
-            f"{selected['name']} declares capability '{capability}' in the built-in "
-            "provider contract"
-        ),
+        "reason": f"{selected['name']} declares capability '{capability}' in the {origin}",
         "score": 1.0,
-        "executable": selected["safety"]["executable"],
-        "requires_guard": selected["safety"]["requires_guard"],
-        "requires_human_gate": selected["safety"]["requires_human_gate"],
+        "executable": selected_safety.get("executable", False),
+        "requires_guard": selected_safety.get("requires_guard", False),
+        "requires_human_gate": selected_safety.get("requires_human_gate", False),
         "dry_run_safe": True,
         "candidates": [
             {
                 "name": provider["name"],
                 "type": provider["type"],
                 "capabilities": provider["capabilities"],
+                "origin": "installed" if provider in installed_candidates else "builtin",
             }
             for provider in candidates
         ],
@@ -4499,14 +4514,55 @@ def cmd_provider_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _discover_installed_providers() -> list:
+    """Load provider.yaml-based providers from the workspace and the Hub registry.
+
+    Scans ``$ROSCLAW_HOME/providers`` (non-Hub path) and
+    ``$ROSCLAW_HOME/runtime/registries/providers.json`` (written by
+    ``rosclaw hub install``) and returns manifest-shaped dicts for display.
+    """
+    discovered: list = []
+    try:
+        from rosclaw.provider.core.registry import ProviderRegistry
+        from rosclaw.provider.loader import ProviderLoader
+
+        home = get_rosclaw_home()
+        registry = ProviderRegistry()
+        loader = ProviderLoader(registry)
+        loader.scan_directory(home / "providers")
+        loader.scan_hub_registry()
+        for name in registry.list_providers():
+            manifest = registry.get_manifest(name) if hasattr(registry, "get_manifest") else None
+            if manifest is None:
+                discovered.append({"name": name, "type": "", "description": "", "capabilities": []})
+                continue
+            discovered.append(
+                {
+                    "name": manifest.name,
+                    "type": manifest.type,
+                    "description": manifest.description,
+                    "capabilities": list(getattr(manifest, "capabilities", []) or []),
+                    "safety": {
+                        "executable": bool(getattr(manifest.safety, "executable", False)),
+                        "requires_guard": bool(getattr(manifest.safety, "requires_guard", False)),
+                        "requires_human_gate": False,
+                    },
+                }
+            )
+    except Exception:
+        pass
+    return discovered
+
+
 def cmd_provider_list(_args: argparse.Namespace) -> int:
     """List all registered providers."""
     providers, _ = _auto_register_builtins()
+    installed = _discover_installed_providers()
 
     print("=" * 60)
     print("ROSClaw Provider Registry")
     print("=" * 60)
-    if providers:
+    if providers or installed:
         print(f"{'Name':<20} {'Type':<15} {'Status':<10} {'Description'}")
         print("-" * 60)
         for p in providers:
@@ -4517,6 +4573,10 @@ def cmd_provider_list(_args: argparse.Namespace) -> int:
                 p.get("description", "") if isinstance(p, dict) else getattr(p, "description", "")
             )
             print(f"{name:<20} {ptype:<15} {status:<10} {desc}")
+        for p in installed:
+            print(
+                f"{p['name']:<20} {p['type']:<15} {'installed':<10} {p['description']}"
+            )
     else:
         print("No providers registered.")
         print("Builtin providers: llm, vlm, vla, vln, world, skill, critic, embedding")

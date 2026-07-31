@@ -146,6 +146,60 @@ class ProviderLoader:
             return GenericProvider
 
     # ------------------------------------------------------------------
+    # Hub-installed providers
+    # ------------------------------------------------------------------
+    def scan_hub_registry(self, registries_dir: str | Path | None = None) -> list[str]:
+        """Load hub-installed provider assets into the registry.
+
+        Reads ``runtime/registries/providers.json`` (written by
+        ``rosclaw hub install``) and loads the ``provider.yaml`` of every
+        installed provider asset from its managed asset directory. This
+        closes the loop between Hub installation and the runtime Provider
+        registry: after ``hub install`` of a provider asset, the provider
+        becomes routable without any manual file copying.
+
+        Returns list of successfully loaded provider names.
+        """
+        if registries_dir is None:
+            from rosclaw.firstboot.workspace import resolve_home
+
+            registries_dir = resolve_home(None) / "runtime" / "registries"
+        registry_path = Path(registries_dir) / "providers.json"
+        if not registry_path.exists():
+            return []
+
+        import json
+
+        try:
+            data = json.loads(registry_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("Failed to read hub provider registry %s: %s", registry_path, e)
+            return []
+
+        assets = data.get("assets") or {}
+        if isinstance(assets, list):
+            assets = {a.get("ref", str(a)): a for a in assets}
+
+        loaded: list[str] = []
+        for ref, entry in assets.items():
+            asset_dir = entry.get("asset_dir")
+            if not asset_dir:
+                logger.warning("Hub provider entry %s has no asset_dir; skipped", ref)
+                continue
+            yaml_path = Path(asset_dir) / "provider.yaml"
+            if not yaml_path.exists():
+                logger.info(
+                    "Hub provider asset %s has no provider.yaml at %s; skipped",
+                    ref,
+                    yaml_path,
+                )
+                continue
+            name = self._load_from_yaml(yaml_path)
+            if name:
+                loaded.append(name)
+        return loaded
+
+    # ------------------------------------------------------------------
     # Introspection
     # ------------------------------------------------------------------
     def list_loaded(self) -> dict[str, str]:

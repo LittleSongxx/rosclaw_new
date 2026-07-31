@@ -22,6 +22,25 @@ _PRIVATE_REASONING_KEY = re.compile(
     r"hidden[_-]?reasoning)$",
     re.IGNORECASE,
 )
+# Raw model "think" blocks must never be persisted, in any capture mode:
+# traces flow into exports, SeekDB, Wiki and Memory. The block is replaced by
+# a stable hash reference so researchers can correlate without storing CoT.
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+_THINK_UNCLOSED = re.compile(r"<think>.*$", re.IGNORECASE | re.DOTALL)
+
+
+def _strip_think_blocks(text: str) -> str:
+    """Replace <think>…</think> regions with hash-only references."""
+
+    def _ref(match: re.Match[str]) -> str:
+        inner = match.group(0)
+        digest = hashlib.sha256(inner.encode("utf-8")).hexdigest()
+        return f"[THINK_BLOCK_OMITTED sha256:{digest}]"
+
+    stripped = _THINK_BLOCK.sub(_ref, text)
+    if "<think>" in stripped.lower():
+        stripped = _THINK_UNCLOSED.sub(_ref, stripped)
+    return stripped
 
 
 class TraceRedactor:
@@ -56,7 +75,7 @@ class TraceRedactor:
         if value is None or isinstance(value, (bool, int, float)):
             return value
         if isinstance(value, str):
-            safe = _BEARER_VALUE.sub("Bearer [REDACTED]", value)
+            safe = _strip_think_blocks(_BEARER_VALUE.sub("Bearer [REDACTED]", value))
             if len(safe) <= self.max_text_chars:
                 return safe
             return {

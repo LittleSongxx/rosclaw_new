@@ -205,9 +205,13 @@ class ParquetExporter:
         if not records:
             return pa.Table.from_pydict({})
 
-        keys: set[str] = set()
+        keys: list[str] = []
+        seen: set[str] = set()
         for record in records:
-            keys.update(record.keys())
+            for key in record:
+                if key not in seen:
+                    seen.add(key)
+                    keys.append(key)
 
         normalized: list[dict[str, Any]] = []
         for record in records:

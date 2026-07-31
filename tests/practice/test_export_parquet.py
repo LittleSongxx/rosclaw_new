@@ -110,3 +110,18 @@ def test_parquet_export_cli(capsys, monkeypatch, tmp_path):
         assert rc == 0
         captured = capsys.readouterr()
         assert "Exported Parquet" in captured.out
+
+
+def test_records_to_table_column_order_is_deterministic():
+    """Column order must not depend on PYTHONHASHSEED (export reproducibility)."""
+    from rosclaw.practice.exporters.parquet_exporter import ParquetExporter
+
+    records = [
+        {"b": 1, "a": 2, "z": {"nested": True}},
+        {"a": 3, "b": 4, "z": None},
+    ]
+    first = ParquetExporter._records_to_table([dict(r) for r in records])
+    second = ParquetExporter._records_to_table([dict(r) for r in records])
+    assert first.column_names == second.column_names
+    assert first.column_names == ["b", "a", "z"]  # first-appearance order
+    assert first.equals(second)

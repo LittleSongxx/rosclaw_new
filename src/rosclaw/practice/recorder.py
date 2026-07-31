@@ -498,12 +498,66 @@ class PracticeRecorder(RuntimeConsumer):
             sources=sources,
         )
 
+        # Backfill catalog v2 artifact records for the core session files
+        # (events.jsonl / episode.json / manifest.yaml / timeline.jsonl) now
+        # that every file is final.  ``practice verify --strict`` relies on
+        # these hashes to detect post-hoc tampering of the raw event stream
+        # and episode metadata.
+        self._backfill_core_artifact_records()
+
         logger.info("PracticeRecorder stopped session: %s (%s)", self._session.practice_id, outcome)
 
         self._session = None
         if self._catalog is not None:
             self._catalog.close()
             self._catalog = None
+
+    def _backfill_core_artifact_records(self) -> None:
+        """Register hashes of the finalized core session files in catalog v2.
+
+        Mirrors the coordinator's backfill so ``practice verify --strict``
+        detects post-hoc modification of events.jsonl, episode.json and the
+        session manifest regardless of which record path produced them.
+        A failure here never aborts finalize (the robot must not be blocked);
+        it is logged so the discrepancy is visible to operators.
+        """
+        if self._session is None or self._catalog is None:
+            return
+        practice_id = self._session.practice_id
+        session_id = self._session.session_id or practice_id
+        episode_id = self._session.episode_id or session_id
+        entries = [
+            (f"{practice_id}_events_jsonl", "events_jsonl",
+             self.layout.events_jsonl_path(practice_id), "jsonl.event.stream"),
+            (f"{practice_id}_timeline_jsonl", "timeline_jsonl",
+             self.layout.timeline_jsonl_path(practice_id), "jsonl.timeline"),
+            (f"{practice_id}_episode_json", "episode_json",
+             self.layout.episode_json_path(practice_id), "json.episode_summary"),
+            (f"{practice_id}_manifest", "manifest",
+             self.layout.manifest_path(practice_id), "yaml.snapshot"),
+        ]
+        for artifact_id, artifact_type, path, schema_name in entries:
+            try:
+                if not path.exists():
+                    continue
+                stat = path.stat()
+                self._catalog.insert_artifact_v2(
+                    {
+                        "artifact_id": artifact_id,
+                        "session_id": session_id,
+                        "episode_id": episode_id,
+                        "artifact_type": artifact_type,
+                        "path": str(path),
+                        "sha256": ArtifactStore._compute_sha256(path),
+                        "size_bytes": stat.st_size,
+                        "schema_name": schema_name,
+                        "created_at": _utc_now_iso(),
+                        "metadata": {"practice_id": practice_id,
+                                     "artifact_type": artifact_type},
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Failed to backfill artifact %s: %s", artifact_id, exc)
 
     def _write_v2_episode_summary(
         self,

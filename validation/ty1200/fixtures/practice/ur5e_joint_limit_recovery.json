@@ -1,0 +1,140 @@
+{
+  "practice_id": "practice_ur5e_joint_limit_recovery",
+  "session_id": "session_ur5e_joint_limit_recovery",
+  "episode_id": "episode_ur5e_joint_limit_recovery",
+  "robot_id": "universal_robots_ur5e",
+  "robot_type": "ur5e",
+  "body_id": "body_ur5e",
+  "task_id": "task_ur5e_reach",
+  "task_name": "ur5e reach with joint-limit recovery",
+  "skill_id": "skill_ur5e_reach",
+  "policy_id": "policy_ur5e_reach_v1",
+  "trace_id": "trace_ur5e_joint_limit_recovery",
+  "outcome": "SUCCESS",
+  "reward": 1.0,
+  "failure_labels": ["joint_limit"],
+  "sources": {
+    "runtime": true,
+    "sandbox": true,
+    "human": false
+  },
+  "events": [
+    {
+      "schema_version": "practice.event.v1",
+      "event_id": "event_ur5e_001",
+      "event_type": "runtime_execution_started",
+      "source": "runtime",
+      "trace_id": "trace_ur5e_joint_limit_recovery",
+      "timestamp_ns": 1785499200000000000,
+      "timestamp_utc": "2026-07-31T12:00:00Z",
+      "payload": {"phase": "started", "attempt": 1}
+    },
+    {
+      "schema_version": "practice.event.v1",
+      "event_id": "event_ur5e_002",
+      "event_type": "physical_feedback_event",
+      "source": "sandbox",
+      "trace_id": "trace_ur5e_joint_limit_recovery",
+      "timestamp_ns": 1785499200100000000,
+      "timestamp_utc": "2026-07-31T12:00:00.100Z",
+      "payload": {
+        "frame_id": "ur5e_frame_001",
+        "body_id": "body_ur5e",
+        "target": {"joint_0": 12.5, "joint_1": 0.0},
+        "note": "joint_0 target 12.5 rad far beyond actuator ctrlrange"
+      }
+    },
+    {
+      "schema_version": "practice.event.v1",
+      "event_id": "event_ur5e_003",
+      "event_type": "failure_event",
+      "source": "sandbox",
+      "trace_id": "trace_ur5e_joint_limit_recovery",
+      "timestamp_ns": 1785499200200000000,
+      "timestamp_utc": "2026-07-31T12:00:00.200Z",
+      "payload": {
+        "failure_id": "fail_ur5e_joint_limit_1",
+        "failure_type": "joint_limit",
+        "severity": "high",
+        "source": "sandbox",
+        "description": "StaticActionGate BLOCK: joint_0 target 12.5 rad exceeds actuator ctrlrange (joint_0_limit violation)",
+        "related_action_id": "action_ur5e_attempt_1"
+      }
+    },
+    {
+      "schema_version": "practice.event.v1",
+      "event_id": "event_ur5e_004",
+      "event_type": "how_intervention_event",
+      "source": "runtime",
+      "trace_id": "trace_ur5e_joint_limit_recovery",
+      "timestamp_ns": 1785499200300000000,
+      "timestamp_utc": "2026-07-31T12:00:00.300Z",
+      "payload": {
+        "intervention_id": "how_ur5e_001",
+        "failure_id": "fail_ur5e_joint_limit_1",
+        "episode_id": "episode_ur5e_joint_limit_recovery",
+        "description": "Clamp joint targets into the actuator ctrlrange reported by the effective body model, then re-preview through the sandbox before retry",
+        "recovery_action": "clamp_joint_targets",
+        "parameters": {"joint_0": 3.14}
+      }
+    },
+    {
+      "schema_version": "practice.event.v1",
+      "event_id": "event_ur5e_005",
+      "event_type": "candidate_policy_event",
+      "source": "runtime",
+      "trace_id": "trace_ur5e_joint_limit_recovery",
+      "timestamp_ns": 1785499200400000000,
+      "timestamp_utc": "2026-07-31T12:00:00.400Z",
+      "payload": {
+        "candidate_id": "candidate_ur5e_clamp",
+        "policy_id": "policy_ur5e_reach_v1",
+        "skill_id": "skill_ur5e_reach",
+        "policy_type": "parameter_clamp",
+        "description": "Always clamp joint-space targets to the effective body actuator range before dispatch"
+      }
+    },
+    {
+      "schema_version": "practice.event.v1",
+      "event_id": "event_ur5e_006",
+      "event_type": "promotion_result_event",
+      "source": "sandbox",
+      "trace_id": "trace_ur5e_joint_limit_recovery",
+      "timestamp_ns": 1785499200500000000,
+      "timestamp_utc": "2026-07-31T12:00:00.500Z",
+      "payload": {
+        "promotion_id": "promotion_ur5e_001",
+        "candidate_id": "candidate_ur5e_clamp",
+        "policy_id": "policy_ur5e_reach_v1",
+        "passed": true,
+        "gate_name": "sandbox_preview",
+        "evidence": "StaticActionGate ALLOW after clamping joint_0 to 3.14 rad"
+      }
+    },
+    {
+      "schema_version": "practice.event.v1",
+      "event_id": "event_ur5e_007",
+      "event_type": "physical_feedback_event",
+      "source": "sandbox",
+      "trace_id": "trace_ur5e_joint_limit_recovery",
+      "timestamp_ns": 1785499200600000000,
+      "timestamp_utc": "2026-07-31T12:00:00.600Z",
+      "payload": {
+        "frame_id": "ur5e_frame_002",
+        "body_id": "body_ur5e",
+        "target": {"joint_0": 3.14, "joint_1": 0.0},
+        "note": "attempt 2 with clamped joint target: sandbox preview ALLOW"
+      }
+    },
+    {
+      "schema_version": "practice.event.v1",
+      "event_id": "event_ur5e_008",
+      "event_type": "runtime_execution_completed",
+      "source": "runtime",
+      "trace_id": "trace_ur5e_joint_limit_recovery",
+      "timestamp_ns": 1785499200700000000,
+      "timestamp_utc": "2026-07-31T12:00:00.700Z",
+      "payload": {"phase": "completed", "outcome": "SUCCESS", "attempt": 2}
+    }
+  ]
+}
