@@ -1406,15 +1406,17 @@ class Runtime(LifecycleMixin):
 
     def _load_external_providers(self) -> None:
         """Scan providers_dir for provider.yaml files and load them."""
-        if not self.config.providers_dir:
-            return
         try:
             from rosclaw.provider.loader import ProviderLoader
 
             loader = ProviderLoader(self._provider_registry)
-            loaded = loader.scan_directory(self.config.providers_dir)
-            if loaded:
-                logger.info(f"Loaded external providers: {loaded}")
+            if self.config.providers_dir:
+                loaded = loader.scan_directory(self.config.providers_dir)
+                if loaded:
+                    logger.info(f"Loaded external providers: {loaded}")
+            hub_loaded = loader.scan_hub_registry()
+            if hub_loaded:
+                logger.info(f"Loaded hub-installed providers: {hub_loaded}")
         except Exception as e:
             logger.info(f"Failed to load external providers: {e}")
 

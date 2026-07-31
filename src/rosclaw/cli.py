@@ -4499,14 +4499,49 @@ def cmd_provider_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _discover_installed_providers() -> list:
+    """Load provider.yaml-based providers from the workspace and the Hub registry.
+
+    Scans ``$ROSCLAW_HOME/providers`` (non-Hub path) and
+    ``$ROSCLAW_HOME/runtime/registries/providers.json`` (written by
+    ``rosclaw hub install``) and returns manifest-shaped dicts for display.
+    """
+    discovered: list = []
+    try:
+        from rosclaw.provider.core.registry import ProviderRegistry
+        from rosclaw.provider.loader import ProviderLoader
+
+        home = get_rosclaw_home()
+        registry = ProviderRegistry()
+        loader = ProviderLoader(registry)
+        loader.scan_directory(home / "providers")
+        loader.scan_hub_registry()
+        for name in registry.list_providers():
+            manifest = registry.get_manifest(name) if hasattr(registry, "get_manifest") else None
+            if manifest is None:
+                discovered.append({"name": name, "type": "", "description": ""})
+                continue
+            discovered.append(
+                {
+                    "name": manifest.name,
+                    "type": manifest.type,
+                    "description": manifest.description,
+                }
+            )
+    except Exception:
+        pass
+    return discovered
+
+
 def cmd_provider_list(_args: argparse.Namespace) -> int:
     """List all registered providers."""
     providers, _ = _auto_register_builtins()
+    installed = _discover_installed_providers()
 
     print("=" * 60)
     print("ROSClaw Provider Registry")
     print("=" * 60)
-    if providers:
+    if providers or installed:
         print(f"{'Name':<20} {'Type':<15} {'Status':<10} {'Description'}")
         print("-" * 60)
         for p in providers:
@@ -4517,6 +4552,10 @@ def cmd_provider_list(_args: argparse.Namespace) -> int:
                 p.get("description", "") if isinstance(p, dict) else getattr(p, "description", "")
             )
             print(f"{name:<20} {ptype:<15} {status:<10} {desc}")
+        for p in installed:
+            print(
+                f"{p['name']:<20} {p['type']:<15} {'installed':<10} {p['description']}"
+            )
     else:
         print("No providers registered.")
         print("Builtin providers: llm, vlm, vla, vln, world, skill, critic, embedding")
