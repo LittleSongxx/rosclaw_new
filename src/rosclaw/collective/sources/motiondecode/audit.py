@@ -110,6 +110,59 @@ class MotionDecodeAuditIssue:
 
 
 @dataclass(frozen=True)
+class TerminalResetDetection:
+    """One high-speed reset to the initial pose near a clip tail."""
+
+    transition_frame: int
+    reset_frame: int
+    root_match_error_m: float
+    quaternion_match_error: float
+    joint_match_error_rad: float
+    root_speed_m_s: float
+    joint_speed_rad_s: float
+    schema_version: str = "rosclaw.collective.motiondecode_terminal_reset.v1"
+
+    def __post_init__(self) -> None:
+        if self.transition_frame < 0 or self.reset_frame != self.transition_frame + 1:
+            raise ValueError("terminal reset frame indices are inconsistent")
+        values = (
+            self.root_match_error_m,
+            self.quaternion_match_error,
+            self.joint_match_error_rad,
+            self.root_speed_m_s,
+            self.joint_speed_rad_s,
+        )
+        if any(not math.isfinite(value) or value < 0.0 for value in values):
+            raise ValueError("terminal reset measurements must be finite and non-negative")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "transition_frame": self.transition_frame,
+            "reset_frame": self.reset_frame,
+            "root_match_error_m": self.root_match_error_m,
+            "quaternion_match_error": self.quaternion_match_error,
+            "joint_match_error_rad": self.joint_match_error_rad,
+            "root_speed_m_s": self.root_speed_m_s,
+            "joint_speed_rad_s": self.joint_speed_rad_s,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> TerminalResetDetection:
+        if value.get("schema_version") != cls.schema_version:
+            raise ValueError("terminal reset schema version is unsupported")
+        return cls(
+            transition_frame=int(value["transition_frame"]),
+            reset_frame=int(value["reset_frame"]),
+            root_match_error_m=float(value["root_match_error_m"]),
+            quaternion_match_error=float(value["quaternion_match_error"]),
+            joint_match_error_rad=float(value["joint_match_error_rad"]),
+            root_speed_m_s=float(value["root_speed_m_s"]),
+            joint_speed_rad_s=float(value["joint_speed_rad_s"]),
+        )
+
+
+@dataclass(frozen=True)
 class MotionDecodeClipAudit:
     relative_path: str
     source_file_hash: str
@@ -270,7 +323,7 @@ def audit_motiondecode_snapshot(
 ) -> MotionDecodeIngestReport:
     """Replay source hashes, parse registered clips and stop at Q1."""
 
-    limits, target_body_hash, model_hash = _load_joint_limits(target_model_path)
+    limits, target_body_hash, model_hash = load_g1_joint_contract(target_model_path)
     verified = verify_registered_files(registration, dataset_root)
     selected_thresholds = thresholds or MotionDecodeAuditThresholds()
     clips: list[MotionDecodeClipAudit] = []
@@ -332,7 +385,7 @@ def _audit_record(
             target_body_hash=target_body_hash,
             sample_rate_hz=sample_rate_hz,
         )
-        issues = _kinematic_issues(episode, joint_limits, thresholds)
+        issues = audit_canonical_episode(episode, joint_limits, thresholds)
     except (OSError, ValueError, csv.Error) as exc:
         return MotionDecodeClipAudit(
             relative_path=record.relative_path,
@@ -356,11 +409,13 @@ def _audit_record(
     )
 
 
-def _kinematic_issues(
+def audit_canonical_episode(
     episode: CanonicalMotionEpisode,
     joint_limits: dict[str, tuple[float, float]],
     thresholds: MotionDecodeAuditThresholds,
 ) -> list[MotionDecodeAuditIssue]:
+    """Apply the reusable Q1 kinematic checks to a canonical episode."""
+
     issues: list[MotionDecodeAuditIssue] = []
     norms = np.linalg.norm(episode.root_quaternion, axis=1)
     quaternion_error = np.abs(norms - 1.0)
@@ -465,34 +520,17 @@ def _loop_closure_issues(
 ) -> list[MotionDecodeAuditIssue]:
     """Find an appended reset-to-start frame near a non-cyclic clip tail."""
 
-    transition_count = episode.time.shape[0] - 1
-    start = max(0, transition_count - thresholds.loop_closure_search_frames)
-    root_speeds: list[float] = []
-    joint_speeds: list[float] = []
-    for index in range(start, transition_count):
-        post = index + 1
-        if (
-            float(np.linalg.norm(episode.root_position[post] - episode.root_position[0]))
-            > thresholds.terminal_root_match_m
-            or float(np.linalg.norm(episode.root_quaternion[post] - episode.root_quaternion[0]))
-            > thresholds.terminal_quaternion_match
-            or float(np.max(np.abs(episode.joint_position[post] - episode.joint_position[0])))
-            > thresholds.terminal_joint_match_rad
-        ):
-            continue
-        step_seconds = float(episode.time[post] - episode.time[index])
-        root_speed = float(
-            np.linalg.norm(episode.root_position[post] - episode.root_position[index])
-            / step_seconds
-        )
-        joint_speed = float(
-            np.max(np.abs(episode.joint_position[post] - episode.joint_position[index]))
-            / step_seconds
-        )
-        if root_speed > thresholds.loop_closure_root_speed_error_m_s:
-            root_speeds.append(root_speed)
-        if joint_speed > thresholds.loop_closure_joint_speed_error_rad_s:
-            joint_speeds.append(joint_speed)
+    detections = detect_terminal_resets(episode, thresholds)
+    root_speeds = [
+        item.root_speed_m_s
+        for item in detections
+        if item.root_speed_m_s > thresholds.loop_closure_root_speed_error_m_s
+    ]
+    joint_speeds = [
+        item.joint_speed_rad_s
+        for item in detections
+        if item.joint_speed_rad_s > thresholds.loop_closure_joint_speed_error_rad_s
+    ]
     issues: list[MotionDecodeAuditIssue] = []
     if root_speeds:
         issues.append(
@@ -515,6 +553,58 @@ def _loop_closure_issues(
             )
         )
     return issues
+
+
+def detect_terminal_resets(
+    episode: CanonicalMotionEpisode,
+    thresholds: MotionDecodeAuditThresholds,
+) -> tuple[TerminalResetDetection, ...]:
+    """Return bounded reset-to-initial discontinuities near the clip tail."""
+
+    transition_count = episode.time.shape[0] - 1
+    start = max(0, transition_count - thresholds.loop_closure_search_frames)
+    detections: list[TerminalResetDetection] = []
+    for index in range(start, transition_count):
+        post = index + 1
+        root_match = float(np.linalg.norm(episode.root_position[post] - episode.root_position[0]))
+        quaternion_match = float(
+            np.linalg.norm(episode.root_quaternion[post] - episode.root_quaternion[0])
+        )
+        joint_match = float(
+            np.max(np.abs(episode.joint_position[post] - episode.joint_position[0]))
+        )
+        if (
+            root_match > thresholds.terminal_root_match_m
+            or quaternion_match > thresholds.terminal_quaternion_match
+            or joint_match > thresholds.terminal_joint_match_rad
+        ):
+            continue
+        step_seconds = float(episode.time[post] - episode.time[index])
+        root_speed = float(
+            np.linalg.norm(episode.root_position[post] - episode.root_position[index])
+            / step_seconds
+        )
+        joint_speed = float(
+            np.max(np.abs(episode.joint_position[post] - episode.joint_position[index]))
+            / step_seconds
+        )
+        if (
+            root_speed <= thresholds.loop_closure_root_speed_error_m_s
+            and joint_speed <= thresholds.loop_closure_joint_speed_error_rad_s
+        ):
+            continue
+        detections.append(
+            TerminalResetDetection(
+                transition_frame=index,
+                reset_frame=post,
+                root_match_error_m=root_match,
+                quaternion_match_error=quaternion_match,
+                joint_match_error_rad=joint_match,
+                root_speed_m_s=root_speed,
+                joint_speed_rad_s=joint_speed,
+            )
+        )
+    return tuple(detections)
 
 
 def _build_capsule(
@@ -585,7 +675,7 @@ def _build_capsule(
     )
 
 
-def _load_joint_limits(
+def load_g1_joint_contract(
     model_path: Path,
 ) -> tuple[dict[str, tuple[float, float]], str, str]:
     resolved = model_path.expanduser().resolve(strict=True)
@@ -629,5 +719,9 @@ __all__ = [
     "MotionDecodeClipAudit",
     "MotionDecodeIngestReport",
     "MotionQualificationLevel",
+    "TerminalResetDetection",
+    "audit_canonical_episode",
     "audit_motiondecode_snapshot",
+    "detect_terminal_resets",
+    "load_g1_joint_contract",
 ]

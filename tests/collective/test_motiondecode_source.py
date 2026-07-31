@@ -25,6 +25,12 @@ from rosclaw.collective.sources.motiondecode.manifest import (
     verify_registered_files,
 )
 from rosclaw.collective.sources.motiondecode.parser import parse_motion_csv
+from rosclaw.collective.sources.motiondecode.repair import (
+    MotionRepairDisposition,
+    SegmentationRepairManifest,
+    repair_motiondecode_snapshot,
+    replay_segmentation_repair,
+)
 from rosclaw.collective.sources.motiondecode.taxonomy import (
     MOTIONDECODE_INDEX_COLUMNS,
     MotionFamily,
@@ -138,6 +144,17 @@ def _register(root: Path) -> MotionDecodeRegistration:
         families=(MotionFamily.FOOTBALL,),
         limit=40,
     )
+
+
+def _append_terminal_reset(sample: Path) -> None:
+    with sample.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.reader(handle))
+    rows[2][0] = "0.04"
+    rows[3][0] = "0.08"
+    rows[4][0] = "0.12"
+    rows[-1] = rows[1]
+    with sample.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
 
 
 def test_empty_current_license_is_pending_and_cannot_be_permitted(tmp_path: Path) -> None:
@@ -343,14 +360,7 @@ def test_joint_limit_violation_is_q0_and_yields_no_capsule(tmp_path: Path) -> No
 
 def test_terminal_loop_closure_is_detected_as_a_discontinuity(tmp_path: Path) -> None:
     sample = _dataset(tmp_path)
-    with sample.open("r", encoding="utf-8", newline="") as handle:
-        rows = list(csv.reader(handle))
-    rows[2][0] = "0.04"
-    rows[3][0] = "0.08"
-    rows[4][0] = "0.12"
-    rows[-1] = rows[1]
-    with sample.open("w", encoding="utf-8", newline="") as handle:
-        csv.writer(handle).writerows(rows)
+    _append_terminal_reset(sample)
     registration = _register(tmp_path)
 
     report = audit_motiondecode_snapshot(
@@ -365,6 +375,262 @@ def test_terminal_loop_closure_is_detected_as_a_discontinuity(tmp_path: Path) ->
     assert "NO_KINEMATICALLY_VALID_CLIPS" in report.training_blockers
     assert report.segmentation_repair_candidate_count == 1
     assert report.issue_clip_counts["ROOT_LOOP_CLOSURE_DISCONTINUITY"] == 1
+
+
+def test_terminal_reset_repair_is_content_addressed_and_reaches_q1(
+    tmp_path: Path,
+) -> None:
+    sample = _dataset(tmp_path)
+    _append_terminal_reset(sample)
+    registration = _register(tmp_path)
+    before = audit_motiondecode_snapshot(
+        registration,
+        tmp_path,
+        target_model_path=G1_MODEL,
+    )
+
+    report = repair_motiondecode_snapshot(
+        registration,
+        tmp_path,
+        target_model_path=G1_MODEL,
+        expected_ingest_report_hash=before.report_hash,
+    )
+
+    assert report.repaired_q1_count == 1
+    assert report.q1_after_count == 1
+    assert report.training_eligible is False
+    assert "LICENSE_NOT_PERMITTED" in report.training_blockers
+    result = report.results[0]
+    assert result.disposition is MotionRepairDisposition.REPAIRED_Q1
+    assert result.repair_manifest is not None
+    assert result.repair_manifest.original_frame_count == 5
+    assert result.repair_manifest.retained_frame_count == 4
+    assert result.repair_manifest.removed_frame_count == 1
+    assert result.after_audit is not None
+    assert result.after_audit.kinematic_valid is True
+    assert result.after_audit.episode_summary is not None
+    assert (
+        result.after_audit.episode_summary["derivation_manifest_hash"]
+        == result.repair_manifest.manifest_hash
+    )
+    persisted = report.to_dict()
+    assert persisted["raw_motion_persisted"] is False
+    assert persisted["eligibility"]["mujoco_qualification_candidate"] is True
+    assert persisted["eligibility"]["mujoco_qualification_authorized"] is False
+    assert persisted["eligibility"]["motion_tracker_training"] is False
+
+    replayed_manifest = SegmentationRepairManifest.from_dict(result.repair_manifest.to_dict())
+    replayed_episode = replay_segmentation_repair(
+        registration,
+        tmp_path,
+        target_model_path=G1_MODEL,
+        manifest=replayed_manifest,
+    )
+    assert replayed_manifest.manifest_hash == result.repair_manifest.manifest_hash
+    assert replayed_episode.time.shape == (4,)
+    assert replayed_episode.joint_position.flags.writeable is False
+    assert replayed_episode.derivation_manifest_hash == replayed_manifest.manifest_hash
+    embedded = result.repair_manifest.to_dict()
+    embedded["raw_motion_embedded"] = True
+    with pytest.raises(ValueError, match="cannot embed raw motion"):
+        SegmentationRepairManifest.from_dict(embedded)
+
+
+def test_ambiguous_terminal_resets_are_not_automatically_trimmed(
+    tmp_path: Path,
+) -> None:
+    sample = _dataset(tmp_path)
+    with sample.open("r", encoding="utf-8", newline="") as handle:
+        rows = list(csv.reader(handle))
+    header = rows[0]
+    initial = rows[1]
+    sequence: list[list[str]] = []
+    for root_x in (0.0, 0.06, 0.12, 0.0, 0.06, 0.12, 0.0):
+        row = initial.copy()
+        row[0] = str(root_x)
+        sequence.append(row)
+    with sample.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows([header, *sequence])
+    registration = _register(tmp_path)
+    before = audit_motiondecode_snapshot(
+        registration,
+        tmp_path,
+        target_model_path=G1_MODEL,
+    )
+
+    report = repair_motiondecode_snapshot(
+        registration,
+        tmp_path,
+        target_model_path=G1_MODEL,
+        expected_ingest_report_hash=before.report_hash,
+    )
+
+    assert report.repaired_q1_count == 0
+    assert report.rejected_count == 1
+    assert report.results[0].disposition is MotionRepairDisposition.REJECTED
+    assert report.results[0].reason_codes == ("AMBIGUOUS_TERMINAL_RESETS",)
+    assert report.results[0].repair_manifest is None
+
+
+def test_repair_replays_the_exact_ingest_commitment(tmp_path: Path) -> None:
+    sample = _dataset(tmp_path)
+    _append_terminal_reset(sample)
+    registration = _register(tmp_path)
+
+    with pytest.raises(ValueError, match="ingest report hash"):
+        repair_motiondecode_snapshot(
+            registration,
+            tmp_path,
+            target_model_path=G1_MODEL,
+            expected_ingest_report_hash="sha256:" + "0" * 64,
+        )
+
+
+def test_non_segmentation_error_blocks_terminal_trim(tmp_path: Path) -> None:
+    sample = _dataset(tmp_path, joint_value=99.0)
+    _append_terminal_reset(sample)
+    registration = _register(tmp_path)
+    before = audit_motiondecode_snapshot(
+        registration,
+        tmp_path,
+        target_model_path=G1_MODEL,
+    )
+
+    report = repair_motiondecode_snapshot(
+        registration,
+        tmp_path,
+        target_model_path=G1_MODEL,
+        expected_ingest_report_hash=before.report_hash,
+    )
+
+    assert report.repaired_q1_count == 0
+    assert report.results[0].reason_codes == ("UNREPAIRABLE_JOINT_LIMIT_ERROR",)
+
+
+def test_cli_terminal_repair_persists_only_audit_evidence(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sample = _dataset(tmp_path / "dataset")
+    _append_terminal_reset(sample)
+    registration = _register(tmp_path / "dataset")
+    before = audit_motiondecode_snapshot(
+        registration,
+        tmp_path / "dataset",
+        target_model_path=G1_MODEL,
+    )
+    registration_path = tmp_path / "registration.json"
+    ingest_path = tmp_path / "ingest.json"
+    repair_path = tmp_path / "repair.json"
+    registration_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "rosclaw.collective.motiondecode_registration_artifact.v1",
+                "registration": registration.to_dict(),
+                "registration_hash": registration.registration_hash,
+            }
+        ),
+        encoding="utf-8",
+    )
+    ingest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "rosclaw.collective.motiondecode_ingest_artifact.v1",
+                "report": before.to_dict(),
+                "report_hash": before.report_hash,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        dispatch_collective_argv(
+            [
+                "collective",
+                "repair",
+                "motiondecode",
+                "--registration",
+                str(registration_path),
+                "--ingest-report",
+                str(ingest_path),
+                "--dataset-root",
+                str(tmp_path / "dataset"),
+                "--target-model",
+                str(G1_MODEL),
+                "--output",
+                str(repair_path),
+                "--source-checkout",
+                str(ROOT),
+            ]
+        )
+        == 0
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["repaired_q1_count"] == 1
+    assert receipt["dry_run_only"] is True
+    assert receipt["raw_motion_persisted"] is False
+    assert receipt["training_eligible"] is False
+    artifact = json.loads(repair_path.read_text(encoding="utf-8"))
+    assert artifact["report_hash"] == receipt["report_hash"]
+    assert artifact["report"]["results"][0]["repair_manifest"]["raw_motion_embedded"] is False
+
+
+def test_cli_rejects_tampered_ingest_commitment(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sample = _dataset(tmp_path / "dataset")
+    _append_terminal_reset(sample)
+    registration = _register(tmp_path / "dataset")
+    before = audit_motiondecode_snapshot(
+        registration,
+        tmp_path / "dataset",
+        target_model_path=G1_MODEL,
+    )
+    registration_path = tmp_path / "registration.json"
+    ingest_path = tmp_path / "ingest.json"
+    registration_path.write_text(
+        json.dumps(
+            {
+                "registration": registration.to_dict(),
+                "registration_hash": registration.registration_hash,
+            }
+        ),
+        encoding="utf-8",
+    )
+    ingest_path.write_text(
+        json.dumps(
+            {
+                "report": before.to_dict(),
+                "report_hash": "sha256:" + "0" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        dispatch_collective_argv(
+            [
+                "collective",
+                "repair",
+                "motiondecode",
+                "--registration",
+                str(registration_path),
+                "--ingest-report",
+                str(ingest_path),
+                "--dataset-root",
+                str(tmp_path / "dataset"),
+                "--target-model",
+                str(G1_MODEL),
+                "--output",
+                str(tmp_path / "repair.json"),
+                "--source-checkout",
+                str(ROOT),
+            ]
+        )
+        == 2
+    )
+    error = json.loads(capsys.readouterr().err)
+    assert error["training_eligible"] is False
+    assert "does not replay" in error["error"]
 
 
 def test_cli_registration_inspection_and_ingest_are_replayable(
