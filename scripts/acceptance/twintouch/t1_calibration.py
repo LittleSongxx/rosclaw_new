@@ -591,7 +591,7 @@ def _min_pairwise_distance(a: np.ndarray, b: np.ndarray, *, max_points: int = 80
 #
 # (middle/ring/little pairs: per-hand tuck policy unverified — same
 # priors as index until their own pilots measure them)
-PRESENT_RAW = {"index": 450, "middle": 450, "ring": 450, "little": 450, "thumb": 450}
+PRESENT_RAW = {"index": 550, "middle": 550, "ring": 550, "little": 550, "thumb": 500}  # 550: active side only needs ~500-560 to meet — below the left OK zone (left index <500 meets its own tucked thumb, campaign active_passive UNINTENDED)
 PREAPPROACH_RAW = {"index": 680, "middle": 680, "ring": 680, "little": 680, "thumb": 550}
 MUTUAL_PRESENT_RAW = {"index": 850, "middle": 850, "ring": 850, "little": 850, "thumb": 500}  # 850/850: arcs never cross; the bulge approach happens INSIDE the supervisor (campaign mutual_0: staging through ~700 bulge grazed right ring +252)
 # v4 §3.2 其余手指保持收回或安全位 — analysis after three watchdog
