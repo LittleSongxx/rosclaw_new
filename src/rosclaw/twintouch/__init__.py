@@ -88,6 +88,19 @@ from rosclaw.twintouch.receipt import (
     OUTCOME_WRONG_FINGER_CONTACT,
     InteractionReceipt,
 )
+from rosclaw.twintouch.supervisor import (
+    BilateralForceEvidence,
+    ContactSupervisor,
+    ForceBaseline,
+    HandObservation,
+    SupervisorDecision,
+    SupervisorObservation,
+    SupervisorTuning,
+    bilateral_force_consensus,
+)
+from rosclaw.twintouch.supervisor import (
+    VisualObservation as SupervisorVisualObservation,
+)
 
 __all__ = [
     "CANONICAL_MARQUEE_PAIRS",
@@ -152,6 +165,15 @@ __all__ = [
     "TwinTouchPhysicalLayout",
     "is_valid_pair_id",
     "pair_by_id",
+    "BilateralForceEvidence",
+    "ContactSupervisor",
+    "ForceBaseline",
+    "HandObservation",
+    "SupervisorDecision",
+    "SupervisorObservation",
+    "SupervisorTuning",
+    "SupervisorVisualObservation",
+    "bilateral_force_consensus",
     "bimanual_effect_gate",
     "evaluate_effect",
     "validate_candidate_changes",
