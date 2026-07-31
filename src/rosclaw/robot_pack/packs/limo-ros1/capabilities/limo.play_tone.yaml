@@ -20,7 +20,7 @@ input:
       type: string
   required: [frequency_hz, duration_sec, volume_percent, body_snapshot_hash]
 output:
-  required: [device, frame_count, mixer_restored, receipt]
+  required: [device, frame_count, volume_mapping, digital_peak_scale, mixer_restored, acoustic_loopback, acoustic_loopback_detected, receipt]
 safety:
   class: actuation
   actuation: guarded
@@ -32,9 +32,14 @@ execution:
   worker: worker/limo_tone_worker.py
   operation: PLAY_TONE
 evidence:
-  minimum: DRIVER_CONFIRMED
+  minimum: TASK_VERIFIED
   predicates:
     - alsa-frames-accepted
-    - mixer-state-restored
+    - single-stage-pcm-volume
+    - onboard-microphone-target-frequency-observed
+    - target-frequency-gain-above-baseline
+    - target-frequency-prominence-above-adjacent-bands
+    - output-state-restored
   limitations:
-    - acoustic-output-not-independently-observed
+    - human-hearing-not-confirmed
+    - onboard-microphone-cannot-exclude-electronic-crosstalk

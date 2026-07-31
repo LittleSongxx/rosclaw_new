@@ -107,6 +107,13 @@ sudo -u rosclaw-hw rosclaw daemon arm \
   --reason "operator preflight and controller deadman verified" --json
 ```
 
+For MCP clients that support form elicitation, accepting the exact REAL action
+also performs this arm step just in time when the current daemon generation is
+still `DISARMED`. The accepted form, action-intent hash, arm event, and
+single-use Permit remain separately audited, but the operator does not need to
+run a second CLI command or handle a `permit_id`. Declining the form or changing
+the action intent never arms the daemon.
+
 Arming is not a Permit and does not bypass per-action authorization. Disarm,
 Session loss, Action Lease expiry, Adapter generation change, and daemon close
 all request a coordinated safety stop. A controller-side deadman and physical

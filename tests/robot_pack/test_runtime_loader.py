@@ -206,6 +206,7 @@ def _limo_tone_action(instance, **argument_overrides) -> ActionEnvelope:
             "kind": "speaker_tone",
             "playback_required": True,
             "mixer_restore_required": True,
+            "microphone_loopback_required": True,
         },
         **argument_overrides,
     }
@@ -226,10 +227,76 @@ def _limo_tone_action(instance, **argument_overrides) -> ActionEnvelope:
             scopes=["limo.play_tone"],
         ),
         verification_policy=VerificationPolicy(
-            required_evidence=EvidenceLevel.DRIVER_CONFIRMED,
+            required_evidence=EvidenceLevel.TASK_VERIFIED,
             timeout_sec=10.0,
         ),
     )
+
+
+def _limo_tone_loopback_payload() -> dict[str, object]:
+    return {
+        "detected": True,
+        "sensor": "onboard_usb_microphone",
+        "capture_device": "plughw:2,0",
+        "target_frequency_hz": 660,
+        "target_gain_db": 24.0,
+        "thresholds": {
+            "minimum_target_dbfs": -45.0,
+            "minimum_gain_db": 10.0,
+            "minimum_prominence_db": 8.0,
+        },
+        "baseline": {"target_dbfs": -54.0},
+        "during_playback": {
+            "target_dbfs": -30.0,
+            "target_prominence_db": 18.0,
+        },
+        "audio_retained": False,
+        "audio_content_returned": False,
+    }
+
+
+def _limo_navigation_worker_payload(
+    action: ActionEnvelope, *, movement_expected: bool = True, motion_observed: bool = True
+) -> dict[str, object]:
+    return {
+        "protocol": "rosclaw.limo.worker.v1",
+        "ok": True,
+        "accepted": True,
+        "action_id": action.action_id,
+        "operation": "NAVIGATE_TO_POSE",
+        "action_server": "/move_base",
+        "terminal_state": 3,
+        "terminal_text": "Goal reached.",
+        "dispatched_wall_time": 10.0,
+        "completed_wall_time": 20.0,
+        "observed_final_pose": {"frame_id": "map", "x": 0.39, "y": 0.01, "yaw": 0.02},
+        "position_error_m": 0.014,
+        "yaw_error_rad": 0.02,
+        "stopped_odometry": {"linear_speed_mps": 0.0, "angular_speed_radps": 0.0},
+        "preflight": {
+            "chassis_error_code": 0,
+            "map_to_odom": {"translation": [0, 0, 0], "rotation": [0, 0, 0, 1]},
+            "map_to_base": {"translation": [0, 0, 0], "rotation": [0, 0, 0, 1]},
+            "initial_goal_error": {"position_m": 0.4, "yaw_rad": 0.0},
+            "active_goal_tolerance": {"xy_m": 0.2, "yaw_rad": 0.15},
+            "goal_already_satisfied": not movement_expected,
+        },
+        "map_to_base_after": {
+            "translation": [0.39, 0.01, 0],
+            "rotation": [0, 0, 0.01, 1],
+        },
+        "motion_evidence": {
+            "movement_expected": movement_expected,
+            "motion_observed": motion_observed,
+            "odom_translation_m": 0.39 if motion_observed else 0.0,
+            "odom_rotation_rad": 0.02 if motion_observed else 0.0,
+            "map_translation_m": 0.39 if motion_observed else 0.0,
+            "map_rotation_rad": 0.02 if motion_observed else 0.0,
+            "translation_threshold_m": 0.02,
+            "rotation_threshold_rad": 0.03,
+            "physical_motion_independently_observed": False,
+        },
+    }
 
 
 def test_limo_executor_returns_task_verified_receipt(tmp_path, monkeypatch) -> None:
@@ -307,31 +374,7 @@ def test_limo_shadow_executor_validates_without_worker_dispatch(tmp_path, monkey
 def test_limo_navigation_executor_returns_task_verified_receipt(tmp_path, monkeypatch) -> None:
     instance, source = _limo_instance(tmp_path)
     action = _limo_navigation_action(instance)
-    payload = {
-        "protocol": "rosclaw.limo.worker.v1",
-        "ok": True,
-        "accepted": True,
-        "action_id": action.action_id,
-        "operation": "NAVIGATE_TO_POSE",
-        "action_server": "/move_base",
-        "terminal_state": 3,
-        "terminal_text": "Goal reached.",
-        "dispatched_wall_time": 10.0,
-        "completed_wall_time": 20.0,
-        "observed_final_pose": {"frame_id": "map", "x": 0.39, "y": 0.01, "yaw": 0.02},
-        "position_error_m": 0.014,
-        "yaw_error_rad": 0.02,
-        "stopped_odometry": {"linear_speed_mps": 0.0, "angular_speed_radps": 0.0},
-        "preflight": {
-            "chassis_error_code": 0,
-            "map_to_odom": {"translation": [0, 0, 0], "rotation": [0, 0, 0, 1]},
-            "map_to_base": {"translation": [0, 0, 0], "rotation": [0, 0, 0, 1]},
-        },
-        "map_to_base_after": {
-            "translation": [0.39, 0.01, 0],
-            "rotation": [0, 0, 0.01, 1],
-        },
-    }
+    payload = _limo_navigation_worker_payload(action)
 
     def fake_run(command, **kwargs):
         assert command[0] == "/usr/bin/python2"
@@ -345,10 +388,51 @@ def test_limo_navigation_executor_returns_task_verified_receipt(tmp_path, monkey
     assert result.final_state is ActionState.COMPLETED
     assert result.evidence_level is EvidenceLevel.TASK_VERIFIED
     assert result.dispatch_result["terminal_state"] == 3
+    assert result.dispatch_result["motion_observed"] is True
     assert result.verification_result["success"] is True
 
 
-def test_limo_tone_executor_returns_driver_confirmed_receipt(tmp_path, monkeypatch) -> None:
+def test_limo_navigation_executor_rejects_success_without_expected_motion(
+    tmp_path, monkeypatch
+) -> None:
+    instance, source = _limo_instance(tmp_path)
+    action = _limo_navigation_action(instance)
+    payload = _limo_navigation_worker_payload(action, motion_observed=False)
+    monkeypatch.setattr(
+        "rosclaw.robot_pack.runtime_loader.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=__import__("json").dumps(payload), stderr=""
+        ),
+    )
+
+    result = LimoNavigationExecutor(instance, adapter_source=source)(action)
+
+    assert result.final_state is ActionState.FAILED
+    assert result.errors[0]["code"] == "LIMO_NAVIGATION_VERIFICATION_FAILED"
+    assert "movement was not observed" in result.errors[0]["message"]
+
+
+def test_limo_navigation_executor_reports_goal_already_satisfied(tmp_path, monkeypatch) -> None:
+    instance, source = _limo_instance(tmp_path)
+    action = _limo_navigation_action(instance)
+    payload = _limo_navigation_worker_payload(
+        action, movement_expected=False, motion_observed=False
+    )
+    monkeypatch.setattr(
+        "rosclaw.robot_pack.runtime_loader.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=__import__("json").dumps(payload), stderr=""
+        ),
+    )
+
+    result = LimoNavigationExecutor(instance, adapter_source=source)(action)
+
+    assert result.final_state is ActionState.COMPLETED
+    assert result.dispatch_result["movement_expected"] is False
+    assert result.observations[0]["kind"] == "navigation_goal_already_satisfied"
+
+
+def test_limo_tone_executor_returns_microphone_verified_receipt(tmp_path, monkeypatch) -> None:
     instance, source = _limo_instance(tmp_path)
     action = _limo_tone_action(instance)
     payload = {
@@ -357,15 +441,22 @@ def test_limo_tone_executor_returns_driver_confirmed_receipt(tmp_path, monkeypat
         "accepted": True,
         "action_id": action.action_id,
         "operation": "PLAY_TONE",
-        "device": "plughw:2,0",
+        "device": "pulse:alsa_output.usb-0c76_USB_PnP_Audio_Device-00.analog-stereo",
+        "playback_backend": "pulseaudio",
         "frequency_hz": 660,
         "duration_sec": 0.6,
         "volume_percent": 18,
         "sample_rate_hz": 16000,
         "frame_count": 9600,
+        "volume_mapping": "pcm_linear_percent",
+        "digital_peak_scale": 0.162,
+        "reference_output_gain_percent": 100,
+        "original_output_state": {"backend": "pulseaudio", "unmuted": True},
         "started_wall_time": 10.0,
         "completed_wall_time": 10.6,
         "mixer_restored": True,
+        "acoustic_loopback": _limo_tone_loopback_payload(),
+        "acoustic_loopback_detected": True,
     }
 
     monkeypatch.setattr(
@@ -377,9 +468,54 @@ def test_limo_tone_executor_returns_driver_confirmed_receipt(tmp_path, monkeypat
     result = LimoToneExecutor(instance, adapter_source=source)(action)
 
     assert result.final_state is ActionState.COMPLETED
-    assert result.evidence_level is EvidenceLevel.DRIVER_CONFIRMED
+    assert result.evidence_level is EvidenceLevel.TASK_VERIFIED
+    assert result.driver_ack["playback_backend"] == "pulseaudio"
     assert result.driver_ack["mixer_restored"] is True
-    assert result.verification_result["acoustic_output_independently_observed"] is False
+    assert result.verification_result["acoustic_output_independently_observed"] is True
+    assert result.verification_result["target_gain_db"] == 24.0
+
+
+def test_limo_tone_executor_fails_without_microphone_loopback(tmp_path, monkeypatch) -> None:
+    instance, source = _limo_instance(tmp_path)
+    action = _limo_tone_action(instance)
+    payload = {
+        "protocol": "rosclaw.limo.worker.v1",
+        "ok": True,
+        "accepted": True,
+        "action_id": action.action_id,
+        "operation": "PLAY_TONE",
+        "device": "plughw:2,0",
+        "playback_backend": "alsa",
+        "frequency_hz": 660,
+        "duration_sec": 0.6,
+        "volume_percent": 18,
+        "sample_rate_hz": 16000,
+        "frame_count": 9600,
+        "volume_mapping": "pcm_linear_percent",
+        "digital_peak_scale": 0.162,
+        "reference_output_gain_percent": 100,
+        "original_output_state": {"backend": "alsa", "volume_percent": 0},
+        "started_wall_time": 10.0,
+        "completed_wall_time": 10.6,
+        "mixer_restored": True,
+        "acoustic_loopback": {
+            **_limo_tone_loopback_payload(),
+            "detected": False,
+        },
+        "acoustic_loopback_detected": False,
+    }
+    monkeypatch.setattr(
+        "rosclaw.robot_pack.runtime_loader.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=__import__("json").dumps(payload), stderr=""
+        ),
+    )
+
+    result = LimoToneExecutor(instance, adapter_source=source)(action)
+
+    assert result.final_state is ActionState.FAILED
+    assert result.errors[0]["code"] == "LIMO_TONE_VERIFICATION_FAILED"
+    assert "did not observe" in result.errors[0]["message"]
 
 
 @pytest.mark.parametrize(
@@ -450,11 +586,11 @@ def test_daemon_loader_registers_limo_initial_pose_executor(tmp_path) -> None:
             server_name="limo-ros-mcp",
             manifest_id="limo-ros-mcp",
             name="limo-ros-mcp",
-            version="0.8.3",
+            version="0.8.8",
             installed_at="2026-07-30T00:00:00Z",
             artifact_type="test",
             server_dir=str(home / "mcp"),
-            extra={"repo_commit": "757b5c4e1a8bf229efe34ecacdb4293d6da1e6ea"},
+            extra={"repo_commit": "c9b4a061e86d9ece34582733a7b1fbb9556ff69a"},
         )
     )
     configure_robot_instance(
@@ -472,7 +608,7 @@ def test_daemon_loader_registers_limo_initial_pose_executor(tmp_path) -> None:
     status = load_daemon_robot_pack(runtime, robot_id="limo", home=home)
 
     assert status is not None
-    assert status["pack_ref"].endswith("limo-ros1@0.1.6")
+    assert status["pack_ref"].endswith("limo-ros1@0.1.10")
     assert status["registered_executors"] == [
         "limo.set_initial_pose:SHADOW",
         "limo.set_initial_pose:REAL",
@@ -508,11 +644,11 @@ def test_signed_limo_pack_runs_tone_through_daemon_permit_and_receipt(
             server_name="limo-ros-mcp",
             manifest_id="limo-ros-mcp",
             name="limo-ros-mcp",
-            version="0.8.3",
+            version="0.8.8",
             installed_at="2026-07-31T00:00:00Z",
             artifact_type="test",
             server_dir=str(adapter_source),
-            extra={"repo_commit": "757b5c4e1a8bf229efe34ecacdb4293d6da1e6ea"},
+            extra={"repo_commit": "c9b4a061e86d9ece34582733a7b1fbb9556ff69a"},
         )
     )
     instance = configure_robot_instance(
@@ -533,14 +669,21 @@ def test_signed_limo_pack_runs_tone_through_daemon_permit_and_receipt(
         "action_id": action.action_id,
         "operation": "PLAY_TONE",
         "device": "plughw:2,0",
+        "playback_backend": "alsa",
         "frequency_hz": 660,
         "duration_sec": 0.6,
         "volume_percent": 18,
         "sample_rate_hz": 16000,
         "frame_count": 9600,
+        "volume_mapping": "pcm_linear_percent",
+        "digital_peak_scale": 0.162,
+        "reference_output_gain_percent": 100,
+        "original_output_state": {"backend": "alsa", "volume_percent": 0},
         "started_wall_time": 10.0,
         "completed_wall_time": 10.6,
         "mixer_restored": True,
+        "acoustic_loopback": _limo_tone_loopback_payload(),
+        "acoustic_loopback_detected": True,
     }
     monkeypatch.setattr(
         "rosclaw.robot_pack.runtime_loader.subprocess.run",
@@ -597,10 +740,10 @@ def test_signed_limo_pack_runs_tone_through_daemon_permit_and_receipt(
 
     receipt = status["receipt"]
     assert receipt["final_state"] == "COMPLETED", receipt.get("errors")
-    assert receipt["evidence_level"] == "DRIVER_CONFIRMED"
+    assert receipt["evidence_level"] == "TASK_VERIFIED"
     assert receipt["dispatch_result"]["operation"] == "PLAY_TONE"
     assert receipt["driver_ack"]["mixer_restored"] is True
-    assert receipt["verification_result"]["acoustic_output_independently_observed"] is False
+    assert receipt["verification_result"]["acoustic_output_independently_observed"] is True
 
 
 def test_daemon_loader_registers_only_real_read_only_executor(installed_pack) -> None:

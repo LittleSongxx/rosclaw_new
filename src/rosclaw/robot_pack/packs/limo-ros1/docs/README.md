@@ -2,7 +2,7 @@
 
 This Pack binds the `limo` e-URDF Body to the independently versioned
 `ros-claw/limo-ros-mcp` adapter at commit
-`757b5c4e1a8bf229efe34ecacdb4293d6da1e6ea` (MCP 0.8.3).
+`c9b4a061e86d9ece34582733a7b1fbb9556ff69a` (MCP 0.8.8).
 
 The first REAL capability is `limo.set_initial_pose`. The Agent submits a
 validated map-frame estimate to `rosclawd`; the daemon validates an exact
@@ -11,16 +11,45 @@ MCP server do not import rospy or publish `/initialpose`.
 
 Revision 0.1.6 adds `limo.navigate_to_pose` and `limo.play_tone`. Both use
 in-context confirmation with opaque, exact-action permits. The daemon launches
-fixed Python 2 workers from the locked MCP revision. Navigation rechecks AMCL,
-lidar, odometry, chassis status, TF, and move_base before dispatch, then requires
-move_base `SUCCEEDED`, final AMCL tolerance, and stopped odometry. Tone playback
-accepts only 440/660/880 Hz, 0.2–1.0 seconds, and 5–25% volume, restores the
-previous mixer state, and reports only `DRIVER_CONFIRMED` evidence unless a
-human separately confirms hearing it.
+fixed Python 2 workers from the locked MCP revision.
+
+Revision 0.1.7 adapts those workers to the live LIMO host. Navigation treats
+stationary, event-driven AMCL message age as a warning while retaining blocking
+covariance and live `map -> odom -> base_link` TF checks. It subscribes to AMCL
+before dispatch and requires a post-dispatch pose, move_base `SUCCEEDED`, final
+AMCL tolerance, and stopped odometry. A warning-only DEGRADED snapshot remains
+usable, but any BLOCK check still prevents dispatch. Tone playback accepts only
+440/660/880 Hz, 0.2–1.0 seconds, and 5–25% volume. It uses the uniquely
+allowlisted USB PulseAudio sink when PulseAudio owns the sound card, falls back
+to direct ALSA otherwise, restores the previous mixer state, and reports only
+`DRIVER_CONFIRMED` evidence unless a human separately confirms hearing it.
+
+Revision 0.1.8 fixes completion evidence for the live event-driven AMCL node.
+Navigation still prefers a post-dispatch `/amcl_pose`, but when AMCL emits no
+new event after `move_base` succeeds it verifies the final map-frame pose from
+the live `map -> base_link` TF instead. The same goal tolerances and stopped
+odometry checks remain mandatory, and the receipt records which evidence source
+was used.
+
+Revision 0.1.9 incorporates the first independent physical-observer feedback.
+The USB PulseAudio sink was present but held at 9% / -63 dB, while the old tone
+worker attenuated the waveform again. The new worker temporarily uses a reference
+output gain, applies the requested volume exactly once in PCM, and restores the
+original PulseAudio or ALSA state. Navigation now records the active local-planner
+tolerance and pre-dispatch goal error. A `move_base` success only counts as observed
+movement when odometry crosses a bounded displacement threshold; a goal already
+inside planner tolerance is reported explicitly as requiring no movement.
+
+Revision 0.1.10 requires a bounded onboard-microphone loopback for every REAL
+tone. The worker measures a pre-playback baseline, captures during playback,
+and verifies the requested frequency against fixed level, gain, and adjacent-band
+prominence thresholds. Raw PCM is discarded and a missing acoustic observation
+fails the canonical receipt instead of reporting driver-only success.
 
 H1 means only that the signed contract and executor tests pass. H4 requires a
-real LIMO, an AMCL subscriber, post-dispatch `/amcl_pose`, a `map -> odom`
-transform, a canonical TASK_VERIFIED receipt, and independent review.
+real LIMO, an AMCL subscriber, a post-navigation map-frame pose from AMCL or the
+live TF chain, a `map -> odom` transform, a canonical TASK_VERIFIED receipt,
+odometry displacement evidence when movement was expected, and independent review.
 
 Revision 0.1.2 waits for a converged AMCL sample within the bounded
 verification window, so an immediate transient `/amcl_pose` sample does not

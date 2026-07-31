@@ -17,6 +17,10 @@ class _FakeDaemonClient:
         self.actions: list[ActionEnvelope] = []
         self.stop_requests: list[tuple[str, str]] = []
         self.sessions: list[dict[str, Any]] = []
+        self.supervision_state = "DISARMED"
+        self.arm_reasons: list[str] = []
+        self.disarm_reasons: list[str] = []
+        self.permit_error: Exception | None = None
 
     def get_runtime_status(self) -> dict[str, Any]:
         return {
@@ -24,7 +28,18 @@ class _FakeDaemonClient:
             "daemon_pid": 4242,
             "southbound_owner": "rosclawd",
             "hardware_actions_executed": 0,
+            "supervision_state": self.supervision_state,
         }
+
+    def arm_runtime(self, reason: str) -> dict[str, Any]:
+        self.arm_reasons.append(reason)
+        self.supervision_state = "ARMED"
+        return {"supervision_state": self.supervision_state, "reason": reason}
+
+    def disarm_runtime(self, reason: str) -> dict[str, Any]:
+        self.disarm_reasons.append(reason)
+        self.supervision_state = "DISARMED"
+        return {"supervision_state": self.supervision_state, "reason": reason}
 
     def request_action(self, action: ActionEnvelope) -> dict[str, Any]:
         if isinstance(action, dict):
@@ -41,6 +56,8 @@ class _FakeDaemonClient:
         expires_in_sec: float,
         reason: str,
     ) -> dict[str, Any]:
+        if self.permit_error is not None:
+            raise self.permit_error
         payload = action.to_dict()
         payload["authorization"] = {
             "principal_id": principal_id,
@@ -204,10 +221,75 @@ async def test_interactive_confirmation_injects_permit_without_exposing_it(
 
     assert result["operator_confirmation"]["permit_injected"] is True
     assert result["operator_confirmation"]["permit_exposed"] is False
+    assert result["operator_confirmation"]["supervision_armed"] is True
+    assert result["operator_confirmation"]["separate_arm_required"] is False
     assert "permit" not in result
     assert "permit-secret" not in str(result)
     assert daemon.actions[-1].authorization.approved is True
     assert daemon.sessions[-1]["session_id"] == "action-interactive"
+    assert daemon.arm_reasons == [
+        "Operator confirmed exact REAL action action-interactive through MCP elicitation"
+    ]
+
+
+async def test_interactive_confirmation_does_not_rearm_armed_generation(
+    client: tuple[RuntimeClient, _FakeDaemonClient],
+) -> None:
+    runtime_client, daemon = client
+    daemon.supervision_state = "ARMED"
+    prepared = runtime_client.prepare_operator_action(
+        capability_id="limo.play_tone",
+        arguments={"frequency_hz": 660, "duration_sec": 0.6},
+        body_snapshot_hash="sha256:body",
+        action_id="action-already-armed",
+        deadline_at="2030-01-02T03:04:05Z",
+    )
+
+    result = await runtime_client.confirm_operator_action(
+        prepared,
+        principal_id="operator-1",
+        confirmation={
+            "accepted": True,
+            "action_intent_hash": prepared.approval_request["action_intent_hash"],
+        },
+        wait_timeout_sec=0.0,
+    )
+
+    assert result["operator_confirmation"]["supervision_armed"] is False
+    assert result["operator_confirmation"]["separate_arm_required"] is False
+    assert daemon.arm_reasons == []
+
+
+async def test_interactive_confirmation_rolls_back_just_in_time_arm_on_failure(
+    client: tuple[RuntimeClient, _FakeDaemonClient],
+) -> None:
+    runtime_client, daemon = client
+    daemon.permit_error = RuntimeError("permit broker unavailable")
+    prepared = runtime_client.prepare_operator_action(
+        capability_id="limo.play_tone",
+        arguments={"frequency_hz": 660, "duration_sec": 0.6},
+        body_snapshot_hash="sha256:body",
+        action_id="action-arm-rollback",
+        deadline_at="2030-01-02T03:04:05Z",
+    )
+
+    with pytest.raises(MCPError, match="permit broker unavailable"):
+        await runtime_client.confirm_operator_action(
+            prepared,
+            principal_id="operator-1",
+            confirmation={
+                "accepted": True,
+                "action_intent_hash": prepared.approval_request["action_intent_hash"],
+            },
+            wait_timeout_sec=0.0,
+        )
+
+    assert daemon.supervision_state == "DISARMED"
+    assert len(daemon.arm_reasons) == 1
+    assert daemon.disarm_reasons == [
+        "Automatic rollback after confirmed action action-arm-rollback failed"
+    ]
+    assert daemon.actions == []
 
 
 async def test_interactive_confirmation_rejects_mismatched_intent(
@@ -230,6 +312,7 @@ async def test_interactive_confirmation_rejects_mismatched_intent(
         )
 
     assert daemon.actions == []
+    assert daemon.arm_reasons == []
 
 
 async def test_runtime_status_and_cancel_are_daemon_calls(
