@@ -537,18 +537,18 @@ def build_episode_envelope(
     speed: int,
     force: int,
     contract_hash: str,
-    snapshot_hash: str,
+    snapshot_hashes: dict[str, str],
 ) -> BimanualActionEnvelope:
-    def block(body_id: str, targets: dict[str, int]) -> BodyActionBlock:
+    def block(side: str, targets: dict[str, int]) -> BodyActionBlock:
         return BodyActionBlock(
-            body_id=body_id,
+            body_id=BODY_IDS[side],
             action={
                 "gesture": "tt_step",
                 "targets": targets,
                 "speed": speed,
                 "force": force,
             },
-            body_snapshot_hash=snapshot_hash,
+            body_snapshot_hash=snapshot_hashes[side],
             calibration_hash="t0_baseline_open",
         )
 
@@ -556,8 +556,8 @@ def build_episode_envelope(
         interaction_id=interaction_id,
         sequence_id=sequence_id,
         pair_id=pair_id,
-        left=block(BODY_IDS["left"], left_targets),
-        right=block(BODY_IDS["right"], right_targets),
+        left=block("left", left_targets),
+        right=block("right", right_targets),
         coordination=CoordinationBlock(
             mode="mutual",
             synchronization_barrier="start_together",
@@ -679,7 +679,7 @@ def run() -> int:
         # both hands commanded to safe_open (they are already open —
         # HOLD semantics); BOTH must confirm or nothing approaches.
         # Telemetry before/after and visual centroids are REAL reads.
-        snapshot_hash = f"t1_{run_id}"
+        snapshot_hashes = {"left": f"t1_{run_id}_left", "right": f"t1_{run_id}_right"}
         pregate_pair = pairs[0]
         pre_contract = ContactChoreographyContract(
             pattern="fingertip_marquee",
@@ -689,8 +689,8 @@ def run() -> int:
             ),
             cycles=1,
             force_level="ultra_light",
-            left_body_hash=snapshot_hash,
-            right_body_hash=snapshot_hash,
+            left_body_hash=snapshot_hashes["left"],
+            right_body_hash=snapshot_hashes["right"],
             camera_pose_hash=EXPECTED_POSE_HASHES["left"],
             created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         )
@@ -719,7 +719,7 @@ def run() -> int:
             speed=150,
             force=100,
             contract_hash=pre_contract.contract_hash(),
-            snapshot_hash=snapshot_hash,
+            snapshot_hashes=snapshot_hashes,
         )
         dispatch = gateway.dispatch(envelope, contract=pre_contract, permit=permit)
         if dispatch.violation_kind is not None:
@@ -866,8 +866,8 @@ def _run_episode(
                "little_little", "ring_ring", "middle_middle", "index_index", "thumb_thumb"),
         cycles=1,
         force_level="ultra_light",
-        left_body_hash=f"t1_{run_id}",
-        right_body_hash=f"t1_{run_id}",
+        left_body_hash=f"t1_{run_id}_left",
+        right_body_hash=f"t1_{run_id}_right",
         camera_pose_hash=EXPECTED_POSE_HASHES["left"],
         created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     )
@@ -959,7 +959,7 @@ def _run_episode(
                 ),
                 force=config.approach_force_set,
                 contract_hash=contract.contract_hash(),
-                snapshot_hash=f"t1_{run_id}",
+                snapshot_hashes={"left": f"t1_{run_id}_left", "right": f"t1_{run_id}_right"},
             )
             dispatch = gateway.dispatch(envelope, contract=contract, permit=permit)
             if dispatch.violation_kind is not None:
