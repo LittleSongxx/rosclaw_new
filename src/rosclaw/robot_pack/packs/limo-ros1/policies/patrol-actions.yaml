@@ -27,9 +27,11 @@ real_execution:
     duration_sec: [0.2, 1.0]
     volume_percent: [5, 25]
     mixer_restore_required: true
+    microphone_loopback_required: true
 failure:
   default: fail_closed
   missing_ros_preflight: block
   navigation_timeout: cancel_and_fail
   nonzero_chassis_error: block
   mixer_restore_failure: fail
+  microphone_loopback_failure: fail
