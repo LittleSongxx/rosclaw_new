@@ -63,6 +63,15 @@
         "ros-claw/limo-ros1@0.1.5"
       ],
       "created_at": "2026-07-31T00:00:00Z"
+    },
+    "rosclaw-limo-pack-v7": {
+      "algorithm": "ed25519",
+      "public_key_base64": "iJLPs9aQvCkTcVXPAy553xfhRxEuEqgwuvq3IPHefXs=",
+      "status": "trusted",
+      "scopes": [
+        "ros-claw/limo-ros1@0.1.6"
+      ],
+      "created_at": "2026-07-31T00:00:00Z"
     }
   }
 }

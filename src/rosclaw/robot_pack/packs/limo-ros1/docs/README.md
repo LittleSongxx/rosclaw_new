@@ -2,12 +2,21 @@
 
 This Pack binds the `limo` e-URDF Body to the independently versioned
 `ros-claw/limo-ros-mcp` adapter at commit
-`8242a33991187c62020000f8faf51dc44f0f9d44` (MCP 0.7.0).
+`757b5c4e1a8bf229efe34ecacdb4293d6da1e6ea` (MCP 0.8.3).
 
 The first REAL capability is `limo.set_initial_pose`. The Agent submits a
 validated map-frame estimate to `rosclawd`; the daemon validates an exact
 operator permit and starts a fixed-operation ROS Melodic worker. The Agent and
 MCP server do not import rospy or publish `/initialpose`.
+
+Revision 0.1.6 adds `limo.navigate_to_pose` and `limo.play_tone`. Both use
+in-context confirmation with opaque, exact-action permits. The daemon launches
+fixed Python 2 workers from the locked MCP revision. Navigation rechecks AMCL,
+lidar, odometry, chassis status, TF, and move_base before dispatch, then requires
+move_base `SUCCEEDED`, final AMCL tolerance, and stopped odometry. Tone playback
+accepts only 440/660/880 Hz, 0.2–1.0 seconds, and 5–25% volume, restores the
+previous mixer state, and reports only `DRIVER_CONFIRMED` evidence unless a
+human separately confirms hearing it.
 
 H1 means only that the signed contract and executor tests pass. H4 requires a
 real LIMO, an AMCL subscriber, post-dispatch `/amcl_pose`, a `map -> odom`
