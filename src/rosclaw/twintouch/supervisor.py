@@ -661,9 +661,15 @@ class ContactSupervisor:
             if self.track.one_sided_frames >= self.tuning.one_sided_frame_budget:
                 return self._enter_recovery(
                     OUTCOME_ONE_SIDED_FORCE,
-                    f"one-sided force for {self.track.one_sided_frames} frames "
+                    f"one-sided force for {self.track.one_sided_frames} CONSECUTIVE frames "
                     f"(L {consensus.left_target_delta:.0f} R {consensus.right_target_delta:.0f})",
                 )
+        else:
+            # bilateral seen — the one-sided anomaly is SUSTAINED
+            # asymmetry, not a flaky threshold crossing (campaign
+            # mutual_0: L +136 / R −83 yet aborted on cumulative
+            # one-sided frames)
+            self.track.one_sided_frames = 0
         return SupervisorDecision(kind=DECISION_NONE, note="awaiting bilateral consensus")
 
     def _motion_response_saturated(self, obs: SupervisorObservation) -> bool:
