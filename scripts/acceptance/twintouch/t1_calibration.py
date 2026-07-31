@@ -896,6 +896,12 @@ def run() -> int:
 
         # ---- calibration episodes
         tuning = SupervisorTuning(
+            # bulge contact's visual reads 4.8-5.6cm (fingertip occlusion,
+            # v4 §6.2 predicted): a 5cm conflict threshold calls the true
+            # contact a VISUAL_FORCE_CONFLICT (campaign mutual_0).  10cm
+            # is above every measured contact geometry and below obvious
+            # non-contact.
+            visual_conflict_distance_m=0.10,
             # Calibration runs at 35 (config's 60 provisional ceiling
             # allows lowering, never raising): the index_index
             # receive-side signature is a NEGATIVE delta −39..−55
