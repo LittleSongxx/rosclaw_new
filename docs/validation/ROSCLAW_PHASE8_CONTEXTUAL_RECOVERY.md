@@ -159,16 +159,71 @@ baseline.  The current artifact, failed validation reports, and exact fallback
 suite provide the anchors needed to prevent forgetting while that model is
 trained.
 
+## Terminal-damping follow-up and multi-challenge video
+
+The `g1-contextual-recovery-v5-terminal-damping` follow-up adds a third,
+smoothstep-gated recovery stage after unloading and upright settling.  It
+reduces leg proportional gain to `0.93x` and raises leg derivative damping to
+`1.50x`, starting at policy frame `500` over `80` frames.  It does not change
+the kick, emit torque, or cross the `SIM_ONLY` boundary.
+
+The parameters were selected from DEVELOPMENT-only sweeps and then evaluated
+against an exact ablation with the same contextual primitive and terminal
+damping disabled:
+
+| Terminal-damping metric | Five-case DEVELOPMENT result |
+| --- | ---: |
+| Passed cases | `5 / 5` |
+| Mean backward reversal | `5.82%` reduction |
+| Mean tail joint jerk | `21.05%` reduction |
+| Minimum tail joint jerk | `14.33%` reduction |
+| Mean tail wobble | `0.89%` regression |
+| Worst tail wobble | `2.24%` regression |
+
+This is a deliberate stability/plasticity trade: visible late joint twitch is
+materially lower and backward reversal improves, while the aggregate and
+per-case wobble regressions remain inside the predeclared `2%`/`5%` limits.
+Gentle upper-body and whole-body damping were also tested; neither matched the
+leg-only controller's combined backstep and tail-jerk gains.
+
+The contextual DEVELOPMENT result also improved relative to the matched fixed
+structured baseline:
+
+| Metric | v5 learned contribution |
+| --- | ---: |
+| Backward reversal | `28.56%` reduction |
+| Tail wobble | `20.22%` reduction |
+| Leg jerk | `6.46%` reduction |
+| Weighted composite | `20.81%` improvement |
+| Bootstrap 95% lower bound | `5.81%` |
+| Worst DEVELOPMENT case | `4.41%` improvement |
+
+The candidate remains **rejected** because sealed VALIDATION again routed all
+three states to the retained parent (`0 / 3` contextual routes).  Private
+retention remained exact (`3 / 3`).
+
+The new external video is:
+
+`/code/rosclaw/phase8_evidence/g1-contextual-recovery-v5-terminal-damping/g1-contextual-recovery-multichallenge.mp4`
+
+It is `49.83 s`, H.264, `1280x720`, `30 fps`, and contains five strict-replay
+experiments: a `0.55 m` high target with `0.10 m` lateral ball offset, nominal
+moving ball, lateral moving ball, speed shift, and lighter ball.  The high
+target demonstrates exact OOD fallback; the other four compare the same
+contextual primitive with damping off versus on.  The manifest binds all ten
+MuJoCo trajectories and keeps the `SEALED VALIDATION FAILED · NOT PROMOTED`
+label visible throughout.
+
 ## Verification
 
-- Ruff on `src` and `tests`: passed.
-- Mypy: `895` source files passed.
-- Full pytest: `5389 passed`, `67 skipped`, `27 deselected`; four LeRobot
-  tests initially failed because collection saw a persisted runtime while the
-  isolated test home had no runtime registration.
-- LeRobot failure set rerun with the existing real runtime at
-  `/code/rosclaw/phase6_runtime/lerobot-0.6.1/bin/python`: `4 passed`.
-- Contextual recovery focused suite after final fail-closed hardening:
-  `37 passed`.
-- Video: H.264, `1280x720`, `30 fps`, `285` frames, `9.5 s`; manifest and
-  trajectory hashes verified.
+- Ruff check on all `src` and `tests`: passed.
+- Ruff format on the seven changed files: passed.  The older chained base has
+  108 unrelated pre-existing files outside this change that do not match the
+  current formatter; they were not rewritten.
+- Mypy on the five changed source files: passed.
+- Repository CI mypy gate: `203` source files passed.
+- Full pytest with the existing isolated LeRobot runtime:
+  `5406 passed`, `59 skipped`, `27 deselected`, `26 warnings` in `1067.60 s`.
+- Contextual/cerebellar focused suite: `27 passed`.
+- Multi-challenge video: H.264, `1280x720`, `30 fps`, `1495` frames,
+  `49.83 s`; manifest and ten trajectory hashes verified.

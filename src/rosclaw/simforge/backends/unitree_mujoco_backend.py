@@ -585,11 +585,17 @@ class G1MuJoCoBackend:
         recovery_settling_fraction = 0.0
         recovery_smoothing_active = False
         recovery_smoothing_residual_rms_rad = 0.0
-        recovery_proprioception = np.zeros(len(G1_MUSCLE_MEMORY_OBSERVATIONS), dtype=np.float64)
+        recovery_proprioception: np.ndarray = np.zeros(
+            len(G1_MUSCLE_MEMORY_OBSERVATIONS),
+            dtype=np.float64,
+        )
         muscle_memory_active = False
         muscle_memory_out_of_distribution = False
         muscle_memory_residual_rms_rad = 0.0
-        muscle_memory_synergy_actions = np.zeros(len(G1_MUSCLE_MEMORY_ACTIONS), dtype=np.float64)
+        muscle_memory_synergy_actions: np.ndarray = np.zeros(
+            len(G1_MUSCLE_MEMORY_ACTIONS),
+            dtype=np.float64,
+        )
 
         for frame in range(total_control_frames):
             if feedforward is not None:
@@ -680,6 +686,16 @@ class G1MuJoCoBackend:
                             ),
                         )
                         target = recovery_effect.target
+                        terminal_group = recovery_effect.terminal_damping_joint_group
+                        terminal_slice = {
+                            "whole_body": slice(None),
+                            "legs": slice(0, 12),
+                            "upper_body": slice(12, None),
+                        }[terminal_group]
+                        kp = kp.copy()
+                        kd = kd.copy()
+                        kp[terminal_slice] *= recovery_effect.terminal_kp_scale
+                        kd[terminal_slice] *= recovery_effect.terminal_kd_scale
                         recovery_active = recovery_effect.active
                         recovery_blend_fraction = recovery_effect.blend_fraction
                         recovery_settling_fraction = recovery_effect.settling_fraction

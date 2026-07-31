@@ -37,9 +37,10 @@ _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 class G1CerebellarRecoveryConfig:
     """Bounded target-space recovery segment discovered by matched SIM A/B.
 
-    The first smoothstep unloads the kick while the second, optional smoothstep
-    settles into a more upright terminal posture.  Both are contact- and
-    landing-gated, so the kick itself is never modified.
+    The first smoothstep unloads the kick, the second settles into a more
+    upright posture, and an optional third envelope adds bounded terminal PD
+    damping.  Every stage is contact- and landing-gated, so the kick itself is
+    never modified.
     """
 
     start_policy_frame: int = 420
@@ -54,6 +55,11 @@ class G1CerebellarRecoveryConfig:
     target_smoothing_alpha: float = 1.0
     target_smoothing_start_policy_frame: int = 400
     target_smoothing_joint_group: str = "upper_body"
+    terminal_damping_start_policy_frame: int | None = None
+    terminal_damping_blend_frames: int = 80
+    terminal_kp_scale: float = 1.0
+    terminal_kd_scale: float = 1.0
+    terminal_damping_joint_group: str = "whole_body"
     contact_required: bool = True
     kick_foot_landing_required: bool = True
     minimum_calibrated_support_friction: float = 0.95
@@ -110,6 +116,26 @@ class G1CerebellarRecoveryConfig:
             raise ValueError("target_smoothing_start_policy_frame must be non-negative")
         if self.target_smoothing_joint_group not in {"upper_body", "arms"}:
             raise ValueError("target_smoothing_joint_group must be upper_body or arms")
+        if self.terminal_damping_blend_frames <= 0:
+            raise ValueError("terminal_damping_blend_frames must be positive")
+        if self.terminal_damping_start_policy_frame is None:
+            if self.terminal_kp_scale != 1.0 or self.terminal_kd_scale != 1.0:
+                raise ValueError("terminal gain scaling requires terminal damping")
+        else:
+            earliest = self.start_policy_frame + self.blend_frames
+            if self.settling_start_policy_frame is not None:
+                earliest = max(
+                    earliest,
+                    self.settling_start_policy_frame + self.settling_blend_frames,
+                )
+            if self.terminal_damping_start_policy_frame < earliest:
+                raise ValueError("terminal damping cannot overlap recovery blending")
+        if not 0.75 <= self.terminal_kp_scale <= 1.0:
+            raise ValueError("terminal_kp_scale must be in [0.75, 1.0]")
+        if not 1.0 <= self.terminal_kd_scale <= 2.0:
+            raise ValueError("terminal_kd_scale must be in [1.0, 2.0]")
+        if self.terminal_damping_joint_group not in {"whole_body", "legs", "upper_body"}:
+            raise ValueError("terminal_damping_joint_group must be whole_body, legs, or upper_body")
         if not 0.0 < self.minimum_calibrated_support_friction <= 2.0:
             raise ValueError("minimum calibrated support friction must be in (0, 2]")
         if not 0.0 <= self.maximum_calibrated_control_latency_ms <= 100.0:
@@ -123,7 +149,7 @@ class G1CerebellarRecoveryConfig:
 def _recovery_config_hash(config: G1CerebellarRecoveryConfig) -> str:
     return hash_json(
         {
-            "schema_version": "rosclaw.g1_goalforge.cerebellar_recovery_config.v1",
+            "schema_version": "rosclaw.g1_goalforge.cerebellar_recovery_config.v2",
             "config": asdict(config),
         }
     )
@@ -139,6 +165,10 @@ class G1CerebellarRecoveryEffect:
     kick_foot_landing_latched: bool
     smoothing_active: bool
     smoothing_residual_rms_rad: float
+    terminal_damping_fraction: float
+    terminal_kp_scale: float
+    terminal_kd_scale: float
+    terminal_damping_joint_group: str
     muscle_memory_active: bool
     muscle_memory_out_of_distribution: bool
     muscle_memory_residual_rms_rad: float
@@ -166,8 +196,11 @@ class G1CerebellarRecoveryReceipt:
     smoothing_activation_time_sec: float | None
     settling_activation_policy_frame: int | None
     settling_activation_time_sec: float | None
+    terminal_damping_activation_policy_frame: int | None
+    terminal_damping_activation_time_sec: float | None
     peak_blend_fraction: float
     peak_settling_fraction: float
+    peak_terminal_damping_fraction: float
     peak_smoothing_residual_rms_rad: float
     strict_replay: bool
     evidence_domain: str
@@ -178,7 +211,7 @@ class G1CerebellarRecoveryReceipt:
     expert_route_latched: bool | None
     muscle_memory_receipt: dict[str, Any] | None = None
     contextual_recovery_receipt: dict[str, Any] | None = None
-    schema_version: str = "rosclaw.g1_goalforge.cerebellar_recovery_receipt.v7"
+    schema_version: str = "rosclaw.g1_goalforge.cerebellar_recovery_receipt.v8"
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -293,7 +326,7 @@ class G1CerebellarRecoveryController:
         return hash_json(
             {
                 "controller_type": "g1_cerebellar_post_kick_recovery",
-                "version": 4,
+                "version": 5,
                 "body_hash": self.body_hash,
                 "motion_hash": self.motion_hash,
                 "standing_pose_hash": self.standing_pose_hash,
@@ -354,9 +387,12 @@ class G1CerebellarRecoveryController:
         self._smoothing_activation_time_sec: float | None = None
         self._settling_activation_policy_frame: int | None = None
         self._settling_activation_time_sec: float | None = None
+        self._terminal_damping_activation_policy_frame: int | None = None
+        self._terminal_damping_activation_time_sec: float | None = None
         self._smoothed_target: np.ndarray | None = None
         self._peak_blend_fraction = 0.0
         self._peak_settling_fraction = 0.0
+        self._peak_terminal_damping_fraction = 0.0
         self._peak_smoothing_residual_rms_rad = 0.0
         self._fallback_routed_count = 0
         self._expert_route_latched: bool | None = None
@@ -508,6 +544,23 @@ class G1CerebellarRecoveryController:
             )
         else:
             smoothing_residual = 0.0
+        terminal_fraction = 0.0
+        if (
+            causal_gate
+            and config.terminal_damping_start_policy_frame is not None
+            and policy_frame >= config.terminal_damping_start_policy_frame
+        ):
+            terminal_linear = min(
+                1.0,
+                max(
+                    0.0,
+                    (policy_frame - config.terminal_damping_start_policy_frame)
+                    / config.terminal_damping_blend_frames,
+                ),
+            )
+            terminal_fraction = terminal_linear * terminal_linear * (3.0 - 2.0 * terminal_linear)
+        terminal_kp_scale = 1.0 + terminal_fraction * (config.terminal_kp_scale - 1.0)
+        terminal_kd_scale = 1.0 + terminal_fraction * (config.terminal_kd_scale - 1.0)
         # Keep the slow structured controller's state independent from the
         # learned residual.  Feeding the combined target back through
         # ``_smoothed_target`` turns a bounded per-frame residual into an
@@ -527,15 +580,24 @@ class G1CerebellarRecoveryController:
             muscle_memory_residual_rms = muscle_effect.residual_rms_rad
             muscle_memory_actions = muscle_effect.synergy_actions.copy()
         self._smoothed_target = structured_target
-        active = fraction > 0.0 or smoothing_active or muscle_memory_active
+        active = (
+            fraction > 0.0 or smoothing_active or terminal_fraction > 0.0 or muscle_memory_active
+        )
         if active and self._activation_policy_frame is None:
             self._activation_policy_frame = policy_frame
             self._activation_time_sec = timestamp_sec
         if settling_fraction > 0.0 and self._settling_activation_policy_frame is None:
             self._settling_activation_policy_frame = policy_frame
             self._settling_activation_time_sec = timestamp_sec
+        if terminal_fraction > 0.0 and self._terminal_damping_activation_policy_frame is None:
+            self._terminal_damping_activation_policy_frame = policy_frame
+            self._terminal_damping_activation_time_sec = timestamp_sec
         self._peak_blend_fraction = max(self._peak_blend_fraction, fraction)
         self._peak_settling_fraction = max(self._peak_settling_fraction, settling_fraction)
+        self._peak_terminal_damping_fraction = max(
+            self._peak_terminal_damping_fraction,
+            terminal_fraction,
+        )
         return G1CerebellarRecoveryEffect(
             target=adapted,
             active=active,
@@ -545,6 +607,10 @@ class G1CerebellarRecoveryController:
             kick_foot_landing_latched=self._landing_latched,
             smoothing_active=smoothing_active,
             smoothing_residual_rms_rad=smoothing_residual,
+            terminal_damping_fraction=terminal_fraction,
+            terminal_kp_scale=terminal_kp_scale,
+            terminal_kd_scale=terminal_kd_scale,
+            terminal_damping_joint_group=config.terminal_damping_joint_group,
             muscle_memory_active=muscle_memory_active,
             muscle_memory_out_of_distribution=muscle_memory_ood,
             muscle_memory_residual_rms_rad=muscle_memory_residual_rms,
@@ -581,8 +647,13 @@ class G1CerebellarRecoveryController:
             smoothing_activation_time_sec=self._smoothing_activation_time_sec,
             settling_activation_policy_frame=self._settling_activation_policy_frame,
             settling_activation_time_sec=self._settling_activation_time_sec,
+            terminal_damping_activation_policy_frame=(
+                self._terminal_damping_activation_policy_frame
+            ),
+            terminal_damping_activation_time_sec=self._terminal_damping_activation_time_sec,
             peak_blend_fraction=self._peak_blend_fraction,
             peak_settling_fraction=self._peak_settling_fraction,
+            peak_terminal_damping_fraction=self._peak_terminal_damping_fraction,
             peak_smoothing_residual_rms_rad=self._peak_smoothing_residual_rms_rad,
             strict_replay=strict_replay,
             evidence_domain=evidence_domain,

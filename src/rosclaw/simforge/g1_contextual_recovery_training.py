@@ -112,6 +112,22 @@ class G1ContextualRecoveryHoldoutSummary:
 
 
 @dataclass(frozen=True)
+class G1TerminalDampingDevelopmentSummary:
+    case_count: int
+    passed_count: int
+    mean_backward_reduction: float
+    mean_tail_wobble_reduction: float
+    minimum_tail_wobble_reduction: float
+    mean_tail_joint_jerk_reduction: float
+    minimum_tail_joint_jerk_reduction: float
+    qualified: bool
+    development_only: bool = True
+    evidence_domain: str = "SIM"
+    physics_authority: str = "CPU_MUJOCO"
+    schema_version: str = "rosclaw.g1_goalforge.terminal_damping_development.v1"
+
+
+@dataclass(frozen=True)
 class G1ContextualRecoveryTrainingReport:
     artifact: G1ContextualRecoveryArtifact
     development_cases: tuple[G1MuscleMemoryCaseResult, ...]
@@ -129,6 +145,7 @@ class G1ContextualRecoveryTrainingReport:
     learned_component_composite_reduction: float
     learned_component_worst_case_composite: float
     learned_component_bootstrap_lower_95: float
+    terminal_damping: G1TerminalDampingDevelopmentSummary
     validation: G1ContextualRecoveryValidationSummary
     holdout: G1ContextualRecoveryHoldoutSummary
     qualified: bool
@@ -163,6 +180,7 @@ class G1ContextualRecoveryTrainingReport:
             "learned_component_composite_reduction": (self.learned_component_composite_reduction),
             "learned_component_worst_case_composite": (self.learned_component_worst_case_composite),
             "learned_component_bootstrap_lower_95": (self.learned_component_bootstrap_lower_95),
+            "terminal_damping": asdict(self.terminal_damping),
             "validation": asdict(self.validation),
             "holdout": asdict(self.holdout),
             "qualified": self.qualified,
@@ -246,6 +264,11 @@ class G1ContextualRecoveryTrainer:
             settling_standing_pose_blend=0.42,
             settling_waist_pitch_bias_rad=0.11,
             target_smoothing_alpha=0.54,
+            terminal_damping_start_policy_frame=500,
+            terminal_damping_blend_frames=80,
+            terminal_kp_scale=0.93,
+            terminal_kd_scale=1.50,
+            terminal_damping_joint_group="legs",
         )
         self.base = G1MuscleMemoryTrainer(
             asset_root=asset_root,
@@ -418,6 +441,13 @@ class G1ContextualRecoveryTrainer:
             training_seed=self.seed,
         )
 
+        terminal_damping = self._evaluate_terminal_damping(
+            artifact=artifact,
+            moving_indices=moving_indices,
+        )
+        if not terminal_damping.qualified:
+            reasons.append("terminal_damping_development_failed")
+
         development_rows: list[G1MuscleMemoryCaseResult] = []
         learned_rows: list[tuple[float, float, float]] = []
         learned_composites: list[float] = []
@@ -428,6 +458,7 @@ class G1ContextualRecoveryTrainer:
             replay = self._run_contextual(case, artifact)
             strict = _strict_replay(candidate, replay)
             candidate_metric = measure_g1_recovery_quality(candidate.trajectory)
+            expected_route: int | None
             if index in moving_indices:
                 local_index = moving_indices.index(index)
                 causal_baseline_metric = fixed_quality[local_index]
@@ -515,7 +546,11 @@ class G1ContextualRecoveryTrainer:
             fixed_structured_config_hash=fixed_hash,
             fixed_structured_config=asdict(self.fixed_config),
             training_rollout_count=(
-                len(parents) + len(fixed) + len(library) * len(moving_indices) + 2 * len(self.cases)
+                len(parents)
+                + len(fixed)
+                + len(library) * len(moving_indices)
+                + 2 * len(moving_indices)
+                + 2 * len(self.cases)
             ),
             validation_rollout_count=validation_rollouts,
             holdout_rollout_count=holdout_rollouts,
@@ -525,6 +560,7 @@ class G1ContextualRecoveryTrainer:
             learned_component_composite_reduction=mean_composite,
             learned_component_worst_case_composite=worst_composite,
             learned_component_bootstrap_lower_95=bootstrap_lower,
+            terminal_damping=terminal_damping,
             validation=validation,
             holdout=holdout,
             qualified=not reasons,
@@ -586,6 +622,7 @@ class G1ContextualRecoveryTrainer:
             "rosclaw.g1_goalforge.contextual_validation.v4",
             cases,
         )
+
         qualified = bool(
             suite_hash == expected_suite_hash
             and passed_count == len(cases)
@@ -612,6 +649,67 @@ class G1ContextualRecoveryTrainer:
                 qualified=qualified,
             ),
             4 * len(cases),
+        )
+
+    def _evaluate_terminal_damping(
+        self,
+        *,
+        artifact: G1ContextualRecoveryArtifact,
+        moving_indices: tuple[int, ...],
+    ) -> G1TerminalDampingDevelopmentSummary:
+        """Measure the third-stage damping against an exact parameter ablation."""
+
+        rows: list[tuple[float, float, float]] = []
+        passed = 0
+        for local_index, case_index in enumerate(moving_indices):
+            case = self.cases[case_index]
+            damped_config = _config_from_primitive(
+                self.fixed_config,
+                artifact.primitives[local_index],
+            )
+            ablated_config = replace(
+                damped_config,
+                terminal_damping_start_policy_frame=None,
+                terminal_kp_scale=1.0,
+                terminal_kd_scale=1.0,
+            )
+            ablated = self._run_config(case, ablated_config)
+            damped = self._run_config(case, damped_config)
+            ablated_quality = measure_g1_recovery_quality(ablated.trajectory)
+            damped_quality = measure_g1_recovery_quality(damped.trajectory)
+            _, safe, goal, natural = _case_score(
+                parent=ablated,
+                parent_quality=ablated_quality,
+                candidate=damped,
+                candidate_quality=damped_quality,
+            )
+            reductions = _terminal_damping_reductions(ablated_quality, damped_quality)
+            rows.append(reductions)
+            passed += int(
+                safe
+                and goal
+                and natural
+                and reductions[0] >= 0.0
+                and reductions[1] >= -0.05
+                and reductions[2] >= 0.12
+            )
+        values = np.asarray(rows, dtype=np.float64)
+        means = np.mean(values, axis=0)
+        qualified = bool(
+            passed == len(moving_indices)
+            and means[0] >= 0.0
+            and means[1] >= -0.02
+            and means[2] >= 0.20
+        )
+        return G1TerminalDampingDevelopmentSummary(
+            case_count=len(moving_indices),
+            passed_count=passed,
+            mean_backward_reduction=float(means[0]),
+            mean_tail_wobble_reduction=float(means[1]),
+            minimum_tail_wobble_reduction=float(np.min(values[:, 1])),
+            mean_tail_joint_jerk_reduction=float(means[2]),
+            minimum_tail_joint_jerk_reduction=float(np.min(values[:, 2])),
+            qualified=qualified,
         )
 
     def _evaluate_holdout(
@@ -823,6 +921,30 @@ def _composite(reductions: tuple[float, float, float]) -> float:
     return float(0.40 * reductions[0] + 0.40 * reductions[1] + 0.20 * reductions[2])
 
 
+def _terminal_damping_reductions(
+    ablated: G1RecoveryQuality,
+    damped: G1RecoveryQuality,
+) -> tuple[float, float, float]:
+    """Return physical gains for backstep, whole-body wobble, and tail twitch."""
+
+    def reduction(parent: float, candidate: float, floor: float) -> float:
+        return (parent - candidate) / max(abs(parent), floor)
+
+    return (
+        reduction(
+            ablated.post_contact_backward_reversal_m,
+            damped.post_contact_backward_reversal_m,
+            0.05,
+        ),
+        reduction(ablated.tail_wobble_index, damped.tail_wobble_index, 0.05),
+        reduction(
+            ablated.tail_joint_jerk_rms_rad_s3,
+            damped.tail_joint_jerk_rms_rad_s3,
+            0.10,
+        ),
+    )
+
+
 def _bootstrap_lower_95(values: tuple[float, ...], *, seed: int) -> float:
     sample = np.asarray(values, dtype=np.float64)
     if sample.ndim != 1 or len(sample) < 2 or not np.all(np.isfinite(sample)):
@@ -872,5 +994,6 @@ __all__ = [
     "G1ContextualRecoveryTrainer",
     "G1ContextualRecoveryTrainingReport",
     "G1ContextualRecoveryValidationSummary",
+    "G1TerminalDampingDevelopmentSummary",
     "write_g1_contextual_recovery_report",
 ]

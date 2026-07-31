@@ -66,6 +66,31 @@ def dispatch_muscle_memory_argv(argv: list[str]) -> int | None:
         default="moving_ball_nominal_velocity_070",
     )
     contextual_video.add_argument("--fps", type=int, default=30)
+    contextual_suite_video = commands.add_parser(
+        "contextual-suite-video",
+        help="render a long rejection-labelled multi-challenge damping suite",
+    )
+    contextual_suite_video.add_argument("--artifact", type=Path, required=True)
+    contextual_suite_video.add_argument("--report", type=Path, required=True)
+    contextual_suite_video.add_argument("--asset-root", type=Path, required=True)
+    contextual_suite_video.add_argument("--output", type=Path, required=True)
+    contextual_suite_video.add_argument(
+        "--source-checkout",
+        type=Path,
+        default=Path.cwd(),
+    )
+    contextual_suite_video.add_argument(
+        "--cases",
+        nargs="+",
+        default=(
+            "static_high",
+            "moving_ball_nominal",
+            "moving_ball_lateral_005",
+            "moving_ball_nominal_velocity_070",
+            "moving_ball_light_400g",
+        ),
+    )
+    contextual_suite_video.add_argument("--fps", type=int, default=30)
     inspect = commands.add_parser(
         "inspect",
         help="validate a safe JSON artifact and print its commitments",
@@ -155,6 +180,23 @@ def dispatch_muscle_memory_argv(argv: list[str]) -> int | None:
             fps=args.fps,
         )
         print(json.dumps(video_result.to_dict(), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "contextual-suite-video":
+        from rosclaw.simforge.g1_contextual_recovery_video import (
+            render_g1_contextual_recovery_suite_video,
+        )
+
+        suite_result = render_g1_contextual_recovery_suite_video(
+            artifact_path=args.artifact,
+            training_report_path=args.report,
+            asset_root=args.asset_root,
+            output_path=args.output,
+            source_checkout=args.source_checkout,
+            case_names=tuple(args.cases),
+            fps=args.fps,
+        )
+        print(json.dumps(suite_result.to_dict(), indent=2, sort_keys=True))
         return 0
 
     if args.command == "contextual-train":
