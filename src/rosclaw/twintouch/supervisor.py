@@ -382,12 +382,13 @@ class ContactSupervisor:
                     f"{side} at {temp}°C >= abort {self.tuning.temperature_abort_c}°C",
                 )
         # stale camera blocks anything that is still APPROACHING
-        if self.state in (VISUAL_ALIGN, COARSE_APPROACH, FINE_APPROACH, CONTACT_CANDIDATE):
-            if obs.visual is None or obs.visual.age_ms > self.tuning.camera_freshness_ms:
-                return self._enter_recovery(
-                    OUTCOME_STALE_OBSERVATION,
-                    "camera observation stale — no approach allowed",
-                )
+        if self.state in (VISUAL_ALIGN, COARSE_APPROACH, FINE_APPROACH, CONTACT_CANDIDATE) and (
+            obs.visual is None or obs.visual.age_ms > self.tuning.camera_freshness_ms
+        ):
+            return self._enter_recovery(
+                OUTCOME_STALE_OBSERVATION,
+                "camera observation stale — no approach allowed",
+            )
         # non-target force (unintended contact) — the highest-priority
         # safety check after transport/thermal; valid in every state
         deltas = self._deltas(obs)
@@ -617,9 +618,7 @@ class ContactSupervisor:
         finger stopped moving while fine steps continued — commands keep
         changing but the external geometry no longer does.  Requires the
         angle history the track accumulates per cycle."""
-        if self.track.saturated_frames >= 2:
-            return True
-        return False
+        return self.track.saturated_frames >= 2
 
     def _update_saturation(self, obs: SupervisorObservation) -> None:
         """Track per-cycle angle deltas on the active target finger while
@@ -637,9 +636,12 @@ class ContactSupervisor:
                 continue
             angle = hand.angle_actual.get(self.target_finger)
             last = self.track.last_angles.get(side)
-            if angle is not None and last is not None:
-                if abs(angle - last) <= self.tuning.saturation_delta_raw:
-                    any_saturated = True
+            if (
+                angle is not None
+                and last is not None
+                and abs(angle - last) <= self.tuning.saturation_delta_raw
+            ):
+                any_saturated = True
             if angle is not None:
                 self.track.last_angles[side] = angle
         if any_saturated:

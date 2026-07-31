@@ -211,7 +211,7 @@ def test_motion_response_can_substitute_visual_near():
 def test_uncalibrated_pair_is_never_approached():
     sup = _supervisor(calibrated=False)
     sup.step(_obs(0.0))  # SAFE_RESET -> PAIR_SELECTED
-    decision = sup.step(_obs(0.1))  # PAIR_SELECTED -> recovery
+    sup.step(_obs(0.1))  # PAIR_SELECTED -> recovery
     assert sup.state == STOP_APPROACH
     assert sup.track.anomaly == "NO_CONTACT"
     kinds = _drive_recovery(sup, 0.1)
@@ -263,7 +263,7 @@ def test_one_sided_force_budget():
     left_rising = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 70.0})
     sup.step(_obs(ts, left=left_rising, visual=_visual(0.006)))  # -> CANDIDATE
     ts += 0.1
-    for frame in range(5):  # one_sided_frame_budget
+    for _ in range(5):  # one_sided_frame_budget
         sup.step(_obs(ts, left=left_rising, visual=_visual(0.006)))
         ts += 0.1
     assert sup.track.anomaly == "ONE_SIDED_FORCE"
@@ -293,7 +293,7 @@ def test_stale_camera_blocks_approach():
 def test_transport_loss_retreats_both():
     sup = _supervisor()
     ts = _drive_to_coarse(sup)
-    decision = sup.step(_obs(ts, right=None))
+    sup.step(_obs(ts, right=None))
     assert sup.track.anomaly == "TRANSPORT_FAILURE"
     kinds = _drive_recovery(sup, ts)
     assert DECISION_RETREAT in kinds
@@ -343,7 +343,7 @@ def test_release_failed_when_forces_stay_high():
     assert sup.state == RELEASE
     ts += 0.1
     for _ in range(4):  # max_release_steps: forces stay high
-        decision = sup.step(_obs(ts, left=both, right=both, visual=_visual(0.004)))
+        sup.step(_obs(ts, left=both, right=both, visual=_visual(0.004)))
         ts += 0.1
     sup.step(_obs(ts, left=both, right=both, visual=_visual(0.004)))
     assert sup.track.anomaly == "RELEASE_FAILED"
