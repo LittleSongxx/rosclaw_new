@@ -10,11 +10,16 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 import numpy as np
 
+from rosclaw.simforge.g1_contextual_recovery import (
+    G1ContextualRecoveryArtifact,
+    G1ContextualRecoveryPolicy,
+    G1ContextualRecoveryPrimitive,
+)
 from rosclaw.simforge.g1_muscle_memory import (
     G1MuscleMemoryArtifact,
     G1MuscleMemoryPolicy,
@@ -138,6 +143,9 @@ class G1CerebellarRecoveryEffect:
     muscle_memory_out_of_distribution: bool
     muscle_memory_residual_rms_rad: float
     muscle_memory_synergy_actions: np.ndarray
+    contextual_recovery_active: bool
+    contextual_recovery_out_of_distribution: bool
+    contextual_recovery_primitive_index: int | None
 
 
 @dataclass(frozen=True)
@@ -169,7 +177,8 @@ class G1CerebellarRecoveryReceipt:
     fallback_routed_count: int
     expert_route_latched: bool | None
     muscle_memory_receipt: dict[str, Any] | None = None
-    schema_version: str = "rosclaw.g1_goalforge.cerebellar_recovery_receipt.v6"
+    contextual_recovery_receipt: dict[str, Any] | None = None
+    schema_version: str = "rosclaw.g1_goalforge.cerebellar_recovery_receipt.v7"
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -197,6 +206,7 @@ class G1CerebellarRecoveryController:
         standing_pose: np.ndarray,
         config: G1CerebellarRecoveryConfig | None = None,
         muscle_memory_artifact: G1MuscleMemoryArtifact | None = None,
+        contextual_recovery_artifact: G1ContextualRecoveryArtifact | None = None,
         fallback_config: G1CerebellarRecoveryConfig | None = None,
     ) -> None:
         for label, value in (
@@ -228,6 +238,15 @@ class G1CerebellarRecoveryController:
             if muscle_memory_artifact is not None
             else None
         )
+        self.contextual_recovery = (
+            G1ContextualRecoveryPolicy(contextual_recovery_artifact)
+            if contextual_recovery_artifact is not None
+            else None
+        )
+        if self.muscle_memory is not None and self.contextual_recovery is not None:
+            raise ValueError(
+                "muscle-memory residual and contextual recovery cannot be active together"
+            )
         if self.muscle_memory is not None:
             if (
                 not self.muscle_memory.artifact.schema_version.endswith(".v1")
@@ -248,6 +267,15 @@ class G1CerebellarRecoveryController:
                 )
                 if structured != self.muscle_memory.artifact.structured_recovery_parameters:
                     raise ValueError("muscle-memory structured recovery parameters mismatch")
+        if self.contextual_recovery is not None:
+            if self.fallback_config is None:
+                raise ValueError("contextual recovery requires a fallback recovery config")
+            self.contextual_recovery.require_compatible(
+                body_hash=self.body_hash,
+                motion_hash=self.motion_hash,
+                baseline_recovery_config_hash=self.config_hash,
+                fallback_recovery_config_hash=self.fallback_config_hash or "",
+            )
         self.reset()
 
     @property
@@ -281,8 +309,19 @@ class G1CerebellarRecoveryController:
 
     @property
     def controller_hash(self) -> str:
-        if self.muscle_memory is None:
+        if self.muscle_memory is None and self.contextual_recovery is None:
             return self.base_controller_hash
+        if self.contextual_recovery is not None:
+            return hash_json(
+                {
+                    "controller_type": ("g1_cerebellar_post_kick_recovery_with_contextual_memory"),
+                    "version": 1,
+                    "base_controller_hash": self.base_controller_hash,
+                    "contextual_recovery_artifact_hash": (
+                        self.contextual_recovery.artifact.artifact_hash
+                    ),
+                }
+            )
         return hash_json(
             {
                 "controller_type": "g1_cerebellar_post_kick_recovery_with_muscle_memory",
@@ -323,6 +362,8 @@ class G1CerebellarRecoveryController:
         self._expert_route_latched: bool | None = None
         if self.muscle_memory is not None:
             self.muscle_memory.reset()
+        if self.contextual_recovery is not None:
+            self.contextual_recovery.reset()
 
     def adapt_target(
         self,
@@ -345,6 +386,30 @@ class G1CerebellarRecoveryController:
         if self._contact_latched and right_support:
             self._landing_latched = True
         config = self.config
+        contextual_primitive_index: int | None = None
+        contextual_ood = False
+        if self.contextual_recovery is not None:
+            if muscle_memory_observation is None:
+                raise ValueError("contextual recovery routing requires proprioceptive observations")
+            if (
+                self._contact_latched
+                and self._landing_latched
+                and policy_frame >= self.config.start_policy_frame
+            ):
+                selection = self.contextual_recovery.select(muscle_memory_observation)
+                contextual_primitive_index = selection.primitive_index
+                contextual_ood = selection.out_of_distribution
+                if selection.primitive_index is None:
+                    if self.fallback_config is None:
+                        raise RuntimeError(
+                            "validated contextual fallback config became unavailable"
+                        )
+                    config = self.fallback_config
+                else:
+                    config = _apply_contextual_primitive(
+                        self.config,
+                        self.contextual_recovery.artifact.primitives[selection.primitive_index],
+                    )
         if self.fallback_config is not None and self.muscle_memory is not None:
             if muscle_memory_observation is None:
                 raise ValueError("temporal recovery routing requires proprioceptive observations")
@@ -443,6 +508,11 @@ class G1CerebellarRecoveryController:
             )
         else:
             smoothing_residual = 0.0
+        # Keep the slow structured controller's state independent from the
+        # learned residual.  Feeding the combined target back through
+        # ``_smoothed_target`` turns a bounded per-frame residual into an
+        # unintended integrator and makes even tiny learned actions drift.
+        structured_target = adapted.copy()
         muscle_memory_active = False
         muscle_memory_ood = False
         muscle_memory_residual_rms = 0.0
@@ -456,7 +526,7 @@ class G1CerebellarRecoveryController:
             muscle_memory_ood = muscle_effect.out_of_distribution
             muscle_memory_residual_rms = muscle_effect.residual_rms_rad
             muscle_memory_actions = muscle_effect.synergy_actions.copy()
-        self._smoothed_target = adapted.copy()
+        self._smoothed_target = structured_target
         active = fraction > 0.0 or smoothing_active or muscle_memory_active
         if active and self._activation_policy_frame is None:
             self._activation_policy_frame = policy_frame
@@ -479,6 +549,13 @@ class G1CerebellarRecoveryController:
             muscle_memory_out_of_distribution=muscle_memory_ood,
             muscle_memory_residual_rms_rad=muscle_memory_residual_rms,
             muscle_memory_synergy_actions=muscle_memory_actions,
+            contextual_recovery_active=(
+                self.contextual_recovery is not None
+                and contextual_primitive_index is not None
+                and causal_gate
+            ),
+            contextual_recovery_out_of_distribution=contextual_ood,
+            contextual_recovery_primitive_index=contextual_primitive_index,
         )
 
     def build_receipt(
@@ -521,7 +598,31 @@ class G1CerebellarRecoveryController:
                 if self.muscle_memory is not None
                 else None
             ),
+            contextual_recovery_receipt=(
+                self.contextual_recovery.build_receipt().to_dict()
+                if self.contextual_recovery is not None
+                else None
+            ),
         )
+
+
+def _apply_contextual_primitive(
+    config: G1CerebellarRecoveryConfig,
+    primitive: G1ContextualRecoveryPrimitive,
+) -> G1CerebellarRecoveryConfig:
+    """Apply only the bounded fields carried by a learned SIM primitive."""
+
+    return replace(
+        config,
+        start_policy_frame=primitive.start_policy_frame,
+        blend_frames=primitive.blend_frames,
+        settling_start_policy_frame=primitive.settling_start_policy_frame,
+        settling_blend_frames=primitive.settling_blend_frames,
+        settling_standing_pose_blend=primitive.settling_standing_pose_blend,
+        settling_waist_pitch_bias_rad=primitive.settling_waist_pitch_bias_rad,
+        target_smoothing_alpha=primitive.target_smoothing_alpha,
+        target_smoothing_start_policy_frame=primitive.start_policy_frame,
+    )
 
 
 def evaluate_g1_cerebellar_recovery_regime(

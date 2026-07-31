@@ -377,6 +377,66 @@ def test_cerebellar_controller_keeps_learned_policy_behind_contact_and_landing()
     assert receipt.muscle_memory_receipt["inference_count"] == 1
 
 
+def test_cerebellar_smoothing_does_not_integrate_learned_residual() -> None:
+    config = G1CerebellarRecoveryConfig(
+        start_policy_frame=0,
+        blend_frames=1,
+        standing_pose_blend=0.0,
+        roll_posture_bias_rad=0.0,
+        target_smoothing_alpha=0.50,
+        target_smoothing_start_policy_frame=0,
+    )
+    parent = G1CerebellarRecoveryController(
+        body_hash=_digest("1"),
+        motion_hash=_digest("2"),
+        regime_commitment=_digest("3"),
+        regime_eligible=True,
+        regime_reasons=(),
+        standing_pose=np.zeros(29),
+        config=config,
+    )
+    artifact = _artifact(parent_config_hash=parent.config_hash)
+    controller = G1CerebellarRecoveryController(
+        body_hash=_digest("1"),
+        motion_hash=_digest("2"),
+        regime_commitment=_digest("3"),
+        regime_eligible=True,
+        regime_reasons=(),
+        standing_pose=np.zeros(29),
+        config=config,
+        muscle_memory_artifact=artifact,
+    )
+    reference_policy = G1MuscleMemoryPolicy(artifact)
+    observation = _observation(
+        pelvis_velocity_x_m_s=-0.20,
+        contact_impulse_ns=3.0,
+    )
+
+    first = controller.adapt_target(
+        target=np.zeros(29),
+        policy_frame=1,
+        timestamp_sec=0.02,
+        ball_contact_detected=True,
+        left_support=True,
+        right_support=True,
+        muscle_memory_observation=observation,
+    )
+    expected_first = reference_policy.infer(observation)
+    second = controller.adapt_target(
+        target=np.zeros(29),
+        policy_frame=2,
+        timestamp_sec=0.04,
+        ball_contact_detected=True,
+        left_support=True,
+        right_support=True,
+        muscle_memory_observation=observation,
+    )
+    expected_second = reference_policy.infer(observation)
+
+    np.testing.assert_allclose(first.target, expected_first.residual)
+    np.testing.assert_allclose(second.target, expected_second.residual)
+
+
 def test_artifact_rejects_identity_and_shape_tampering() -> None:
     parent = _controller()
     artifact = _artifact(parent_config_hash=parent.config_hash)

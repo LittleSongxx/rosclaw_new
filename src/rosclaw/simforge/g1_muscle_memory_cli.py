@@ -39,6 +39,33 @@ def dispatch_muscle_memory_argv(argv: list[str]) -> int | None:
         default=(0, 1, 2, 3),
         help="CUDA devices used only for exported-policy parity, never physics authority",
     )
+    contextual_train = commands.add_parser(
+        "contextual-train",
+        help="learn and qualify a proprioceptive router over bounded recovery primitives",
+    )
+    contextual_train.add_argument("--asset-root", type=Path, required=True)
+    contextual_train.add_argument("--output-dir", type=Path, required=True)
+    contextual_train.add_argument("--source-checkout", type=Path, default=Path.cwd())
+    contextual_train.add_argument("--seed", type=int, default=20260802)
+    contextual_inspect = commands.add_parser(
+        "contextual-inspect",
+        help="validate a contextual recovery artifact and print its commitments",
+    )
+    contextual_inspect.add_argument("artifact", type=Path)
+    contextual_video = commands.add_parser(
+        "contextual-video",
+        help="render a rejection-labelled DEVELOPMENT fixed-vs-learned comparison",
+    )
+    contextual_video.add_argument("--artifact", type=Path, required=True)
+    contextual_video.add_argument("--report", type=Path, required=True)
+    contextual_video.add_argument("--asset-root", type=Path, required=True)
+    contextual_video.add_argument("--output", type=Path, required=True)
+    contextual_video.add_argument("--source-checkout", type=Path, default=Path.cwd())
+    contextual_video.add_argument(
+        "--case",
+        default="moving_ball_nominal_velocity_070",
+    )
+    contextual_video.add_argument("--fps", type=int, default=30)
     inspect = commands.add_parser(
         "inspect",
         help="validate a safe JSON artifact and print its commitments",
@@ -77,6 +104,80 @@ def dispatch_muscle_memory_argv(argv: list[str]) -> int | None:
             )
         )
         return 0
+
+    if args.command == "contextual-inspect":
+        from rosclaw.simforge.g1_contextual_recovery import (
+            load_g1_contextual_recovery_artifact,
+        )
+
+        contextual_artifact = load_g1_contextual_recovery_artifact(args.artifact)
+        print(
+            json.dumps(
+                {
+                    "artifact_hash": contextual_artifact.artifact_hash,
+                    "body_hash": contextual_artifact.body_hash,
+                    "motion_hash": contextual_artifact.motion_hash,
+                    "baseline_recovery_config_hash": (
+                        contextual_artifact.baseline_recovery_config_hash
+                    ),
+                    "fallback_recovery_config_hash": (
+                        contextual_artifact.fallback_recovery_config_hash
+                    ),
+                    "training_dataset_hash": contextual_artifact.training_dataset_hash,
+                    "training_episode_count": contextual_artifact.training_episode_count,
+                    "regime_feature_names": list(contextual_artifact.regime_feature_names),
+                    "prototype_count": len(contextual_artifact.regime_prototypes),
+                    "primitive_hashes": [
+                        primitive.primitive_hash for primitive in contextual_artifact.primitives
+                    ],
+                    "maximum_regime_distance": (contextual_artifact.maximum_regime_distance),
+                    "maximum_feature_z": contextual_artifact.maximum_feature_z,
+                    "activation_ceiling": contextual_artifact.activation_ceiling,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    if args.command == "contextual-video":
+        from rosclaw.simforge.g1_contextual_recovery_video import (
+            render_g1_contextual_recovery_video,
+        )
+
+        video_result = render_g1_contextual_recovery_video(
+            artifact_path=args.artifact,
+            training_report_path=args.report,
+            asset_root=args.asset_root,
+            output_path=args.output,
+            source_checkout=args.source_checkout,
+            case_name=args.case,
+            fps=args.fps,
+        )
+        print(json.dumps(video_result.to_dict(), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "contextual-train":
+        from rosclaw.simforge.g1_contextual_recovery_training import (
+            G1ContextualRecoveryTrainer,
+            write_g1_contextual_recovery_report,
+        )
+
+        contextual_trainer = G1ContextualRecoveryTrainer(
+            asset_root=args.asset_root,
+            seed=args.seed,
+        )
+        contextual_report = contextual_trainer.train()
+        artifact_path, report_path = write_g1_contextual_recovery_report(
+            contextual_report,
+            output_dir=args.output_dir,
+            source_checkout=args.source_checkout,
+        )
+        value = contextual_report.to_dict()
+        value["artifact_path"] = str(artifact_path)
+        value["report_path"] = str(report_path)
+        print(json.dumps(value, indent=2, sort_keys=True))
+        return 0 if contextual_report.qualified else 2
 
     if args.command == "temporal-train":
         from rosclaw.simforge.g1_temporal_muscle_memory_training import (

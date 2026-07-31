@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import json
 
+from rosclaw.simforge.g1_contextual_recovery import (
+    G1_CONTEXTUAL_RECOVERY_FEATURES,
+    G1ContextualRecoveryArtifact,
+    G1ContextualRecoveryPrimitive,
+)
 from rosclaw.simforge.g1_muscle_memory import (
     G1_MUSCLE_MEMORY_ACTIONS,
     G1_MUSCLE_MEMORY_OBSERVATIONS,
@@ -45,3 +50,45 @@ def test_inspect_validates_and_summarizes_safe_json(tmp_path, capsys) -> None:
     assert payload["activation_ceiling"] == "SIM_ONLY"
     assert payload["expert_regime_feature_names"] == []
     assert payload["expert_regime_prototype_count"] == 0
+
+
+def test_contextual_inspect_summarizes_bounded_primitive_commitments(tmp_path, capsys) -> None:
+    artifact = G1ContextualRecoveryArtifact(
+        body_hash=_digest("1"),
+        motion_hash=_digest("2"),
+        baseline_recovery_config_hash=_digest("3"),
+        fallback_recovery_config_hash=_digest("4"),
+        training_dataset_hash=_digest("5"),
+        observation_mean=(0.0,) * len(G1_MUSCLE_MEMORY_OBSERVATIONS),
+        observation_scale=(1.0,) * len(G1_MUSCLE_MEMORY_OBSERVATIONS),
+        regime_feature_names=G1_CONTEXTUAL_RECOVERY_FEATURES,
+        regime_prototypes=((0.0,) * len(G1_CONTEXTUAL_RECOVERY_FEATURES),),
+        primitives=(
+            G1ContextualRecoveryPrimitive(
+                start_policy_frame=300,
+                blend_frames=100,
+                settling_start_policy_frame=400,
+                settling_blend_frames=100,
+                settling_standing_pose_blend=0.42,
+                settling_waist_pitch_bias_rad=0.11,
+                target_smoothing_alpha=0.54,
+            ),
+        ),
+        maximum_regime_distance=0.25,
+        maximum_feature_z=8.0,
+        training_episode_count=20,
+        training_seed=7,
+    )
+    path = tmp_path / "contextual.json"
+    path.write_text(json.dumps(artifact.to_dict()), encoding="utf-8")
+
+    result = dispatch_muscle_memory_argv(
+        ["goalforge", "muscle-memory", "contextual-inspect", str(path)]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert result == 0
+    assert payload["artifact_hash"] == artifact.artifact_hash
+    assert payload["prototype_count"] == 1
+    assert payload["primitive_hashes"] == [artifact.primitives[0].primitive_hash]
+    assert payload["activation_ceiling"] == "SIM_ONLY"

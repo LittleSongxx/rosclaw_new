@@ -32,6 +32,7 @@ from rosclaw.simforge.g1_cerebellar_recovery import (
     G1CerebellarRecoveryReceipt,
     evaluate_g1_cerebellar_recovery_regime,
 )
+from rosclaw.simforge.g1_contextual_recovery import G1ContextualRecoveryArtifact
 from rosclaw.simforge.g1_muscle_memory import (
     G1_MUSCLE_MEMORY_ACTIONS,
     G1_MUSCLE_MEMORY_OBSERVATIONS,
@@ -222,6 +223,7 @@ class G1MuJoCoBackend:
         scenario: GoalForgeScenario,
         config: G1CerebellarRecoveryConfig | None = None,
         muscle_memory_artifact: G1MuscleMemoryArtifact | None = None,
+        contextual_recovery_artifact: G1ContextualRecoveryArtifact | None = None,
         fallback_config: G1CerebellarRecoveryConfig | None = None,
     ) -> G1CerebellarRecoveryController:
         """Bind the recovery segment to the exact qualified Body and motion."""
@@ -248,6 +250,7 @@ class G1MuJoCoBackend:
             standing_pose=standing_pose,
             config=resolved,
             muscle_memory_artifact=muscle_memory_artifact,
+            contextual_recovery_artifact=contextual_recovery_artifact,
             fallback_config=fallback_config,
         )
 
@@ -669,7 +672,10 @@ class G1MuJoCoBackend:
                             right_support=latest_right_support,
                             muscle_memory_observation=(
                                 proprioceptive_observation
-                                if recovery_controller.muscle_memory is not None
+                                if (
+                                    recovery_controller.muscle_memory is not None
+                                    or recovery_controller.contextual_recovery is not None
+                                )
                                 else None
                             ),
                         )
