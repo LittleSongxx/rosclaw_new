@@ -263,10 +263,38 @@ def test_one_sided_force_budget():
     left_rising = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 130.0})
     sup.step(_obs(ts, left=left_rising, visual=_visual(0.006)))  # -> CANDIDATE
     ts += 0.1
-    for _ in range(5):  # one_sided_frame_budget
+    # press-build: up to 3 extra fine steps while one-sided
+    for step in range(3):
+        decision = sup.step(_obs(ts, left=left_rising, visual=_visual(0.006)))
+        assert decision.kind == DECISION_ISSUE_STEP
+        assert "press-build" in decision.note
+        ts += 0.1
+    # then the consecutive one-sided budget runs out
+    for _ in range(5):
         sup.step(_obs(ts, left=left_rising, visual=_visual(0.006)))
         ts += 0.1
     assert sup.track.anomaly == "ONE_SIDED_FORCE"
+
+
+def test_press_build_can_reach_bilateral_confirm():
+    """The press-build path exists for exactly this: the receiver
+    crosses only after a few more fine steps."""
+    sup = _supervisor()
+    ts = _drive_to_coarse(sup)
+    sup.step(_obs(ts, visual=_visual(0.015)))
+    ts += 0.1
+    weak_left = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 30.0})
+    strong_right = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 130.0})
+    sup.step(_obs(ts, left=weak_left, right=strong_right, visual=_visual(0.006)))
+    assert sup.state == CONTACT_CANDIDATE
+    ts += 0.1
+    decision = sup.step(_obs(ts, left=weak_left, right=strong_right, visual=_visual(0.006)))
+    assert "press-build" in decision.note
+    ts += 0.1
+    # receiver crosses after the press builds; visual near corroborates
+    woke_left = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 61.0})
+    sup.step(_obs(ts, left=woke_left, right=strong_right, visual=_visual(0.004)))
+    assert sup.state == CONTACT_CONFIRMED
 
 
 def test_visual_force_conflict():

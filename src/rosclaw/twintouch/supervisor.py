@@ -125,6 +125,7 @@ class SupervisorTuning:
     max_coarse_steps: int = 6
     max_fine_steps: int = 8
     one_sided_frame_budget: int = 5
+    max_candidate_press_steps: int = 3  # press-build fine steps while one-sided
     dwell_ms: float = 300.0
     release_margin_raw: int = 60
     release_force_epsilon_raw: float = 20.0
@@ -289,6 +290,7 @@ class _EpisodeTrack:
     saturated_frames: int = 0
     dwell_actual_ms: float | None = None
     clear_wait_cycles: int = 0
+    candidate_press_steps: int = 0
 
 
 class ContactSupervisor:
@@ -657,6 +659,27 @@ class ContactSupervisor:
                 f"(visual_near={visual_near}, motion_response={motion_response})",
             )
         if not both_rise:
+            # press-build: a decisive first touch froze the approach at
+            # first contact — the receive side often needs a few more
+            # fine steps before its channel crosses (campaign
+            # passive_active: right +85..+88 decisive, left receive
+            # −4..−7 at the freeze point).  Allow up to
+            # max_candidate_press_steps extra fine steps (active sides
+            # only) while the one-sided counter runs as backstop.
+            if self.track.candidate_press_steps < self.tuning.max_candidate_press_steps:
+                self.track.candidate_press_steps += 1
+                return SupervisorDecision(
+                    kind=DECISION_ISSUE_STEP,
+                    note=(
+                        f"press-build step {self.track.candidate_press_steps}/"
+                        f"{self.tuning.max_candidate_press_steps} (one-sided, building receive)"
+                    ),
+                    step={
+                        "sides": self._active_sides(),
+                        "joints": {self.target_finger: -self.tuning.fine_step_raw},
+                        "step_raw": self.tuning.fine_step_raw,
+                    },
+                )
             self.track.one_sided_frames += 1
             if self.track.one_sided_frames >= self.tuning.one_sided_frame_budget:
                 return self._enter_recovery(
