@@ -934,8 +934,15 @@ class LimoToneExecutor(_LimoFixedWorkerExecutor):
             or result.get("volume_percent") != action.arguments["volume_percent"]
         ):
             return "Tone playback acknowledgement parameters do not match"
-        if not isinstance(result.get("device"), str) or not result["device"].startswith("plughw:"):
-            return "ALSA playback device acknowledgement is missing"
+        backend = result.get("playback_backend")
+        device = result.get("device")
+        if (
+            backend not in {"alsa", "pulseaudio"}
+            or not isinstance(device, str)
+            or (backend == "alsa" and not device.startswith("plughw:"))
+            or (backend == "pulseaudio" and not device.startswith("pulse:alsa_output.usb-"))
+        ):
+            return "Audio playback backend acknowledgement is missing or invalid"
         if not isinstance(result.get("frame_count"), int) or result["frame_count"] < 1:
             return "ALSA playback frame acknowledgement is missing"
         return None
@@ -963,6 +970,7 @@ class LimoToneExecutor(_LimoFixedWorkerExecutor):
             },
             driver_ack={
                 "acknowledged": True,
+                "playback_backend": result["playback_backend"],
                 "frame_count": result["frame_count"],
                 "sample_rate_hz": result["sample_rate_hz"],
                 "mixer_restored": True,

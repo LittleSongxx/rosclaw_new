@@ -357,7 +357,8 @@ def test_limo_tone_executor_returns_driver_confirmed_receipt(tmp_path, monkeypat
         "accepted": True,
         "action_id": action.action_id,
         "operation": "PLAY_TONE",
-        "device": "plughw:2,0",
+        "device": "pulse:alsa_output.usb-0c76_USB_PnP_Audio_Device-00.analog-stereo",
+        "playback_backend": "pulseaudio",
         "frequency_hz": 660,
         "duration_sec": 0.6,
         "volume_percent": 18,
@@ -378,6 +379,7 @@ def test_limo_tone_executor_returns_driver_confirmed_receipt(tmp_path, monkeypat
 
     assert result.final_state is ActionState.COMPLETED
     assert result.evidence_level is EvidenceLevel.DRIVER_CONFIRMED
+    assert result.driver_ack["playback_backend"] == "pulseaudio"
     assert result.driver_ack["mixer_restored"] is True
     assert result.verification_result["acoustic_output_independently_observed"] is False
 
@@ -533,6 +535,7 @@ def test_signed_limo_pack_runs_tone_through_daemon_permit_and_receipt(
         "action_id": action.action_id,
         "operation": "PLAY_TONE",
         "device": "plughw:2,0",
+        "playback_backend": "alsa",
         "frequency_hz": 660,
         "duration_sec": 0.6,
         "volume_percent": 18,
