@@ -599,7 +599,10 @@ MUTUAL_PRESENT_RAW = {"index": 720, "middle": 720, "ring": 720, "little": 720, "
 # active_passive_0/1 UNINTENDED_CONTACT: the presented hand's open
 # middle finger stuck up right beside the target tip and the
 # approaching finger grazed it — the guard's correct first catch).
-RETRACT_RAW = 350
+# (350 bottoms out on the palm — right ring read +315 self-load and the
+#  watchdog fired during present; 600 keeps neighbor tips out of the
+#  engagement zone with clean statics)
+RETRACT_RAW = 600
 THUMB_TUCK_RAW = 250
 THUMB_ROT_TUCK_RAW = 250
 # Per-hand tuck policy for non-thumb pairs (measured on index):
