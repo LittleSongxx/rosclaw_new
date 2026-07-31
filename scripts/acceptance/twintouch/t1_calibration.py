@@ -127,7 +127,6 @@ SLAVE_CANDIDATES = (1, 2)
 BODY_IDS = {"left": "rh56_left_01", "right": "rh56_right_01"}
 OPEN_RAW = {j: 1000 for j in RH56_JOINTS}
 TELEMETRY_MIN_INTERVAL_S = {"left": 0.25, "right": 0.0}
-WATCHDOG_INTERVAL_S = 0.5
 
 
 # ---------------------------------------------------------------- hardware
