@@ -3,7 +3,7 @@ schema_version: rosclaw.robot_pack.v1
 pack:
   namespace: ros-claw
   name: limo-ros1
-  version: 0.1.4
+  version: 0.1.5
   title: AgileX LIMO ROS 1 Guarded Localization Pack
   summary: Permit-gated AMCL localization initialization for AgileX LIMO on ROS Melodic.
   vendor: AgileX Robotics
@@ -24,7 +24,7 @@ components:
   - kind: hardware_adapter
     id: limo-ros-mcp
     ref: https://github.com/ros-claw/limo-ros-mcp
-    version: fd9275c9de22f6158a38edc4b299e6657bce38bb
+    version: 8242a33991187c62020000f8faf51dc44f0f9d44
     required: true
   - kind: capability
     id: limo-set-initial-pose
@@ -47,7 +47,7 @@ components:
     ref: rosclaw://verification/limo-initial-pose@1
     version: "1"
     path: verification/actuation.yaml
-    digest: sha256:5ce5042da0ae97e3ad8b493ea1e06957f9cb8d15ab039a1c7f0128d35215b8d7
+    digest: sha256:1db93bd4240a9b918085ebea65a01d801d0f48a0014234ef67cc079257bee3a7
   - kind: example_app
     id: limo-initial-pose-request
     ref: rosclaw://example/limo-initial-pose-request@1
@@ -58,7 +58,7 @@ components:
     id: limo-pack-docs
     ref: docs://robot-pack/limo-ros1
     path: docs/README.md
-    digest: sha256:41585d0490fe8aec36d6e00fbf85d3af455f087df0f7d5747134398f43c9288a
+    digest: sha256:8ff0728d1099477f0dc223265b07063e7a177481babac46ae4609ca535ef6c02
 
 device:
   type: mobile_base
@@ -129,6 +129,6 @@ integrity:
   signature:
     required: true
     scheme: ed25519
-    key_id: rosclaw-limo-pack-v5
+    key_id: rosclaw-limo-pack-v6
     file: signatures/manifest.ed25519
     payload: manifest-and-checksums-v1
