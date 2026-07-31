@@ -18,6 +18,7 @@ from rosclaw.provider.core.request import ProviderRequest
 from rosclaw.provider.core.response import ProviderResponse
 from rosclaw.provider.runtimes.base import RuntimeAdapter
 from rosclaw.provider.runtimes.http_runtime import HTTPRuntime
+from rosclaw.provider.runtimes.openai_compat_runtime import OpenAICompatRuntime
 from rosclaw.provider.runtimes.python_runtime import PythonRuntime
 from rosclaw.provider.runtimes.ros2_runtime import ROS2Runtime
 
@@ -26,9 +27,10 @@ class GenericProvider(Provider):
     """Generic provider that delegates inference to a RuntimeAdapter.
 
     The RuntimeAdapter is selected from manifest.runtime.backend:
-        - http   -> HTTPRuntime
-        - python -> PythonRuntime
-        - ros2   -> ROS2Runtime
+        - http              -> HTTPRuntime
+        - openai_compatible -> OpenAICompatRuntime
+        - python            -> PythonRuntime
+        - ros2              -> ROS2Runtime
     """
 
     def __init__(self, manifest: ProviderManifest):
@@ -46,6 +48,18 @@ class GenericProvider(Provider):
             self._runtime = HTTPRuntime(
                 name=name,
                 endpoint=runtime_spec.endpoint,
+                timeout_sec=float(runtime_spec.env.get("timeout_sec", 30.0)),
+                retries=int(runtime_spec.env.get("retries", 1)),
+                headers=self._parse_headers(runtime_spec.env.get("headers", "")),
+            )
+        elif backend in ("openai_compatible", "openai"):
+            self._runtime = OpenAICompatRuntime(
+                name=name,
+                endpoint=runtime_spec.endpoint,
+                api_kind=runtime_spec.env.get("api_kind", "chat_completions"),
+                model=runtime_spec.env.get("model", ""),
+                model_fallback=runtime_spec.env.get("model_fallback", ""),
+                health_endpoint=runtime_spec.env.get("health_endpoint", ""),
                 timeout_sec=float(runtime_spec.env.get("timeout_sec", 30.0)),
                 retries=int(runtime_spec.env.get("retries", 1)),
                 headers=self._parse_headers(runtime_spec.env.get("headers", "")),
@@ -138,4 +152,10 @@ class GenericProvider(Provider):
         base = await super().health()
         if self._runtime is not None:
             base["runtime_started"] = self._runtime._started
+            health_detail = getattr(self._runtime, "health_detail", None)
+            if health_detail is not None and self._runtime._started:
+                try:
+                    base["endpoint"] = await health_detail()
+                except Exception as e:  # noqa: BLE001 - health must not raise
+                    base["endpoint"] = {"reachable": False, "error": str(e)}
         return base

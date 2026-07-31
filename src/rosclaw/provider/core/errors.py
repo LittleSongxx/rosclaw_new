@@ -43,4 +43,26 @@ class ManifestValidationError(ProviderError):
 
 
 class RuntimeAdapterError(ProviderError):
-    """Raised when a runtime adapter fails to invoke a model/skill."""
+    """Raised when a runtime adapter fails to invoke a model/skill.
+
+    ``kind`` is an optional structured failure category that routing and
+    fallback policies can match on (e.g. ``fallback_on: [timeout,
+    unavailable, invalid_response]``). Empty string means "unclassified"
+    and preserves the previous behavior.
+    """
+
+    KIND_TIMEOUT = "timeout"
+    KIND_UNAVAILABLE = "unavailable"
+    KIND_UNHEALTHY = "unhealthy"
+    KIND_INVALID_RESPONSE = "invalid_response"
+    KIND_HTTP_ERROR = "http_error"
+
+    def __init__(
+        self,
+        message: str,
+        provider: str = "",
+        request_id: str = "",
+        kind: str = "",
+    ):
+        super().__init__(message, provider, request_id)
+        self.kind = kind
