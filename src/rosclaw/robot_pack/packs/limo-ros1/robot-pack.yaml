@@ -24,7 +24,7 @@ components:
   - kind: hardware_adapter
     id: limo-ros-mcp
     ref: https://github.com/ros-claw/limo-ros-mcp
-    version: 55eb5053f4d840a053799d5b1c982b2ffa7b062b
+    version: 757b5c4e1a8bf229efe34ecacdb4293d6da1e6ea
     required: true
   - kind: capability
     id: limo-set-initial-pose
@@ -88,7 +88,7 @@ components:
     id: limo-pack-docs
     ref: docs://robot-pack/limo-ros1
     path: docs/README.md
-    digest: sha256:1575402913eb77420375dbd2d953842014db64c3c39b2c0b1013d456911521a5
+    digest: sha256:872cde7ef7bc74697a8642d132d12b40267bfc30a2a3e3c026259f92202642ee
 
 device:
   type: mobile_base

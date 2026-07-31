@@ -450,11 +450,11 @@ def test_daemon_loader_registers_limo_initial_pose_executor(tmp_path) -> None:
             server_name="limo-ros-mcp",
             manifest_id="limo-ros-mcp",
             name="limo-ros-mcp",
-            version="0.8.2",
+            version="0.8.3",
             installed_at="2026-07-30T00:00:00Z",
             artifact_type="test",
             server_dir=str(home / "mcp"),
-            extra={"repo_commit": "55eb5053f4d840a053799d5b1c982b2ffa7b062b"},
+            extra={"repo_commit": "757b5c4e1a8bf229efe34ecacdb4293d6da1e6ea"},
         )
     )
     configure_robot_instance(
@@ -508,11 +508,11 @@ def test_signed_limo_pack_runs_tone_through_daemon_permit_and_receipt(
             server_name="limo-ros-mcp",
             manifest_id="limo-ros-mcp",
             name="limo-ros-mcp",
-            version="0.8.2",
+            version="0.8.3",
             installed_at="2026-07-31T00:00:00Z",
             artifact_type="test",
             server_dir=str(adapter_source),
-            extra={"repo_commit": "55eb5053f4d840a053799d5b1c982b2ffa7b062b"},
+            extra={"repo_commit": "757b5c4e1a8bf229efe34ecacdb4293d6da1e6ea"},
         )
     )
     instance = configure_robot_instance(
