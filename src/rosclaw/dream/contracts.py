@@ -29,7 +29,9 @@ def _optional_hash(label: str, value: str | None) -> None:
         _require_hash(label, value)
 
 
-def _hash_tuple(values: tuple[str, ...], *, label: str, allow_empty: bool = False) -> tuple[str, ...]:
+def _hash_tuple(
+    values: tuple[str, ...], *, label: str, allow_empty: bool = False
+) -> tuple[str, ...]:
     normalized = tuple(values)
     if not allow_empty and not normalized:
         raise ValueError(f"{label} must not be empty")
@@ -71,10 +73,19 @@ class DreamBudget:
     schema_version: str = "rosclaw.dream.budget.v1"
 
     def __post_init__(self) -> None:
-        for label in ("max_gpu_seconds", "max_wall_seconds", "max_policy_change", "max_anchor_drift"):
+        for label in (
+            "max_gpu_seconds",
+            "max_wall_seconds",
+            "max_policy_change",
+            "max_anchor_drift",
+        ):
             value = getattr(self, label)
-            if not math.isfinite(value):
+            if isinstance(value, bool) or not math.isfinite(value):
                 raise ValueError(f"{label} must be finite")
+        if isinstance(self.max_cpu_rollouts, bool) or not isinstance(self.max_cpu_rollouts, int):
+            raise ValueError("max_cpu_rollouts must be an integer")
+        if isinstance(self.max_candidates, bool) or not isinstance(self.max_candidates, int):
+            raise ValueError("max_candidates must be an integer")
         if self.max_gpu_seconds < 0.0:
             raise ValueError("max_gpu_seconds must be non-negative")
         if self.max_cpu_rollouts < 0:
@@ -242,10 +253,14 @@ class DreamEpisode:
             self.world_model_hash is None or self.predicted_outcome_hash is None
         ):
             raise ValueError("world-model evidence requires model and prediction hashes")
-        if self.evidence_policy.level in {
-            EvidenceLevel.PHYSICS_REPLAY,
-            EvidenceLevel.ACCELERATED_SIM,
-        } and self.simulated_outcome_hash is None:
+        if (
+            self.evidence_policy.level
+            in {
+                EvidenceLevel.PHYSICS_REPLAY,
+                EvidenceLevel.ACCELERATED_SIM,
+            }
+            and self.simulated_outcome_hash is None
+        ):
             raise ValueError("simulation evidence requires a simulated outcome")
         if (
             self.evidence_policy.level is EvidenceLevel.EXECUTION_RECEIPT

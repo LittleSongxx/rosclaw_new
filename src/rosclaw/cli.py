@@ -6737,6 +6737,11 @@ def main() -> int:
         help="Inspect or call the local rosclawd control plane",
         add_help=False,
     )
+    subparsers.add_parser(
+        "dream",
+        help="Plan and schedule bounded SIM-only DreamForge campaigns",
+        add_help=False,
+    )
 
     app_parser = subparsers.add_parser("app", help="Install, author, and run Capability Apps")
     app_subparsers = app_parser.add_subparsers(dest="app_command")
