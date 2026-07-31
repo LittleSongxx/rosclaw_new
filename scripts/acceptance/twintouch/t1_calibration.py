@@ -594,15 +594,17 @@ def _min_pairwise_distance(a: np.ndarray, b: np.ndarray, *, max_points: int = 80
 PRESENT_RAW = {"index": 450, "middle": 450, "ring": 450, "little": 450, "thumb": 450}
 PREAPPROACH_RAW = {"index": 680, "middle": 680, "ring": 680, "little": 680, "thumb": 550}
 MUTUAL_PRESENT_RAW = {"index": 850, "middle": 850, "ring": 850, "little": 850, "thumb": 500}  # 850/850: arcs never cross; the bulge approach happens INSIDE the supervisor (campaign mutual_0: staging through ~700 bulge grazed right ring +252)
-# v4 §3.2: 其余手指保持收回或安全位 — non-target contact fingers
-# RETRACT out of the contact zone on BOTH hands (campaign
-# active_passive_0/1 UNINTENDED_CONTACT: the presented hand's open
-# middle finger stuck up right beside the target tip and the
-# approaching finger grazed it — the guard's correct first catch).
-# (350 bottoms out on the palm — right ring read +315 self-load and the
-#  watchdog fired during present; 600 keeps neighbor tips out of the
-#  engagement zone with clean statics)
-RETRACT_RAW = 600
+# v4 §3.2 其余手指保持收回或安全位 — analysis after three watchdog
+# aborts: the corridor hazard is the THUMB, not the neighbors.
+# Open ring/middle/little tips point UP out of the engagement zone
+# (the earlier active_passive UNINTENDED was the open RIGHT THUMB's
+# tip sitting in the corridor); retracting neighbors by curling them
+# creates self-collision transients of their own (right ring +315 at
+# 350, right little +222 at 600).  Policy: neighbors stay OPEN; the
+# RIGHT thumb FLEXES to 600 with thumb_rot 1000 (out of the corridor,
+# no index-flexion block); the LEFT thumb tucks 250/250 (required to
+# free its index flexion).
+RETRACT_RAW = 1000
 THUMB_TUCK_RAW = 250
 THUMB_ROT_TUCK_RAW = 250
 # Per-hand tuck policy for non-thumb pairs (measured on index):
@@ -615,13 +617,19 @@ def _present_targets(pair_id: str, mode: str) -> dict[str, dict[str, int]]:
     targets = {"left": dict(OPEN_RAW), "right": dict(OPEN_RAW)}
 
     def _shape(side: str, side_targets: dict[str, int]) -> None:
-        # retract every non-target contact finger; thumb per-hand policy
+        # neighbors stay open (tips up, out of the corridor); thumbs
+        # per-hand policy
         for other in ("index", "middle", "ring", "little"):
             if other != finger:
                 side_targets[other] = RETRACT_RAW
-        if finger != "thumb" and HAND_TUCK_POLICY[side]:
-            side_targets["thumb"] = THUMB_TUCK_RAW
-            side_targets["thumb_rot"] = THUMB_ROT_TUCK_RAW
+        if finger != "thumb":
+            if HAND_TUCK_POLICY[side]:
+                side_targets["thumb"] = THUMB_TUCK_RAW
+                side_targets["thumb_rot"] = THUMB_ROT_TUCK_RAW
+            else:
+                # right: flex the thumb out of the corridor, never tuck
+                side_targets["thumb"] = 600
+                side_targets["thumb_rot"] = 1000
 
     if mode == "mutual":
         for side in ("left", "right"):
