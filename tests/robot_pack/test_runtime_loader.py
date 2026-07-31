@@ -456,7 +456,7 @@ def test_daemon_loader_registers_limo_initial_pose_executor(tmp_path) -> None:
             installed_at="2026-07-30T00:00:00Z",
             artifact_type="test",
             server_dir=str(home / "mcp"),
-            extra={"repo_commit": "72b77036f8f3cf0b8d936bff46a2df292db6f97f"},
+            extra={"repo_commit": "06c4ace73f14f05c5b3066aa102ca518679b9cf0"},
         )
     )
     configure_robot_instance(
@@ -514,7 +514,7 @@ def test_signed_limo_pack_runs_tone_through_daemon_permit_and_receipt(
             installed_at="2026-07-31T00:00:00Z",
             artifact_type="test",
             server_dir=str(adapter_source),
-            extra={"repo_commit": "72b77036f8f3cf0b8d936bff46a2df292db6f97f"},
+            extra={"repo_commit": "06c4ace73f14f05c5b3066aa102ca518679b9cf0"},
         )
     )
     instance = configure_robot_instance(

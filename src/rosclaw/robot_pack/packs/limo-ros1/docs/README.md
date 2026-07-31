@@ -2,7 +2,7 @@
 
 This Pack binds the `limo` e-URDF Body to the independently versioned
 `ros-claw/limo-ros-mcp` adapter at commit
-`72b77036f8f3cf0b8d936bff46a2df292db6f97f` (MCP 0.8.4).
+`06c4ace73f14f05c5b3066aa102ca518679b9cf0` (MCP 0.8.4).
 
 The first REAL capability is `limo.set_initial_pose`. The Agent submits a
 validated map-frame estimate to `rosclawd`; the daemon validates an exact
