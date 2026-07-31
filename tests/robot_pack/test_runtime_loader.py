@@ -357,7 +357,8 @@ def test_limo_tone_executor_returns_driver_confirmed_receipt(tmp_path, monkeypat
         "accepted": True,
         "action_id": action.action_id,
         "operation": "PLAY_TONE",
-        "device": "plughw:2,0",
+        "device": "pulse:alsa_output.usb-0c76_USB_PnP_Audio_Device-00.analog-stereo",
+        "playback_backend": "pulseaudio",
         "frequency_hz": 660,
         "duration_sec": 0.6,
         "volume_percent": 18,
@@ -378,6 +379,7 @@ def test_limo_tone_executor_returns_driver_confirmed_receipt(tmp_path, monkeypat
 
     assert result.final_state is ActionState.COMPLETED
     assert result.evidence_level is EvidenceLevel.DRIVER_CONFIRMED
+    assert result.driver_ack["playback_backend"] == "pulseaudio"
     assert result.driver_ack["mixer_restored"] is True
     assert result.verification_result["acoustic_output_independently_observed"] is False
 
@@ -450,11 +452,11 @@ def test_daemon_loader_registers_limo_initial_pose_executor(tmp_path) -> None:
             server_name="limo-ros-mcp",
             manifest_id="limo-ros-mcp",
             name="limo-ros-mcp",
-            version="0.8.3",
+            version="0.8.5",
             installed_at="2026-07-30T00:00:00Z",
             artifact_type="test",
             server_dir=str(home / "mcp"),
-            extra={"repo_commit": "757b5c4e1a8bf229efe34ecacdb4293d6da1e6ea"},
+            extra={"repo_commit": "79069f7870ddf972f32bfd438752860fed3dd97d"},
         )
     )
     configure_robot_instance(
@@ -472,7 +474,7 @@ def test_daemon_loader_registers_limo_initial_pose_executor(tmp_path) -> None:
     status = load_daemon_robot_pack(runtime, robot_id="limo", home=home)
 
     assert status is not None
-    assert status["pack_ref"].endswith("limo-ros1@0.1.6")
+    assert status["pack_ref"].endswith("limo-ros1@0.1.7")
     assert status["registered_executors"] == [
         "limo.set_initial_pose:SHADOW",
         "limo.set_initial_pose:REAL",
@@ -508,11 +510,11 @@ def test_signed_limo_pack_runs_tone_through_daemon_permit_and_receipt(
             server_name="limo-ros-mcp",
             manifest_id="limo-ros-mcp",
             name="limo-ros-mcp",
-            version="0.8.3",
+            version="0.8.5",
             installed_at="2026-07-31T00:00:00Z",
             artifact_type="test",
             server_dir=str(adapter_source),
-            extra={"repo_commit": "757b5c4e1a8bf229efe34ecacdb4293d6da1e6ea"},
+            extra={"repo_commit": "79069f7870ddf972f32bfd438752860fed3dd97d"},
         )
     )
     instance = configure_robot_instance(
@@ -533,6 +535,7 @@ def test_signed_limo_pack_runs_tone_through_daemon_permit_and_receipt(
         "action_id": action.action_id,
         "operation": "PLAY_TONE",
         "device": "plughw:2,0",
+        "playback_backend": "alsa",
         "frequency_hz": 660,
         "duration_sec": 0.6,
         "volume_percent": 18,

@@ -2,7 +2,7 @@
 
 This Pack binds the `limo` e-URDF Body to the independently versioned
 `ros-claw/limo-ros-mcp` adapter at commit
-`757b5c4e1a8bf229efe34ecacdb4293d6da1e6ea` (MCP 0.8.3).
+`79069f7870ddf972f32bfd438752860fed3dd97d` (MCP 0.8.5).
 
 The first REAL capability is `limo.set_initial_pose`. The Agent submits a
 validated map-frame estimate to `rosclawd`; the daemon validates an exact
@@ -11,12 +11,18 @@ MCP server do not import rospy or publish `/initialpose`.
 
 Revision 0.1.6 adds `limo.navigate_to_pose` and `limo.play_tone`. Both use
 in-context confirmation with opaque, exact-action permits. The daemon launches
-fixed Python 2 workers from the locked MCP revision. Navigation rechecks AMCL,
-lidar, odometry, chassis status, TF, and move_base before dispatch, then requires
-move_base `SUCCEEDED`, final AMCL tolerance, and stopped odometry. Tone playback
-accepts only 440/660/880 Hz, 0.2–1.0 seconds, and 5–25% volume, restores the
-previous mixer state, and reports only `DRIVER_CONFIRMED` evidence unless a
-human separately confirms hearing it.
+fixed Python 2 workers from the locked MCP revision.
+
+Revision 0.1.7 adapts those workers to the live LIMO host. Navigation treats
+stationary, event-driven AMCL message age as a warning while retaining blocking
+covariance and live `map -> odom -> base_link` TF checks. It subscribes to AMCL
+before dispatch and requires a post-dispatch pose, move_base `SUCCEEDED`, final
+AMCL tolerance, and stopped odometry. A warning-only DEGRADED snapshot remains
+usable, but any BLOCK check still prevents dispatch. Tone playback accepts only
+440/660/880 Hz, 0.2–1.0 seconds, and 5–25% volume. It uses the uniquely
+allowlisted USB PulseAudio sink when PulseAudio owns the sound card, falls back
+to direct ALSA otherwise, restores the previous mixer state, and reports only
+`DRIVER_CONFIRMED` evidence unless a human separately confirms hearing it.
 
 H1 means only that the signed contract and executor tests pass. H4 requires a
 real LIMO, an AMCL subscriber, post-dispatch `/amcl_pose`, a `map -> odom`
