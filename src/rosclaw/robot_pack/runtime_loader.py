@@ -32,6 +32,37 @@ class RobotPackRuntimeError(RuntimeError):
     """Raised when daemon startup encounters a configured but unsafe Pack."""
 
 
+_DAEMON_EXECUTOR_CONTRACTS: dict[str, tuple[str, frozenset[str]]] = {
+    "camera.capture_rgbd": ("read_only", frozenset({"REAL"})),
+    "limo.set_initial_pose": ("actuation", frozenset({"SHADOW", "REAL"})),
+}
+
+
+def validate_daemon_loader_contract(
+    manifest: RobotPackManifest,
+) -> tuple[bool, tuple[str, ...]]:
+    """Validate that every declared capability has a matching daemon executor contract."""
+
+    errors: list[str] = []
+    for capability in manifest.capabilities:
+        expected = _DAEMON_EXECUTOR_CONTRACTS.get(capability.id)
+        if expected is None:
+            errors.append(f"no daemon executor is implemented for {capability.id}")
+            continue
+        expected_safety_class, required_modes = expected
+        if capability.safety_class != expected_safety_class:
+            errors.append(
+                f"{capability.id} requires safety_class {expected_safety_class}, "
+                f"got {capability.safety_class}"
+            )
+        missing_modes = required_modes.difference(capability.execution_modes)
+        if missing_modes:
+            errors.append(
+                f"{capability.id} is missing execution modes: {', '.join(sorted(missing_modes))}"
+            )
+    return not errors, tuple(errors)
+
+
 class _ArtifactDirectoryError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
@@ -600,17 +631,15 @@ def load_daemon_robot_pack(
             "Configured Robot Pack adapter binding is missing or no longer matches its locked revision"
         )
 
+    loader_contract_ok, loader_contract_errors = validate_daemon_loader_contract(manifest)
+    if not loader_contract_ok:
+        raise RobotPackRuntimeError("; ".join(loader_contract_errors))
+
     registered: list[str] = []
     for capability in manifest.capabilities:
         if capability.id == "camera.capture_rgbd" and capability.safety_class == "read_only":
-            if "REAL" not in capability.execution_modes:
-                raise RobotPackRuntimeError("RealSense capture capability must declare REAL mode")
             executor: Any = RealSenseCaptureExecutor(instance, home=resolved_home)
         elif capability.id == "limo.set_initial_pose" and capability.safety_class == "actuation":
-            if not {"SHADOW", "REAL"}.issubset(capability.execution_modes):
-                raise RobotPackRuntimeError(
-                    "LIMO initial-pose capability must declare SHADOW and REAL modes"
-                )
             record_entry = InstalledRegistry(home=resolved_home).get(current_adapter.server_name)
             if record_entry is None:
                 raise RobotPackRuntimeError("LIMO adapter installation record is missing")
