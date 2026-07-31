@@ -56,6 +56,76 @@ def test_provider_route_reports_unroutable_capability(monkeypatch, capsys):
     assert payload["selected_provider"] is None
 
 
+def test_provider_route_prefers_installed_provider(monkeypatch, capsys, tmp_path):
+    """Operator-installed providers outrank the built-in contract catalog."""
+    provider_dir = tmp_path / "providers" / "site_llm"
+    provider_dir.mkdir(parents=True)
+    (provider_dir / "provider.yaml").write_text(
+        "name: site_llm\n"
+        "version: '0.1.0'\n"
+        "type: llm\n"
+        "description: test site provider\n"
+        "capabilities: [llm.chat, wiki.answer]\n"
+        "runtime:\n"
+        "  backend: openai_compatible\n"
+        "  endpoint: http://127.0.0.1:9/v1\n"
+        "safety:\n"
+        "  executable: false\n"
+        "  requires_guard: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ROSCLAW_HOME", str(tmp_path))
+
+    code, payload = _run_cli(
+        monkeypatch,
+        capsys,
+        ["provider", "route", "--capability", "wiki.answer", "--json"],
+    )
+
+    assert code == 0
+    assert payload["ok"] is True
+    assert payload["selected_provider"] == "site_llm"
+    assert payload["candidates"][0]["origin"] == "installed"
+    assert "installed provider manifest" in payload["reason"]
+
+
+def test_provider_route_installed_outranks_builtin_for_same_capability(
+    monkeypatch, capsys, tmp_path
+):
+    """An installed provider wins even when a builtin declares the capability."""
+    provider_dir = tmp_path / "providers" / "site_llm"
+    provider_dir.mkdir(parents=True)
+    (provider_dir / "provider.yaml").write_text(
+        "name: site_llm\n"
+        "version: '0.1.0'\n"
+        "type: llm\n"
+        "description: test site provider\n"
+        "capabilities: [llm.chat]\n"
+        "runtime:\n"
+        "  backend: openai_compatible\n"
+        "  endpoint: http://127.0.0.1:9/v1\n"
+        "safety:\n"
+        "  executable: false\n"
+        "  requires_guard: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ROSCLAW_HOME", str(tmp_path))
+
+    code, payload = _run_cli(
+        monkeypatch,
+        capsys,
+        ["provider", "route", "--capability", "llm.chat", "--json"],
+    )
+
+    assert code == 0
+    assert payload["selected_provider"] == "site_llm"
+    origins = {c["name"]: c["origin"] for c in payload["candidates"]}
+    assert origins["site_llm"] == "installed"
+    # The builtin 'llm' contract is still listed as a fallback candidate.
+    assert "llm" in payload["fallbacks"]
+
+
+
 def test_provider_benchmark_dry_run_json_contract(monkeypatch, capsys):
     code, payload = _run_cli(
         monkeypatch,

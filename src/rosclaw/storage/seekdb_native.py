@@ -45,6 +45,7 @@ _EMBEDDED_PROCESS_TARGET: tuple[str, str] | None = None
 _TEXT_FIELDS = (
     "title",
     "document",
+    "content",
     "instruction",
     "description",
     "summary",

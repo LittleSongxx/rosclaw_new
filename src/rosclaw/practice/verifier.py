@@ -75,6 +75,7 @@ class PracticeVerifier:
             self._verify_session(catalog, practice_id, report)
             self._verify_episodes(catalog, practice_id, report, required_event_types)
             self._verify_artifacts(catalog, practice_id, report)
+            self._verify_episode_artifact_manifests(catalog, practice_id, report)
         finally:
             catalog.close()
 
@@ -274,6 +275,65 @@ class PracticeVerifier:
                     "artifact",
                     f"{artifact_id}: size mismatch",
                 )
+
+    def _verify_episode_artifact_manifests(
+        self, catalog: PracticeCatalog, practice_id: str, report: VerificationReport
+    ) -> None:
+        """Cross-check every episode ``artifact_manifest.yaml`` on disk.
+
+        Distill products (failures, body cognition, How interventions,
+        candidates, media, ...) are hash-registered by the ArtifactStore in
+        the per-episode artifact manifest, not in the catalog.  Verify each
+        listed artifact's path, sha256 and size so post-hoc tampering of
+        distilled knowledge is detected.
+        """
+        practice = catalog.get_practice(practice_id)
+        if practice is None:
+            return
+        session_id = practice.get("session_id")
+        if not session_id:
+            return
+
+        session_root = self._layout.sessions_dir / str(session_id)
+        if not session_root.exists():
+            return
+        manifests = sorted(session_root.rglob("artifact_manifest.yaml"))
+        if not manifests:
+            return
+        report.checked.append("episode_artifact_manifests")
+
+        import yaml
+
+        for manifest_path in manifests:
+            try:
+                manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+            except Exception as exc:  # noqa: BLE001
+                report.add("error", "artifact_manifest",
+                           f"{manifest_path.name}: unreadable: {exc}")
+                continue
+            artifacts = manifest.get("artifacts") or {}
+            for artifact_id, entry in artifacts.items():
+                if not isinstance(entry, dict):
+                    continue
+                artifact_path = Path(entry.get("path") or "")
+                if not artifact_path.exists():
+                    report.add("error", "artifact_manifest",
+                               f"{artifact_id}: file missing: {artifact_path}")
+                    continue
+                expected_sha = entry.get("sha256")
+                if expected_sha:
+                    actual_sha = ArtifactStore._compute_sha256(artifact_path)
+                    if actual_sha != expected_sha:
+                        report.add("error", "artifact_manifest",
+                                   f"{artifact_id}: sha256 mismatch")
+                        continue
+                expected_size = entry.get("size_bytes")
+                if expected_size is not None and artifact_path.stat().st_size != expected_size:
+                    report.add(
+                        "warning" if not report.strict else "error",
+                        "artifact_manifest",
+                        f"{artifact_id}: size mismatch",
+                    )
 
     @staticmethod
     def _verify_jsonl(path: Path, report: VerificationReport) -> None:

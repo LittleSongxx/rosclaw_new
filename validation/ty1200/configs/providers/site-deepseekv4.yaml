@@ -1,0 +1,53 @@
+# TEMPLATE — copy to ~/.rosclaw/providers/site-deepseekv4/provider.yaml and
+# replace __SITE_LOCAL_HOST__ with the site LAN address. Do NOT commit the
+# resolved file (site address must not enter the public repo).
+name: site_deepseekv4
+version: "0.1.0"
+type: llm
+
+description: >
+  Site-local DeepSeekV4 OpenAI-compatible provider for knowledge
+  compilation, Wiki answering, failure explanation and hypothesis generation.
+  LAN service - NOT on-device, must not be presented as fully offline.
+
+capabilities:
+  - llm.chat
+  - knowledge.compile
+  - wiki.answer
+  - how.explain
+  - auto.hypothesis
+  - trace.summarize
+
+modalities:
+  input: [text]
+  output: [text, structured_json]
+
+runtime:
+  backend: openai_compatible
+  protocol: http
+  endpoint: http://__SITE_LOCAL_HOST__:31308/v1
+  device: remote
+  env:
+    api_kind: chat_completions
+    model: deepseekv4
+    health_endpoint: http://__SITE_LOCAL_HOST__:31308/v1/models
+    timeout_sec: "120"
+    retries: "1"
+
+safety:
+  executable: false
+  requires_guard: true
+  fallback_provider: local_rule_planner
+
+observability:
+  log_inputs: false
+  log_outputs: true
+  trace_level: standard
+  redact_reasoning: true
+
+data_policy:
+  allow_text: true
+  allow_images: false   # media MUST NOT be sent to DeepSeek (§6.3)
+  allow_video: false
+  allow_raw_robot_logs: false
+  allow_credentials: false
