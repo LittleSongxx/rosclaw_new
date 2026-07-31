@@ -913,12 +913,8 @@ def run() -> int:
             # stopped ~2 steps short of contact — the pre-approach puts
             # us at the fine-zone edge, not inside it; 12 covers the
             # remaining ~4mm with margin, still bounded.
-            max_fine_steps=12 if args.modes != "mutual" else 16,
-            # mutual: present 720 sits at the bulge edge — a 40-raw
-            # coarse step skips through the 690-710 max-reach zone in
-            # one servo swing (pilot 20 EARLY_CONTACT transient).
-            # Enter FINE immediately and take the bulge at 10-raw steps.
-            coarse_to_fine_distance_m=0.06 if args.modes == "mutual" else 0.02,
+            max_fine_steps=12,
+            coarse_to_fine_distance_m=0.02,
             # pilot 9: CONTACT_CONFIRMED then RELEASE_FAILED — the
             # right's +202 press did not fall within ±20 inside 4
             # release steps; force hysteresis on this rig decays over
@@ -946,6 +942,17 @@ def run() -> int:
                         report["aborts"].append(f"thermal continue gate: {max(temps_now)}°C")
                         print(json.dumps(report, indent=2, default=str))
                         return 3
+                    # per-EPISODE tuning: mutual enters FINE immediately
+                    # (present 720 sits at the bulge edge — a 40-raw
+                    # coarse step skips through it, pilot 20); single-
+                    # side keeps the 2cm coarse->fine switch.
+                    episode_tuning = SupervisorTuning(
+                        **{
+                            **tuning.__dict__,
+                            "max_fine_steps": 16 if mode == "mutual" else 12,
+                            "coarse_to_fine_distance_m": 0.06 if mode == "mutual" else 0.02,
+                        }
+                    )
                     record = _run_episode(
                         pair_id=pair_id,
                         mode=mode,
@@ -956,7 +963,7 @@ def run() -> int:
                         collector=collector,
                         controllers=controllers,
                         baselines=baselines,
-                        tuning=tuning,
+                        tuning=episode_tuning,
                         config=config,
                         out_dir=out_dir,
                     )
