@@ -261,16 +261,61 @@ class ObservationCollector:
         self._visual: VisualObservation | None = None
         self._visual_ts: float | None = None
         self._last_depth: np.ndarray | None = None
+        self._watch_target: str | None = None
         self.abort_reason: str | None = None
+        from collections import deque
+
+        # rolling median of the 3D nearest-cluster distance — single
+        # frames flicker 41mm -> 3mm at identical stable poses
+        # (measured 20260731T130x); the median kills the flicker while
+        # real approach trends (seconds per step) pass through
+        self._distance_window = deque(maxlen=5)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
 
     def start(self) -> None:
         self._thread.start()
 
+    def wait_warm(self, timeout_s: float = 10.0) -> bool:
+        """Block until BOTH hands' first telemetry and the first camera
+        frame have landed.  Every probe reads the collector's cache — a
+        dispatch raced against collector startup reports phantom stale
+        camera / missing snapshots (live-found 2026-07-31)."""
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            with self._lock:
+                warm = (
+                    self._telemetry["left"] is not None
+                    and self._telemetry["right"] is not None
+                    and self._frame_ts is not None
+                )
+            if warm:
+                return True
+            time.sleep(0.1)
+        return False
+
     def stop(self) -> None:
         self._stop.set()
         self._thread.join(timeout=3.0)
+
+    def set_baselines(self, baselines: dict) -> None:
+        """Swap force baselines (per-episode re-baseline at the
+        pre-approach pose — the no-peer-contact reference; removes
+        intentional posture constants like the left thumb tuck's static
+        palm load AND thermal drift across the session)."""
+        with self._lock:
+            self._baselines = baselines
+
+    def set_watch_target(self, finger: str | None) -> None:
+        """Declare the active pair's target finger.  The watchdog SKIPS
+        that channel: a target rise is the contact the supervisor exists
+        to evaluate, and a blanket 2x watchdog on the target races the
+        supervisor's own candidate entry (pilot 6: +169 target contact
+        aborted mid-cycle before CONTACT_CANDIDATE).  The target channel
+        stays bounded by force_set + the supervisor's 1x candidate logic;
+        every NON-target channel + thermal stays watched."""
+        with self._lock:
+            self._watch_target = finger
 
     def last_frame_age_ms(self) -> float | None:
         with self._lock:
@@ -338,8 +383,12 @@ class ObservationCollector:
     # for a STUCK supervisor loop, so it fires at 2x — late enough not
     # to race the supervisor, early enough to bound the excursion.
     def _watchdog_check(self, side: str, tel) -> None:
+        with self._lock:
+            target = self._watch_target
         deltas = self._baselines[side].delta(tel.force_act or {})
         for finger, delta in deltas.items():
+            if finger == target:
+                continue  # target rise is the supervisor's business
             if delta >= self._config.non_target_force_abort_raw * 2:
                 self.abort_reason = (
                     f"WATCHDOG: {side}.{finger} +{delta:.0f} raw "
@@ -377,6 +426,7 @@ class ObservationCollector:
     def _compute_visual(self, depth_mm: np.ndarray) -> VisualObservation:
         clusters = _split_clusters(depth_mm, COMBINED_ROI, self._intr)
         if clusters is None:
+            self._distance_window.clear()
             return VisualObservation(
                 age_ms=0.0,
                 left_cluster_ok=False,
@@ -386,19 +436,29 @@ class ObservationCollector:
             )
         left_points, right_points, merged = clusters
         ok = left_points is not None and right_points is not None
-        distance = None
-        if ok:
-            distance = _min_pairwise_distance(left_points, right_points)
-            if merged:
-                distance = 0.0
+        if not ok:
+            self._distance_window.clear()
+            return VisualObservation(
+                age_ms=0.0,
+                left_cluster_ok=left_points is not None,
+                right_cluster_ok=right_points is not None,
+                min_distance_m=None,
+                pair_identity_confirmed=None,
+            )
+        distance = _min_pairwise_distance(left_points, right_points)
+        if merged:
+            distance = 0.0
+        self._distance_window.append(distance)
+        ordered = sorted(self._distance_window)
+        median_distance = ordered[len(ordered) // 2]
         return VisualObservation(
             age_ms=0.0,
-            left_cluster_ok=left_points is not None,
-            right_cluster_ok=right_points is not None,
-            min_distance_m=distance,
+            left_cluster_ok=True,
+            right_cluster_ok=True,
+            min_distance_m=median_distance,
             # hand-level identity (v4 §6.2: visual says WHO is where,
             # not which finger — finger identity is command+force)
-            pair_identity_confirmed=True if ok else None,
+            pair_identity_confirmed=True,
         )
 
 
@@ -432,31 +492,64 @@ def _cluster_points(depth_mm: np.ndarray, roi: dict, intr, *, min_pixels: int = 
 
 
 def _split_clusters(depth_mm: np.ndarray, roi: dict, intr):
-    """Adaptive x-column valley split (from T0) + merged flag."""
+    """Split the combined-ROI near cluster into the two hands by 3D
+    CONNECTED COMPONENTS (voxel union-find), not by image column.
+
+    The x-column valley split bleeds at straight-ish poses: extended
+    fingertips cross the image midline while staying 4 cm apart in 3D
+    (measured 20260731T131x at 820/820 — the valley split read 0.6 mm).
+    Physical continuity never lies: the two hands only share a
+    component when they actually touch, so merged == contact evidence.
+    """
     points, us = _cluster_points(depth_mm, roi, intr)
     if points is None or len(points) < 600:
         return None
-    u_min, u_max = int(us.min()), int(us.max())
-    if u_max - u_min < 40:
+    voxel = 0.006
+    keys = np.floor(points / voxel).astype(np.int64)
+    key_set = {tuple(k) for k in keys}
+    parent: dict[tuple, tuple] = {}
+
+    def find(a):
+        root = a
+        while parent.get(root, root) != root:
+            root = parent[root]
+        while parent.get(a, a) != root:
+            parent[a], a = root, parent.get(a, a)
+        return root
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for key in key_set:
+        parent.setdefault(key, key)
+    for key in key_set:
+        kx, ky, kz = key
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    if dx == dy == dz == 0:
+                        continue
+                    neighbor = (kx + dx, ky + dy, kz + dz)
+                    if neighbor in key_set:
+                        union(key, neighbor)
+    components: dict[tuple, list[int]] = {}
+    for index, key in enumerate(map(tuple, keys)):
+        components.setdefault(find(key), []).append(index)
+    big = sorted(components.values(), key=len, reverse=True)[:2]
+    if len(big) < 2 or len(big[1]) < 300:
         return None
-    cols = np.zeros(u_max + 1, dtype=np.int64)
-    for u in us.astype(int):
-        cols[u] += 1
-    smooth = np.convolve(cols, np.ones(3) / 3, mode="same")
-    occupied = np.nonzero(smooth > 2)[0]
-    if len(occupied) < 40:
-        return None
-    left_edge, right_edge = int(occupied[0]), int(occupied[-1])
-    mid = (left_edge + right_edge) // 2
-    left_mode_x = left_edge + int(np.argmax(smooth[left_edge : mid + 1]))
-    right_mode_x = mid + int(np.argmax(smooth[mid : right_edge + 1]))
-    if right_mode_x - left_mode_x < 20:
-        return None
-    valley_x = left_mode_x + int(np.argmin(smooth[left_mode_x : right_mode_x + 1]))
-    valley = float(smooth[valley_x])
-    lower_mode = float(min(smooth[left_mode_x], smooth[right_mode_x]))
-    merged = valley >= 0.2 * lower_mode
-    return points[us <= valley_x], points[us > valley_x], merged
+    left_idx, right_idx = (big[0], big[1]) if points[big[0]][:, 0].mean() < points[big[1]][:, 0].mean() else (big[1], big[0])
+    left_points, right_points = points[left_idx], points[right_idx]
+    # merged = the two components are within one voxel of each other
+    # (i.e. connected through a single-voxel bridge the union missed —
+    # conservative contact evidence)
+    sample_l = left_points[np.linspace(0, len(left_points) - 1, min(300, len(left_points))).astype(int)]
+    sample_r = right_points[np.linspace(0, len(right_points) - 1, min(300, len(right_points))).astype(int)]
+    dists = np.sqrt(((sample_l[:, None, :] - sample_r[None, :, :]) ** 2).sum(axis=2))
+    merged = float(dists.min()) <= voxel * 1.5
+    return left_points, right_points, merged
 
 
 def _min_pairwise_distance(a: np.ndarray, b: np.ndarray, *, max_points: int = 800) -> float:
@@ -475,30 +568,61 @@ def _min_pairwise_distance(a: np.ndarray, b: np.ndarray, *, max_points: int = 80
 # ------------------------------------------------------------- episode kit
 
 
-# Per-mode starting geometry (T0-informed priors, calibration subjects):
-# an open passive hand points its fingertips UP — an approaching active
-# fingertip would meet the passive finger's SIDE or the palm (forbidden
-# zone), never tip-to-tip.  The passive side PRESENTS its target finger
-# at mid-curl toward the peer (T0 showed mutual mid-curl ~550 raw
-# converging tip-to-tip); mutual mode presents both sides.  These are
-# STARTING priors — T1 measures the real contact positions around them.
-PRESENT_RAW = {"index": 550, "middle": 550, "ring": 550, "little": 550, "thumb": 450}
-THUMB_ROT_PRESENT_RAW = 300
+# Per-mode starting geometry (measured on the rig 2026-07-31 through
+# four pilot iterations + dedicated A/B probes — each failure taught
+# the next prior):
+#
+# 1. Open-hand present meets finger side / palm, never tip-to-tip.
+# 2. raw 550 ≈ 45° diagonal, NOT horizontal (pilot NO_CONTACT at 4.4cm).
+# 3. LEFT hand: thumb_rot 1000 mechanically BLOCKS index flexion at
+#    ~640 (target 400 reads 645).  Tucking (thumb_rot 250 + thumb 250)
+#    frees the full range with clean forces (idx 450 actual 449, -32).
+# 4. RIGHT hand: NO block with thumb open — index free 1000→450 (450
+#    actual 454, -35).  Tucking the RIGHT thumb instead CREATES an
+#    obstacle: index 450 vs tucked thumb reads +310..+486 (the OK
+#    contact zone).  Per-hand policy: LEFT tucks, RIGHT never tucks.
+# 5. Tuck sequencing: rotate-first sweeps the long thumb across the
+#    palm (+184 thumb_rot); flex-first is clean (+18).
+# 6. Simultaneous presents cross the two fingers' arcs mid-motion
+#    (watchdog +216 spike): presents are STAGGERED — passive first,
+#    settle, then active pre-approach.
+# 7. R600/L450 already grazes (L +69): pre-approach starts HIGHER (680)
+#    and fine-steps into contact.
+#
+# (middle/ring/little pairs: per-hand tuck policy unverified — same
+# priors as index until their own pilots measure them)
+PRESENT_RAW = {"index": 450, "middle": 450, "ring": 450, "little": 450, "thumb": 450}
+PREAPPROACH_RAW = {"index": 680, "middle": 680, "ring": 680, "little": 680, "thumb": 550}
+MUTUAL_PRESENT_RAW = {"index": 720, "middle": 720, "ring": 720, "little": 720, "thumb": 500}  # 720/720: arcs never cross during present; convergence happens INSIDE the supervisor
+THUMB_TUCK_RAW = 250
+THUMB_ROT_TUCK_RAW = 250
+# Per-hand tuck policy for non-thumb pairs (measured on index):
+# LEFT requires the tuck (frees index flexion), RIGHT must NOT tuck.
+HAND_TUCK_POLICY = {"left": True, "right": False}
 
 
 def _present_targets(pair_id: str, mode: str) -> dict[str, dict[str, int]]:
     finger = pair_id.split("_")[0]
     targets = {"left": dict(OPEN_RAW), "right": dict(OPEN_RAW)}
-    # presenting side = the PASSIVE one for single-side modes, both for mutual
-    presenting = {
-        "active_passive": ("right",),  # left active -> right presents
-        "passive_active": ("left",),  # right active -> left presents
-        "mutual": ("left", "right"),
-    }[mode]
-    for side in presenting:
-        targets[side][finger] = PRESENT_RAW[finger]
-        if finger == "thumb":
-            targets[side]["thumb_rot"] = THUMB_ROT_PRESENT_RAW
+
+    def _tuck(side: str, side_targets: dict[str, int]) -> None:
+        if finger != "thumb" and HAND_TUCK_POLICY[side]:
+            side_targets["thumb"] = THUMB_TUCK_RAW
+            side_targets["thumb_rot"] = THUMB_ROT_TUCK_RAW
+
+    if mode == "mutual":
+        for side in ("left", "right"):
+            targets[side][finger] = MUTUAL_PRESENT_RAW[finger]
+            _tuck(side, targets[side])
+        return targets
+    # single-side: passive presents horizontally, active pre-approaches
+    active, passive = (
+        ("left", "right") if mode == "active_passive" else ("right", "left")
+    )
+    targets[passive][finger] = PRESENT_RAW[finger]
+    targets[active][finger] = PREAPPROACH_RAW[finger]
+    _tuck(passive, targets[passive])
+    _tuck(active, targets[active])
     return targets
 
 
@@ -668,6 +792,10 @@ def run() -> int:
         }
         collector = ObservationCollector(controllers, cap, contracts, intr, baselines, config)
         collector.start()
+        if not collector.wait_warm(timeout_s=12.0):
+            report["aborts"].append("collector never warmed (telemetry/camera first reads missing)")
+            print(json.dumps(report, indent=2, default=str))
+            return 2
         gateway = BimanualActionGateway(
             executors=executors,
             leases=LeaseRegistry(BODY_IDS),
@@ -768,10 +896,35 @@ def run() -> int:
 
         # ---- calibration episodes
         tuning = SupervisorTuning(
-            contact_force_delta_raw=config.contact_force_delta_raw,
+            # Calibration runs at 35 (config's 60 provisional ceiling
+            # allows lowering, never raising): the index_index
+            # receive-side signature is a NEGATIVE delta −39..−55
+            # across all measured contact patches (matrices 20260731,
+            # segment/tip/pad-up alike — the receive channel is
+            # negative-signed for downward loads, period).  35 keeps
+            # margin above the ±15-25 noise while seeing the receive;
+            # the confirm remains multi-evidence (bilateral + visual
+            # near/saturation + no non-target rise).
+            contact_force_delta_raw=35.0,
             non_target_force_abort_raw=config.non_target_force_abort_raw,
             coarse_step_raw=config.coarse_step_raw,
             fine_step_raw=config.fine_step_raw,
+            # pilot 4: 8 fine steps (680→600) reached 0.7mm visual but
+            # stopped ~2 steps short of contact — the pre-approach puts
+            # us at the fine-zone edge, not inside it; 12 covers the
+            # remaining ~4mm with margin, still bounded.
+            max_fine_steps=12 if args.modes != "mutual" else 16,
+            # mutual: present 720 sits at the bulge edge — a 40-raw
+            # coarse step skips through the 690-710 max-reach zone in
+            # one servo swing (pilot 20 EARLY_CONTACT transient).
+            # Enter FINE immediately and take the bulge at 10-raw steps.
+            coarse_to_fine_distance_m=0.06 if args.modes == "mutual" else 0.02,
+            # pilot 9: CONTACT_CONFIRMED then RELEASE_FAILED — the
+            # right's +202 press did not fall within ±20 inside 4
+            # release steps; force hysteresis on this rig decays over
+            # seconds (OK-contact sessions showed the same).  8 steps
+            # give the decay time + travel.
+            max_release_steps=8,
             dwell_ms=config.dwell_ms_default,
             camera_freshness_ms=config.camera_freshness_ms,
             temperature_abort_c=config.temperature_abort_c,
@@ -801,6 +954,7 @@ def run() -> int:
                         gateway=gateway,
                         executors=executors,
                         collector=collector,
+                        controllers=controllers,
                         baselines=baselines,
                         tuning=tuning,
                         config=config,
@@ -849,6 +1003,7 @@ def _run_episode(
     gateway,
     executors,
     collector,
+    controllers,
     baselines,
     tuning,
     config,
@@ -877,33 +1032,87 @@ def _run_episode(
         lifetime_s=config.permit_lifetime_s,
     )
     sequence_id = f"seq_{pair_id}_{mode}_{repeat}_{run_id}"
+    # watch target BEFORE the present stages — the watchdog must skip
+    # the target finger from the first motion (pilots 11-12 fired on
+    # target transients while it was still unset)
+    collector.set_watch_target(pair_id.split("_")[0])
 
-    # ---- starting pose (present the target finger per mode) — the
-    # first envelope of the sequence, dispatched through the gateway
+    # ---- starting pose (present the target finger per mode) — STAGGERED
+    # envelopes under one sequence permit: the passive side presents
+    # first and settles, then the active side pre-approaches.  A
+    # simultaneous present crosses the two fingers' arcs mid-motion
+    # (watchdog +216 spike, pilot 2).
     present = _present_targets(pair_id, mode)
-    start_envelope = build_episode_envelope(
-        interaction_id=f"{sequence_id}_present",
-        sequence_id=sequence_id,
-        pair_id=pair_id,
-        left_targets=present["left"],
-        right_targets=present["right"],
-        speed=150,
-        force=100,
-        contract_hash=contract.contract_hash(),
-        snapshot_hash=f"t1_{run_id}",
-    )
-    start_dispatch = gateway.dispatch(start_envelope, contract=contract, permit=permit)
-    if start_dispatch.violation_kind is not None:
-        record.outcome = "GATEWAY_BLOCKED"
-        record.notes.append(f"present pose: {start_dispatch.violations}")
-        for side in ("left", "right"):
-            executors[side].retreat({"speed": 300, "force": 150})
-        (out_dir / f"episode_{pair_id}_{mode}_{repeat}.json").write_text(
-            json.dumps(record.__dict__, indent=2, ensure_ascii=False, default=str)
-        )
-        return record
-    time.sleep(2.5)
-    current_targets = {s: dict(t) for s, t in present.items()}
+    if mode == "mutual":
+        stages = ["left", "right"]
+    else:
+        passive = "right" if mode == "active_passive" else "left"
+        active = "left" if mode == "active_passive" else "right"
+        stages = [passive, active]
+    staged_targets: dict[str, dict[str, int]] = {
+        "left": dict(OPEN_RAW),
+        "right": dict(OPEN_RAW),
+    }
+    finger = pair_id.split("_")[0]
+    envelope_index = 0
+    for side in stages:
+        # tuck flex-first: curl the thumb to a stub BEFORE rotating it
+        # across (rotate-first sweeps the long thumb through the palm,
+        # +184 thumb_rot measured; flex-first +18)
+        side_present = present[side]
+        overlays = [side_present]
+        if (
+            finger != "thumb"
+            and HAND_TUCK_POLICY[side]
+            and side_present.get("thumb") == THUMB_TUCK_RAW
+        ):
+            overlays = [{"thumb": THUMB_TUCK_RAW}, side_present]
+        for overlay in overlays:
+            staged_targets[side].update(overlay)
+            stage_envelope = build_episode_envelope(
+                interaction_id=f"{sequence_id}_present{envelope_index}",
+                sequence_id=sequence_id,
+                pair_id=pair_id,
+                left_targets=staged_targets["left"],
+                right_targets=staged_targets["right"],
+                speed=150,
+                force=100,
+                contract_hash=contract.contract_hash(),
+                snapshot_hashes={"left": f"t1_{run_id}_left", "right": f"t1_{run_id}_right"},
+            )
+            envelope_index += 1
+            stage_dispatch = gateway.dispatch(stage_envelope, contract=contract, permit=permit)
+            if stage_dispatch.violation_kind is not None:
+                record.outcome = "GATEWAY_BLOCKED"
+                record.notes.append(
+                    f"present stage {envelope_index} ({side}): {stage_dispatch.violations}"
+                )
+                for s in ("left", "right"):
+                    executors[s].retreat({"speed": 300, "force": 150})
+                (out_dir / f"episode_{pair_id}_{mode}_{repeat}.json").write_text(
+                    json.dumps(record.__dict__, indent=2, ensure_ascii=False, default=str)
+                )
+                return record
+            time.sleep(2.0 if envelope_index < len(overlays) else 2.5)
+    current_targets = {s: dict(t) for s, t in staged_targets.items()}
+
+    # ---- per-episode re-baseline at the PRE-APPROACH pose (no peer
+    # contact yet): the doc's no-contact reference for THIS episode.
+    # Removes intentional posture constants (left thumb tuck's static
+    # palm load, +68 — pilot 5 tripped UNINTENDED_CONTACT on it) and
+    # thermal drift since the open-pose baseline.
+    episode_baselines: dict[str, ForceBaseline] = {}
+    for side, ctl in controllers.items():
+        samples = []
+        for _ in range(7):
+            tel = ctl.read_telemetry()
+            samples.append(
+                {k: (None if v is None else float(v)) for k, v in (tel.force_act or {}).items()}
+            )
+            time.sleep(0.18)
+        episode_baselines[side] = ForceBaseline.capture(side, samples, min_samples=5)
+    collector.set_baselines(episode_baselines)
+    baselines = episode_baselines
     expected_start: dict[str, dict[str, int]] = {}
     for side in ("left", "right"):
         declared = {
@@ -924,7 +1133,7 @@ def _run_episode(
         expected_start=expected_start or None,
     )
     step_index = 0
-    deadline = time.time() + 120.0
+    deadline = time.time() + 300.0
     fine_entry_targets: dict | None = None
     first_rise_targets: dict | None = None
     confirm_targets: dict | None = None
@@ -932,7 +1141,9 @@ def _run_episode(
     while supervisor.state not in (EPISODE_COMMITTED, RECORD_FAILURE) and time.time() < deadline:
         if collector.abort_reason:
             for side in ("left", "right"):
-                executors[side].retreat({"speed": 300, "force": 150})
+                executors[side].dispatch(
+                    {"targets": present[side], "speed": 300, "force": 100}, timeout_ms=4000
+                )
             record.outcome = "WATCHDOG_ABORT"
             record.notes.append(collector.abort_reason)
             break
@@ -943,9 +1154,13 @@ def _run_episode(
             new_targets = {s: dict(t) for s, t in current_targets.items()}
             for side in decision.step["sides"]:
                 for joint, delta in decision.step["joints"].items():
-                    new_targets[side][joint] = int(
-                        max(50, min(1000, new_targets[side][joint] + delta))
-                    )
+                    new_val = new_targets[side][joint] + delta
+                    if delta > 0:
+                        # release/extension: travel up to present + 100 —
+                        # the separation pose; clearance is judged by
+                        # force-fall OR visual separation (pilots 16/17)
+                        new_val = min(new_val, present[side].get(joint, 1000) + 100)
+                    new_targets[side][joint] = int(max(50, min(1000, new_val)))
             envelope = build_episode_envelope(
                 interaction_id=f"{supervisor.interaction_id}_s{step_index}",
                 sequence_id=sequence_id,
@@ -966,14 +1181,23 @@ def _run_episode(
                 record.outcome = "GATEWAY_BLOCKED"
                 record.notes.append(f"step {step_index}: {dispatch.violations}")
                 for side in ("left", "right"):
-                    executors[side].retreat({"speed": 300, "force": 150})
+                    executors[side].dispatch(
+                        {"targets": present[side], "speed": 300, "force": 100}, timeout_ms=4000
+                    )
                 break
             current_targets = new_targets
             time.sleep(1.2 if supervisor.state == COARSE_APPROACH else 1.5)
         elif decision.kind == DECISION_RETREAT:
+            # retreat to the EPISODE'S PRESENT pose (contact-free by
+            # design) — VERIFY_CLEAR compares forces against the
+            # episode baseline captured at that pose; retreating to
+            # full open reads permanently off-baseline (pilot 13 hung)
             for side in ("left", "right"):
-                executors[side].retreat({"speed": 300, "force": 150})
-            current_targets = {"left": dict(OPEN_RAW), "right": dict(OPEN_RAW)}
+                executors[side].dispatch(
+                    {"targets": present[side], "speed": 300, "force": 100},
+                    timeout_ms=4000,
+                )
+            current_targets = {s: dict(t) for s, t in present.items()}
             time.sleep(1.5)
         else:
             time.sleep(0.3)
@@ -989,6 +1213,12 @@ def _run_episode(
             record.outcome = decision.receipt.outcome if decision.receipt else "UNKNOWN"
             record.receipt = decision.receipt.to_record() if decision.receipt else None
 
+    if record.outcome is None:
+        record.outcome = supervisor.track.anomaly or "DEADLINE_EXCEEDED"
+        if supervisor.track.anomaly:
+            record.notes.append(
+                f"anomaly detail: {supervisor.track.anomaly_detail}"
+            )
     record.state_history = list(supervisor.history)
     record.envelope_facts = {
         "fine_entry_targets": fine_entry_targets,
