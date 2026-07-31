@@ -52,6 +52,19 @@ def dispatch_muscle_memory_argv(argv: list[str]) -> int | None:
         help="validate a contextual recovery artifact and print its commitments",
     )
     contextual_inspect.add_argument("artifact", type=Path)
+    state_train = commands.add_parser(
+        "state-train",
+        help="learn and qualify a short-horizon recovery-state evidence router",
+    )
+    state_train.add_argument("--asset-root", type=Path, required=True)
+    state_train.add_argument("--output-dir", type=Path, required=True)
+    state_train.add_argument("--source-checkout", type=Path, default=Path.cwd())
+    state_train.add_argument("--seed", type=int, default=20260803)
+    state_inspect = commands.add_parser(
+        "state-inspect",
+        help="validate a recovery-state artifact and print its commitments",
+    )
+    state_inspect.add_argument("artifact", type=Path)
     contextual_video = commands.add_parser(
         "contextual-video",
         help="render a rejection-labelled DEVELOPMENT fixed-vs-learned comparison",
@@ -165,6 +178,43 @@ def dispatch_muscle_memory_argv(argv: list[str]) -> int | None:
         )
         return 0
 
+    if args.command == "state-inspect":
+        from rosclaw.simforge.g1_recovery_state_memory import (
+            G1_RECOVERY_STATE_OBSERVATIONS,
+            load_g1_recovery_state_artifact,
+        )
+
+        state_artifact = load_g1_recovery_state_artifact(args.artifact)
+        positive_routes = sum(index >= 0 for index in state_artifact.prototype_primitive_indices)
+        print(
+            json.dumps(
+                {
+                    "artifact_hash": state_artifact.artifact_hash,
+                    "body_hash": state_artifact.body_hash,
+                    "motion_hash": state_artifact.motion_hash,
+                    "baseline_recovery_config_hash": (state_artifact.baseline_recovery_config_hash),
+                    "fallback_recovery_config_hash": (state_artifact.fallback_recovery_config_hash),
+                    "training_dataset_hash": state_artifact.training_dataset_hash,
+                    "training_episode_count": state_artifact.training_episode_count,
+                    "observation_names": list(G1_RECOVERY_STATE_OBSERVATIONS),
+                    "descriptor_feature_names": list(state_artifact.descriptor_feature_names),
+                    "selection_window_frames": state_artifact.selection_window_frames,
+                    "prototype_count": len(state_artifact.descriptor_prototypes),
+                    "positive_route_count": positive_routes,
+                    "abstention_prototype_count": (
+                        len(state_artifact.descriptor_prototypes) - positive_routes
+                    ),
+                    "neighbor_count": state_artifact.neighbor_count,
+                    "maximum_neighbor_distance": (state_artifact.maximum_neighbor_distance),
+                    "minimum_primitive_consensus": (state_artifact.minimum_primitive_consensus),
+                    "activation_ceiling": state_artifact.activation_ceiling,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
     if args.command == "contextual-video":
         from rosclaw.simforge.g1_contextual_recovery_video import (
             render_g1_contextual_recovery_video,
@@ -220,6 +270,28 @@ def dispatch_muscle_memory_argv(argv: list[str]) -> int | None:
         value["report_path"] = str(report_path)
         print(json.dumps(value, indent=2, sort_keys=True))
         return 0 if contextual_report.qualified else 2
+
+    if args.command == "state-train":
+        from rosclaw.simforge.g1_recovery_state_training import (
+            G1RecoveryStateTrainer,
+            write_g1_recovery_state_report,
+        )
+
+        state_trainer = G1RecoveryStateTrainer(
+            asset_root=args.asset_root,
+            seed=args.seed,
+        )
+        state_report = state_trainer.train()
+        artifact_path, report_path = write_g1_recovery_state_report(
+            state_report,
+            output_dir=args.output_dir,
+            source_checkout=args.source_checkout,
+        )
+        value = state_report.to_dict()
+        value["artifact_path"] = str(artifact_path)
+        value["report_path"] = str(report_path)
+        print(json.dumps(value, indent=2, sort_keys=True))
+        return 0 if state_report.qualified else 2
 
     if args.command == "temporal-train":
         from rosclaw.simforge.g1_temporal_muscle_memory_training import (

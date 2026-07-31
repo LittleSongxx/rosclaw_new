@@ -159,6 +159,12 @@ baseline.  The current artifact, failed validation reports, and exact fallback
 suite provide the anchors needed to prevent forgetting while that model is
 trained.
 
+That follow-up has now been implemented and evaluated through six evidence
+generations.  Its architecture, rejected local-physics validation, fail-closed
+hardening, and action-conditioned critic follow-up are documented in
+`ROSCLAW_PHASE8_RECOVERY_STATE_MEMORY.md`.  The rejected state-memory artifact
+does not supersede the results in this document.
+
 ## Terminal-damping follow-up and multi-challenge video
 
 The `g1-contextual-recovery-v5-terminal-damping` follow-up adds a third,

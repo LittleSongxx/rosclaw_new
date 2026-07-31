@@ -24,6 +24,10 @@ from rosclaw.simforge.g1_muscle_memory import (
     G1MuscleMemoryArtifact,
     G1MuscleMemoryPolicy,
 )
+from rosclaw.simforge.g1_recovery_state_memory import (
+    G1RecoveryStateArtifact,
+    G1RecoveryStatePolicy,
+)
 from rosclaw.simforge.tasks.g1_goalforge.concepts import (
     G1_DDS_JOINT_NAMES,
     hash_bytes,
@@ -176,6 +180,10 @@ class G1CerebellarRecoveryEffect:
     contextual_recovery_active: bool
     contextual_recovery_out_of_distribution: bool
     contextual_recovery_primitive_index: int | None
+    recovery_state_active: bool
+    recovery_state_pending: bool
+    recovery_state_out_of_distribution: bool
+    recovery_state_primitive_index: int | None
 
 
 @dataclass(frozen=True)
@@ -211,7 +219,8 @@ class G1CerebellarRecoveryReceipt:
     expert_route_latched: bool | None
     muscle_memory_receipt: dict[str, Any] | None = None
     contextual_recovery_receipt: dict[str, Any] | None = None
-    schema_version: str = "rosclaw.g1_goalforge.cerebellar_recovery_receipt.v8"
+    recovery_state_receipt: dict[str, Any] | None = None
+    schema_version: str = "rosclaw.g1_goalforge.cerebellar_recovery_receipt.v9"
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -240,6 +249,7 @@ class G1CerebellarRecoveryController:
         config: G1CerebellarRecoveryConfig | None = None,
         muscle_memory_artifact: G1MuscleMemoryArtifact | None = None,
         contextual_recovery_artifact: G1ContextualRecoveryArtifact | None = None,
+        recovery_state_artifact: G1RecoveryStateArtifact | None = None,
         fallback_config: G1CerebellarRecoveryConfig | None = None,
     ) -> None:
         for label, value in (
@@ -276,9 +286,22 @@ class G1CerebellarRecoveryController:
             if contextual_recovery_artifact is not None
             else None
         )
-        if self.muscle_memory is not None and self.contextual_recovery is not None:
+        self.recovery_state = (
+            G1RecoveryStatePolicy(recovery_state_artifact)
+            if recovery_state_artifact is not None
+            else None
+        )
+        learned_controllers = sum(
+            controller is not None
+            for controller in (
+                self.muscle_memory,
+                self.contextual_recovery,
+                self.recovery_state,
+            )
+        )
+        if learned_controllers > 1:
             raise ValueError(
-                "muscle-memory residual and contextual recovery cannot be active together"
+                "only one muscle-memory, contextual, or recovery-state policy may be active"
             )
         if self.muscle_memory is not None:
             if (
@@ -304,6 +327,15 @@ class G1CerebellarRecoveryController:
             if self.fallback_config is None:
                 raise ValueError("contextual recovery requires a fallback recovery config")
             self.contextual_recovery.require_compatible(
+                body_hash=self.body_hash,
+                motion_hash=self.motion_hash,
+                baseline_recovery_config_hash=self.config_hash,
+                fallback_recovery_config_hash=self.fallback_config_hash or "",
+            )
+        if self.recovery_state is not None:
+            if self.fallback_config is None:
+                raise ValueError("recovery-state memory requires a fallback recovery config")
+            self.recovery_state.require_compatible(
                 body_hash=self.body_hash,
                 motion_hash=self.motion_hash,
                 baseline_recovery_config_hash=self.config_hash,
@@ -342,8 +374,23 @@ class G1CerebellarRecoveryController:
 
     @property
     def controller_hash(self) -> str:
-        if self.muscle_memory is None and self.contextual_recovery is None:
+        if (
+            self.muscle_memory is None
+            and self.contextual_recovery is None
+            and self.recovery_state is None
+        ):
             return self.base_controller_hash
+        if self.recovery_state is not None:
+            return hash_json(
+                {
+                    "controller_type": (
+                        "g1_cerebellar_post_kick_recovery_with_recovery_state_memory"
+                    ),
+                    "version": 1,
+                    "base_controller_hash": self.base_controller_hash,
+                    "recovery_state_artifact_hash": self.recovery_state.artifact.artifact_hash,
+                }
+            )
         if self.contextual_recovery is not None:
             return hash_json(
                 {
@@ -400,6 +447,8 @@ class G1CerebellarRecoveryController:
             self.muscle_memory.reset()
         if self.contextual_recovery is not None:
             self.contextual_recovery.reset()
+        if self.recovery_state is not None:
+            self.recovery_state.reset()
 
     def adapt_target(
         self,
@@ -424,6 +473,9 @@ class G1CerebellarRecoveryController:
         config = self.config
         contextual_primitive_index: int | None = None
         contextual_ood = False
+        recovery_state_primitive_index: int | None = None
+        recovery_state_pending = False
+        recovery_state_ood = False
         if self.contextual_recovery is not None:
             if muscle_memory_observation is None:
                 raise ValueError("contextual recovery routing requires proprioceptive observations")
@@ -445,6 +497,29 @@ class G1CerebellarRecoveryController:
                     config = _apply_contextual_primitive(
                         self.config,
                         self.contextual_recovery.artifact.primitives[selection.primitive_index],
+                    )
+        if self.recovery_state is not None:
+            if muscle_memory_observation is None:
+                raise ValueError("recovery-state routing requires proprioceptive observations")
+            # Observe immediately after the causal contact-and-landing gate so
+            # the short window is complete before the recovery action opens.
+            # Selection alone cannot move the robot: target adaptation remains
+            # gated below by the selected config's start_policy_frame.
+            if self._contact_latched and self._landing_latched:
+                selection = self.recovery_state.select(muscle_memory_observation)
+                recovery_state_pending = not selection.ready
+                recovery_state_primitive_index = selection.primitive_index
+                recovery_state_ood = selection.out_of_distribution
+                if selection.primitive_index is None:
+                    if self.fallback_config is None:
+                        raise RuntimeError(
+                            "validated recovery-state fallback config became unavailable"
+                        )
+                    config = self.fallback_config
+                else:
+                    config = _apply_contextual_primitive(
+                        self.config,
+                        self.recovery_state.artifact.primitives[selection.primitive_index],
                     )
         if self.fallback_config is not None and self.muscle_memory is not None:
             if muscle_memory_observation is None:
@@ -622,6 +697,14 @@ class G1CerebellarRecoveryController:
             ),
             contextual_recovery_out_of_distribution=contextual_ood,
             contextual_recovery_primitive_index=contextual_primitive_index,
+            recovery_state_active=(
+                self.recovery_state is not None
+                and recovery_state_primitive_index is not None
+                and eligible
+            ),
+            recovery_state_pending=recovery_state_pending,
+            recovery_state_out_of_distribution=recovery_state_ood,
+            recovery_state_primitive_index=recovery_state_primitive_index,
         )
 
     def build_receipt(
@@ -672,6 +755,11 @@ class G1CerebellarRecoveryController:
             contextual_recovery_receipt=(
                 self.contextual_recovery.build_receipt().to_dict()
                 if self.contextual_recovery is not None
+                else None
+            ),
+            recovery_state_receipt=(
+                self.recovery_state.build_receipt().to_dict()
+                if self.recovery_state is not None
                 else None
             ),
         )
