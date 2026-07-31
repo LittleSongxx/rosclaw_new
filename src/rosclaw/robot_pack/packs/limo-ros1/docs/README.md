@@ -2,7 +2,7 @@
 
 This Pack binds the `limo` e-URDF Body to the independently versioned
 `ros-claw/limo-ros-mcp` adapter at commit
-`06c4ace73f14f05c5b3066aa102ca518679b9cf0` (MCP 0.8.4).
+`79069f7870ddf972f32bfd438752860fed3dd97d` (MCP 0.8.5).
 
 The first REAL capability is `limo.set_initial_pose`. The Agent submits a
 validated map-frame estimate to `rosclawd`; the daemon validates an exact
@@ -17,10 +17,11 @@ Revision 0.1.7 adapts those workers to the live LIMO host. Navigation treats
 stationary, event-driven AMCL message age as a warning while retaining blocking
 covariance and live `map -> odom -> base_link` TF checks. It subscribes to AMCL
 before dispatch and requires a post-dispatch pose, move_base `SUCCEEDED`, final
-AMCL tolerance, and stopped odometry. Tone playback accepts only 440/660/880 Hz,
-0.2–1.0 seconds, and 5–25% volume. It uses the uniquely allowlisted USB
-PulseAudio sink when PulseAudio owns the sound card, falls back to direct ALSA
-otherwise, restores the previous mixer state, and reports only
+AMCL tolerance, and stopped odometry. A warning-only DEGRADED snapshot remains
+usable, but any BLOCK check still prevents dispatch. Tone playback accepts only
+440/660/880 Hz, 0.2–1.0 seconds, and 5–25% volume. It uses the uniquely
+allowlisted USB PulseAudio sink when PulseAudio owns the sound card, falls back
+to direct ALSA otherwise, restores the previous mixer state, and reports only
 `DRIVER_CONFIRMED` evidence unless a human separately confirms hearing it.
 
 H1 means only that the signed contract and executor tests pass. H4 requires a
