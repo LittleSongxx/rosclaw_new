@@ -596,7 +596,9 @@ PRESENT_RAW = {"index": 550, "middle": 550, "ring": 550, "little": 550, "thumb":
 # LEFT at 550 is a receive dead zone (−8..−12) but reads −47..−55 at
 # 600-650 (pad-up) and −40 at 450; RIGHT reads −40..−43 fine at 550.
 HAND_PRESENT_RAW = {
-    "left": {"index": 600, "middle": 600, "ring": 600, "little": 600, "thumb": 500},
+    # LEFT passive 450: pilot 9 (20260731T122252Z) CONFIRMED with L −40
+    # receive at this presentation; 550/600 are receive dead zones
+    "left": {"index": 450, "middle": 450, "ring": 450, "little": 450, "thumb": 500},
     "right": {"index": 550, "middle": 550, "ring": 550, "little": 550, "thumb": 500},
 }
 PREAPPROACH_RAW = {"index": 680, "middle": 680, "ring": 680, "little": 680, "thumb": 550}
