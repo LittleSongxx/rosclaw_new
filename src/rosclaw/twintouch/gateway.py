@@ -34,6 +34,9 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from rosclaw.twintouch.choreography import (
+    PERMIT_ALREADY_USED,
+    PERMIT_EXPIRED,
+    PERMIT_HASH_MISMATCH,
     PERMIT_OK,
     ContactChoreographyContract,
     SequencePermit,
@@ -190,6 +193,30 @@ class BimanualActionGateway:
 
     # ---------------------------------------------------------- helpers
 
+    def _permit_state_for_dispatch(
+        self, permit: SequencePermit, contract: ContactChoreographyContract
+    ) -> str:
+        """Sequence-permit semantics: ONE permit authorizes ONE sequence,
+        which contains MANY envelopes (v4 §18).  The first dispatch
+        consumes the permit; further envelopes of the same sequence are
+        authorized iff the permit is THIS gateway's active one and still
+        inside its deadline — verify() short-circuits on ``used`` before
+        checking hash/expiry, so the active-sequence path re-checks both
+        explicitly.  A permit revoked mid-sequence (partial dispatch,
+        barrier violation, E-Stop) never authorizes again."""
+        state = permit.verify(contract)
+        if (
+            state == PERMIT_ALREADY_USED
+            and self._active_permit is permit
+            and permit.revoked_reason == "sequence_started"
+        ):
+            if time.time() > permit.expires_at_s:
+                return PERMIT_EXPIRED
+            if permit.contract_hash != contract.contract_hash():
+                return PERMIT_HASH_MISMATCH
+            return PERMIT_OK
+        return state
+
     def _abort_receipt(
         self,
         envelope: BimanualActionEnvelope,
@@ -248,7 +275,7 @@ class BimanualActionGateway:
                 permit_state="unused",
             )
         # 2. Permit (contract hash binding, deadline, single-use).
-        permit_state = permit.verify(contract)
+        permit_state = self._permit_state_for_dispatch(permit, contract)
         if permit_state != PERMIT_OK:
             return DispatchReport(
                 receipt=self._abort_receipt(

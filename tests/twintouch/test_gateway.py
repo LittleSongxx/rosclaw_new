@@ -278,3 +278,59 @@ def test_estop_reports_unconfirmed_side_honestly():
     report = gateway.estop()
     assert not report.all_confirmed
     assert report.left_confirmed and not report.right_confirmed
+
+
+# ------------------------------------------------- sequence permit reuse
+
+
+def _second_envelope(seq: str = "seq_1") -> BimanualActionEnvelope:
+    env = _envelope()
+    return BimanualActionEnvelope(**{**env.__dict__, "interaction_id": "int_2"})
+
+
+def test_one_permit_authorizes_many_envelopes_of_one_sequence():
+    """v4 §18: one Sequence Permit per SEQUENCE, many envelopes inside.
+    The first dispatch consumes; further envelopes of the same sequence
+    dispatch under the gateway's active permit."""
+    gateway, _, left, right = _gateway()
+    contract = _contract()
+    permit = _permit(contract)
+    first = gateway.dispatch(_envelope(), contract=contract, permit=permit)
+    assert first.violation_kind is None
+    second = gateway.dispatch(_second_envelope(), contract=contract, permit=permit)
+    assert second.violation_kind is None
+    assert left.calls == ["dispatch:approach", "dispatch:approach"]
+
+
+def test_revoked_sequence_permit_never_authorizes_again():
+    gateway, _, _, _ = _gateway(right=FakeExecutor("right", fail_on={"dispatch"}))
+    contract = _contract()
+    permit = _permit(contract)
+    first = gateway.dispatch(_envelope(), contract=contract, permit=permit)
+    assert first.permit_state == "revoked_partial"
+    again = gateway.dispatch(_second_envelope(), contract=contract, permit=permit)
+    assert again.violation_kind == PERMIT_INVALID
+
+
+def test_expired_active_sequence_permit_stops_authorizing():
+    gateway, _, _, _ = _gateway()
+    contract = _contract()
+    permit = SequencePermit.issue(contract, intent_hash="intent_x", lifetime_s=0.05)
+    first = gateway.dispatch(_envelope(), contract=contract, permit=permit)
+    assert first.violation_kind is None
+    time.sleep(0.06)
+    again = gateway.dispatch(_second_envelope(), contract=contract, permit=permit)
+    assert again.violation_kind == PERMIT_INVALID
+
+
+def test_foreign_used_permit_is_not_a_sequence_permit():
+    """A permit consumed by ANOTHER gateway (or attacker) must not be
+    adoptable: only the gateway holding it as active may continue."""
+    gateway, _, _, _ = _gateway()
+    other_gateway, _, _, _ = _gateway()
+    contract = _contract()
+    permit = _permit(contract)
+    first = other_gateway.dispatch(_envelope(), contract=contract, permit=permit)
+    assert first.violation_kind is None
+    adopt = gateway.dispatch(_second_envelope(), contract=contract, permit=permit)
+    assert adopt.violation_kind == PERMIT_INVALID
