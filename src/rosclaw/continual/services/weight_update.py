@@ -1,4 +1,4 @@
-"""Recoverable publish/stage/activate/freeze/rollback coordinator."""
+"""Recoverable publish/stage/discard/activate/freeze/rollback coordinator."""
 
 from __future__ import annotations
 
@@ -72,6 +72,13 @@ class WeightUpdateService:
 
     def stage(self) -> WeightUpdateServiceReceipt:
         return self._run("stage", {}, self.inference._stage)
+
+    def discard(self, *, reason: str) -> WeightUpdateServiceReceipt:
+        return self._run(
+            "discard",
+            {"reason": reason},
+            lambda: self.inference._discard_candidate(reason),
+        )
 
     def activate(
         self,
@@ -183,6 +190,7 @@ class WeightUpdateService:
             "publish": {"PUBLISHED"},
             "verify": {"VERIFIED"},
             "stage": {"STAGED"},
+            "discard": {"DISCARDED"},
             "activate": {"ACTIVATED", "FROZEN"},
             "freeze": {"FROZEN"},
             "unfreeze": {"UNFROZEN"},
