@@ -185,6 +185,56 @@ def test_recovery_causally_smooths_only_upper_body_after_landing() -> None:
     assert receipt.peak_smoothing_residual_rms_rad > 0.0
 
 
+def test_recovery_adds_bounded_terminal_damping_after_settling() -> None:
+    controller = _controller(
+        G1CerebellarRecoveryConfig(
+            start_policy_frame=100,
+            blend_frames=100,
+            settling_start_policy_frame=200,
+            settling_blend_frames=100,
+            settling_standing_pose_blend=0.40,
+            settling_roll_posture_bias_rad=0.0,
+            terminal_damping_start_policy_frame=300,
+            terminal_damping_blend_frames=100,
+            terminal_kp_scale=0.90,
+            terminal_kd_scale=1.50,
+            terminal_damping_joint_group="legs",
+        )
+    )
+
+    effect = controller.adapt_target(
+        target=np.ones(29, dtype=np.float64),
+        policy_frame=350,
+        timestamp_sec=7.0,
+        ball_contact_detected=True,
+        left_support=True,
+        right_support=True,
+    )
+    receipt = controller.build_receipt(strict_replay=True)
+
+    assert effect.terminal_damping_fraction == pytest.approx(0.5)
+    assert effect.terminal_kp_scale == pytest.approx(0.95)
+    assert effect.terminal_kd_scale == pytest.approx(1.25)
+    assert effect.terminal_damping_joint_group == "legs"
+    assert receipt.terminal_damping_activation_policy_frame == 350
+    assert receipt.peak_terminal_damping_fraction == pytest.approx(0.5)
+
+
+def test_recovery_rejects_terminal_damping_that_overlaps_settling() -> None:
+    with pytest.raises(ValueError, match="cannot overlap"):
+        G1CerebellarRecoveryConfig(
+            start_policy_frame=100,
+            blend_frames=100,
+            settling_start_policy_frame=200,
+            settling_blend_frames=100,
+            settling_standing_pose_blend=0.40,
+            settling_roll_posture_bias_rad=0.0,
+            terminal_damping_start_policy_frame=299,
+            terminal_kp_scale=0.95,
+            terminal_kd_scale=1.20,
+        )
+
+
 def test_recovery_quality_detects_lower_wobble_and_preserved_goal() -> None:
     baseline_trace = _trajectory(wobble_scale=1.0)
     candidate_trace = _trajectory(wobble_scale=0.35)
