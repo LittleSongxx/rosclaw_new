@@ -40,6 +40,7 @@ Safety invariants (hard, from config — never tuned by this script):
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import threading
@@ -52,7 +53,6 @@ sys.path.insert(0, REPO_SRC)
 sys.path.insert(0, "/home/nvidia/workspace/rosclaw_rh56_real/rosclaw-rh56-runtime/src")
 sys.path.insert(0, "/home/nvidia/workspace/rosclaw/rosclaw_test/examples/rh56_rps/src")
 
-import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import pyrealsense2 as rs  # noqa: E402
 
@@ -69,7 +69,6 @@ from rosclaw.twintouch.choreography import (  # noqa: E402
 from rosclaw.twintouch.config import TwinTouchConfig  # noqa: E402
 from rosclaw.twintouch.effect_gate import (  # noqa: E402
     COMMAND_HOLD,
-    COMMAND_MOVE,
     EFFECT_CONFIRMED,
     JointCommand,
     TelemetryPoint,
@@ -125,7 +124,7 @@ OUT_ROOT = Path("/home/nvidia/.rosclaw/acceptance/twintouch/t1")
 
 SLAVE_CANDIDATES = (1, 2)
 BODY_IDS = {"left": "rh56_left_01", "right": "rh56_right_01"}
-OPEN_RAW = {j: 1000 for j in RH56_JOINTS}
+OPEN_RAW = dict.fromkeys(RH56_JOINTS, 1000)
 TELEMETRY_MIN_INTERVAL_S = {"left": 0.25, "right": 0.0}
 
 
@@ -221,7 +220,7 @@ class Rh56BodyExecutor:
 class LiveProbe:
     """PreconditionProbe over live camera + snapshot freshness."""
 
-    def __init__(self, collector: "ObservationCollector"):
+    def __init__(self, collector: ObservationCollector):
         self._collector = collector
 
     def camera_fresh(self, *, max_age_ms: float) -> bool:
@@ -365,7 +364,7 @@ class ObservationCollector:
                 visual=visual,
             )
 
-    def visual_sample(self, side: str) -> "VisualSample":
+    def visual_sample(self, side: str) -> VisualSample:
         """Real per-hand cluster centroid for the effect gate — never a
         fabricated constant."""
         with self._lock:
@@ -799,7 +798,7 @@ def run() -> int:
                 return 2
 
         # hands must be OPEN for the baseline (RH56 calibration rule)
-        for side, ctl in controllers.items():
+        for _side, ctl in controllers.items():
             tel = ctl.read_telemetry()
             angles = tel.angle_actual or {}
             if any((angles.get(j) or 0) < 900 for j in ("little", "ring", "middle", "index")):
@@ -807,7 +806,7 @@ def run() -> int:
         time.sleep(3.0)
 
         baselines: dict[str, ForceBaseline] = {}
-        for side, ctl in controllers.items():
+        for _side, ctl in controllers.items():
             samples = []
             for _ in range(8):
                 tel = ctl.read_telemetry()
@@ -1025,16 +1024,14 @@ def run() -> int:
     finally:
         if collector is not None:
             collector.stop()
-        for side, ctl in controllers.items():
+        for _side, ctl in controllers.items():
             try:
                 ctl.move_to_gesture("t1_coast", [1000] * len(RH56_JOINTS), 300, 50)
                 ctl.close()
             except Exception:  # noqa: BLE001
                 pass
-        try:
+        with contextlib.suppress(Exception):
             cap.stop()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def _run_episode(
@@ -1252,22 +1249,23 @@ def _run_episode(
             first_rise_targets = {s: dict(t) for s, t in current_targets.items()}
         if supervisor.state == "CONTACT_CONFIRMED" and confirm_targets is None:
             confirm_targets = {s: dict(t) for s, t in current_targets.items()}
-        if supervisor.state == "RELEASE":
+        if supervisor.state == "RELEASE" and (
+            sum(1 for n in record.notes if n.startswith("release[")) < 10
+        ):
             # per-cycle release diagnostics (the release kept failing
             # blind — record which condition actually fails)
-            if sum(1 for n in record.notes if n.startswith("release[")) < 10:
-                finger = pair_id.split("_")[0]
-                lv = obs.left.force_act.get(finger) if obs.left else None
-                rv = obs.right.force_act.get(finger) if obs.right else None
-                lb = baselines["left"].medians.get(finger, 0.0)
-                rb = baselines["right"].medians.get(finger, 0.0)
-                record.notes.append(
-                    f"release[{supervisor.track.release_steps}]: "
-                    f"L {None if lv is None else lv - lb:+.0f} "
-                    f"R {None if rv is None else rv - rb:+.0f} "
-                    f"visual {None if obs.visual is None else round(obs.visual.min_distance_m or -1, 4)} "
-                    f"age {None if obs.visual is None else round(obs.visual.age_ms)}ms"
-                )
+            finger = pair_id.split("_")[0]
+            lv = obs.left.force_act.get(finger) if obs.left else None
+            rv = obs.right.force_act.get(finger) if obs.right else None
+            lb = baselines["left"].medians.get(finger, 0.0)
+            rb = baselines["right"].medians.get(finger, 0.0)
+            record.notes.append(
+                f"release[{supervisor.track.release_steps}]: "
+                f"L {None if lv is None else lv - lb:+.0f} "
+                f"R {None if rv is None else rv - rb:+.0f} "
+                f"visual {None if obs.visual is None else round(obs.visual.min_distance_m or -1, 4)} "
+                f"age {None if obs.visual is None else round(obs.visual.age_ms)}ms"
+            )
         if decision.kind in (DECISION_COMMIT, DECISION_FAIL):
             record.outcome = decision.receipt.outcome if decision.receipt else "UNKNOWN"
             record.receipt = decision.receipt.to_record() if decision.receipt else None

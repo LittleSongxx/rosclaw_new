@@ -19,6 +19,7 @@ wedge-safe (hardware_reset first, graceful stop only).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import time
@@ -30,6 +31,7 @@ sys.path.insert(0, "/home/nvidia/workspace/rosclaw_rh56_real/rosclaw-rh56-runtim
 sys.path.insert(0, "/home/nvidia/workspace/rosclaw/rosclaw_test/examples/rh56_rps/src")
 
 import pyrealsense2 as rs  # noqa: E402
+from rosclaw_rps.hand.rh56_controller import RH56Controller  # noqa: E402
 
 from rosclaw.evolution.hardware.camera import D435iCapture  # noqa: E402
 from rosclaw.evolution.hardware.thermal import default_temp_probe  # noqa: E402
@@ -40,7 +42,6 @@ from rosclaw.perception.handcam import (  # noqa: E402
     measure_visual_stability,
 )
 from rosclaw.self_model.adapters.rh56 import RH56ForwardPrior, RH56HandSelfAdapter  # noqa: E402
-from rosclaw_rps.hand.rh56_controller import RH56Controller  # noqa: E402
 
 RIGHT_PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BG04LBR0-if00-port0"
 LEFT_PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BG04LB62-if00-port0"
@@ -369,10 +370,8 @@ def main() -> int:
             )
     finally:
         for ctl in controllers.values():
-            try:
+            with contextlib.suppress(Exception):
                 ctl.close()
-            except Exception:  # noqa: BLE001
-                pass
         cap.stop()
         writer.emit(
             "health_check",

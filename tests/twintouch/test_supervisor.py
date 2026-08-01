@@ -264,7 +264,7 @@ def test_one_sided_force_budget():
     sup.step(_obs(ts, left=left_rising, visual=_visual(0.006)))  # -> CANDIDATE
     ts += 0.1
     # press-build: up to 3 extra fine steps while one-sided
-    for step in range(3):
+    for _step in range(3):
         decision = sup.step(_obs(ts, left=left_rising, visual=_visual(0.006)))
         assert decision.kind == DECISION_ISSUE_STEP
         assert "press-build" in decision.note
