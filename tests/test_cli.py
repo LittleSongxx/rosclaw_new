@@ -31,6 +31,8 @@ class TestVersion:
         captured = capsys.readouterr()
         assert "daemon" in captured.out
         assert "Inspect or call the local rosclawd control plane" in captured.out
+        assert "dream" in captured.out
+        assert "Plan and schedule bounded SIM-only DreamForge" in captured.out
 
 
 class TestInit:

@@ -26,6 +26,12 @@ def main() -> int:
     if result is not None:
         return result
 
+    from rosclaw.dream.cli import dispatch_dream_argv
+
+    result = dispatch_dream_argv(sys.argv[1:])
+    if result is not None:
+        return result
+
     from rosclaw.continual.cli import dispatch_continual_argv
 
     result = dispatch_continual_argv(sys.argv[1:])
