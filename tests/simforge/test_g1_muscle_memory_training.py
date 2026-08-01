@@ -1,0 +1,233 @@
+from __future__ import annotations
+
+from dataclasses import asdict, replace
+from types import SimpleNamespace
+from typing import cast
+
+import numpy as np
+import pytest
+
+from rosclaw.simforge.backends.unitree_mujoco_backend import GoalForgeEpisode
+from rosclaw.simforge.g1_muscle_memory import (
+    G1_MUSCLE_MEMORY_ACTIONS,
+    G1_MUSCLE_MEMORY_OBSERVATIONS,
+)
+from rosclaw.simforge.g1_muscle_memory_training import (
+    G1MuscleMemoryHoldoutSummary,
+    G1MuscleMemoryTrainingConfig,
+    _artifact_from_genome,
+    _build_g1_muscle_memory_holdout_cases,
+    _naturalness_preserved,
+    _observation_rows,
+    _reduction,
+    build_g1_muscle_memory_cases,
+)
+from rosclaw.simforge.g1_recovery_quality import G1RecoveryQuality
+from rosclaw.simforge.g1_temporal_muscle_memory_training import (
+    G1TemporalMuscleMemoryTrainingConfig,
+    _artifact_from_temporal_genome,
+    _build_temporal_expert_validation_cases,
+    _build_temporal_holdout_cases,
+    _calibrate_impact_radius,
+    _numpy_temporal_logits,
+    build_g1_temporal_muscle_memory_cases,
+)
+from rosclaw.simforge.models import Partition
+
+
+def test_training_config_rejects_unbounded_search() -> None:
+    assert G1TemporalMuscleMemoryTrainingConfig().minimum_std == pytest.approx(0.015)
+
+    with pytest.raises(ValueError, match="population"):
+        G1MuscleMemoryTrainingConfig(population_size=5)
+    with pytest.raises(ValueError, match="std"):
+        G1MuscleMemoryTrainingConfig(initial_std=0.04)
+
+    with pytest.raises(ValueError, match="population"):
+        G1TemporalMuscleMemoryTrainingConfig(population_size=5)
+
+
+def test_training_and_private_holdout_are_partitioned() -> None:
+    training = build_g1_muscle_memory_cases()
+    holdout = _build_g1_muscle_memory_holdout_cases()
+
+    assert all(case.scenario.partition is Partition.DEVELOPMENT for case in training)
+    assert all(case.scenario.partition is Partition.HOLDOUT for case in holdout)
+    assert {case.scenario.scenario_commitment for case in training}.isdisjoint(
+        case.scenario.scenario_commitment for case in holdout
+    )
+    assert [case.feedback_enabled for case in training] == [False, False, True]
+    assert training[0].scenario.ball_velocity_x_mps == 0.0
+    assert training[0].scenario.ball_launch_delay_sec == 0.0
+    assert holdout[0].scenario.ball_velocity_x_mps == 0.0
+
+    temporal_holdout = _build_temporal_holdout_cases()
+    temporal_training = build_g1_temporal_muscle_memory_cases()
+    expert_validation = _build_temporal_expert_validation_cases()
+    assert all(case.scenario.partition is Partition.HOLDOUT for case in temporal_holdout)
+    assert all(case.scenario.partition is Partition.DEVELOPMENT for case in temporal_training)
+    assert all(case.scenario.partition is Partition.VALIDATION for case in expert_validation)
+    assert sum(case.scenario.ball_velocity_x_mps != 0.0 for case in temporal_training) == 3
+    assert {case.scenario.scenario_commitment for case in temporal_holdout}.isdisjoint(
+        case.scenario.scenario_commitment for case in training
+    )
+    assert {case.scenario.scenario_commitment for case in expert_validation}.isdisjoint(
+        case.scenario.scenario_commitment for case in temporal_training + temporal_holdout
+    )
+
+
+def test_temporal_expert_radius_is_calibrated_only_from_development_spacing() -> None:
+    assert _calibrate_impact_radius((2.50,)) == pytest.approx(1e-6)
+    assert _calibrate_impact_radius((2.49, 2.585, 2.587)) == pytest.approx(0.10)
+    assert _calibrate_impact_radius((2.0, 2.4)) == pytest.approx(0.20)
+
+    with pytest.raises(ValueError, match="finite prototypes"):
+        _calibrate_impact_radius(())
+
+
+def test_sparse_genome_builds_bounded_content_addressed_actor() -> None:
+    artifact = _artifact_from_genome(
+        np.zeros(33, dtype=np.float64),
+        body_hash="sha256:" + "a" * 64,
+        motion_hash="sha256:" + "b" * 64,
+        parent_config_hash="sha256:" + "c" * 64,
+        dataset_hash="sha256:" + "d" * 64,
+        observation_mean=(0.0,) * len(G1_MUSCLE_MEMORY_OBSERVATIONS),
+        observation_scale=(1.0,) * len(G1_MUSCLE_MEMORY_OBSERVATIONS),
+        training_episode_count=3,
+        training_seed=7,
+    )
+
+    assert len(artifact.weights) == len(G1_MUSCLE_MEMORY_ACTIONS)
+    assert all(len(row) == len(G1_MUSCLE_MEMORY_OBSERVATIONS) for row in artifact.weights)
+    assert artifact.activation_ceiling == "SIM_ONLY"
+    assert artifact.artifact_hash.startswith("sha256:")
+    assert len(artifact.artifact_hash) == 71
+
+
+def test_temporal_genome_builds_recurrent_safe_json_actor() -> None:
+    observations = len(G1_MUSCLE_MEMORY_OBSERVATIONS)
+    artifact = _artifact_from_temporal_genome(
+        np.zeros(37, dtype=np.float64),
+        body_hash="sha256:" + "a" * 64,
+        motion_hash="sha256:" + "b" * 64,
+        parent_config_hash="sha256:" + "c" * 64,
+        fallback_config_hash="sha256:" + "e" * 64,
+        expert_impact_prototypes_ns=(2.5, 3.4),
+        structured_recovery_parameters=(0.42, 0.11, 0.54),
+        dataset_hash="sha256:" + "d" * 64,
+        observation_mean=(0.0,) * observations,
+        observation_scale=(1.0,) * observations,
+        training_episode_count=3,
+        training_seed=7,
+    )
+
+    assert artifact.schema_version.endswith(".v2")
+    assert artifact.policy_architecture == "leaky_rbf_recurrent_v1"
+    assert len(artifact.temporal_basis_centers_sec) == 4
+    assert artifact.activation_ceiling == "SIM_ONLY"
+    assert artifact.to_dict()["policy_architecture"] == "leaky_rbf_recurrent_v1"
+    assert artifact.to_dict()["structured_recovery_parameter_names"] == [
+        "settling_standing_pose_blend",
+        "settling_waist_pitch_bias_rad",
+        "target_smoothing_alpha",
+    ]
+    assert artifact.to_dict()["structured_recovery_parameters"] == [0.42, 0.11, 0.54]
+    with pytest.raises(ValueError, match="standing blend"):
+        replace(artifact, structured_recovery_parameters=(0.51, 0.11, 0.54))
+
+
+def test_temporal_numpy_export_is_deterministic() -> None:
+    observations = len(G1_MUSCLE_MEMORY_OBSERVATIONS)
+    genome = np.zeros(37, dtype=np.float64)
+    genome[0:4] = (0.03, 0.02, 0.0, -0.01)
+    genome[12] = 0.2
+    artifact = _artifact_from_temporal_genome(
+        genome,
+        body_hash="sha256:" + "a" * 64,
+        motion_hash="sha256:" + "b" * 64,
+        parent_config_hash="sha256:" + "c" * 64,
+        fallback_config_hash="sha256:" + "e" * 64,
+        expert_impact_prototypes_ns=(2.5, 3.4),
+        structured_recovery_parameters=(0.42, 0.11, 0.54),
+        dataset_hash="sha256:" + "d" * 64,
+        observation_mean=(0.0,) * observations,
+        observation_scale=(1.0,) * observations,
+        training_episode_count=3,
+        training_seed=7,
+    )
+    rows = np.zeros((8, observations), dtype=np.float64)
+    rows[:, 0] = np.linspace(0.0, 0.7, len(rows))
+    rows[:, 2] = np.linspace(0.0, -0.2, len(rows))
+
+    first = _numpy_temporal_logits(artifact, rows, rows[:, 0])
+    second = _numpy_temporal_logits(artifact, rows, rows[:, 0])
+
+    assert np.array_equal(first, second)
+    assert not np.array_equal(first[0], first[-1])
+
+
+def test_holdout_summary_cannot_disclose_case_rows() -> None:
+    summary = G1MuscleMemoryHoldoutSummary(
+        suite_hash="e" * 64,
+        case_count=3,
+        passed_count=3,
+        strict_replay_count=3,
+        mean_score=0.1,
+        minimum_score=0.0,
+        qualified=True,
+    )
+
+    payload = asdict(summary)
+    assert payload["case_rows_disclosed"] is False
+    assert payload["recovery_equivalence_margin"] == pytest.approx(0.03)
+    assert "cases" not in payload
+
+
+def test_quality_reduction_uses_a_physical_scale_floor() -> None:
+    assert _reduction(0.0, 0.01, scale_floor=0.05) == pytest.approx(-0.2)
+    assert _reduction(0.10, 0.05, scale_floor=0.05) == pytest.approx(0.5)
+
+
+def test_training_consumes_the_exact_recorded_online_observation() -> None:
+    rows = np.arange(32, dtype=np.float64).reshape(2, 16)
+    episode = cast(
+        GoalForgeEpisode,
+        SimpleNamespace(
+            trajectory={
+                "time": np.asarray((0.0, 0.02)),
+                "recovery_proprioception": rows,
+            }
+        ),
+    )
+
+    observed = _observation_rows(episode)
+
+    assert np.array_equal(observed, rows)
+
+
+def test_naturalness_guard_rejects_reward_hacking_tail_wobble() -> None:
+    parent = cast(
+        G1RecoveryQuality,
+        SimpleNamespace(
+            settling_time_sec=4.72,
+            post_contact_lateral_peak_return_m=0.65,
+            post_contact_pelvis_path_length_m=1.67,
+            tail_wobble_index=0.16,
+            post_contact_leg_joint_jerk_rms_rad_s3=893.0,
+            post_contact_support_transition_count=38,
+        ),
+    )
+    candidate = cast(
+        G1RecoveryQuality,
+        SimpleNamespace(
+            settling_time_sec=5.44,
+            post_contact_lateral_peak_return_m=0.68,
+            post_contact_pelvis_path_length_m=1.77,
+            tail_wobble_index=0.28,
+            post_contact_leg_joint_jerk_rms_rad_s3=842.0,
+            post_contact_support_transition_count=38,
+        ),
+    )
+
+    assert not _naturalness_preserved(parent, candidate)

@@ -31,6 +31,8 @@ class G1RecoveryEvolutionDecision(StrEnum):
 @dataclass(frozen=True)
 class G1RecoveryRouteReceipt:
     candidate_hash: str
+    recovery_controller_hash: str
+    recovery_config_hash: str
     evaluated_regime_commitment: str
     promoted_regime_commitment: str
     selected_policy_hash: str
@@ -39,7 +41,7 @@ class G1RecoveryRouteReceipt:
     fallback_reason: str | None
     evidence_domain: str = "SIM"
     hardware_command_sent: bool = False
-    schema_version: str = "rosclaw.g1_goalforge.recovery_route_receipt.v1"
+    schema_version: str = "rosclaw.g1_goalforge.recovery_route_receipt.v2"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -49,6 +51,8 @@ class G1RecoveryRouteReceipt:
 class G1MomentumUnloadingEvolution:
     body_hash: str
     kick_prior_hash: str
+    recovery_controller_hash: str
+    recovery_config_hash: str
     regime_commitment: str
     parent: ShotParameters
     candidate: ShotParameters
@@ -57,12 +61,14 @@ class G1MomentumUnloadingEvolution:
     comparison: G1MomentumUnloadingComparison
     decision: G1RecoveryEvolutionDecision
     activation_ceiling: str = "SIM_ONLY"
-    schema_version: str = "rosclaw.g1_goalforge.momentum_unloading_evolution.v1"
+    schema_version: str = "rosclaw.g1_goalforge.momentum_unloading_evolution.v2"
 
     def __post_init__(self) -> None:
         for label, value in (
             ("body_hash", self.body_hash),
             ("kick_prior_hash", self.kick_prior_hash),
+            ("recovery_controller_hash", self.recovery_controller_hash),
+            ("recovery_config_hash", self.recovery_config_hash),
             ("regime_commitment", self.regime_commitment),
         ):
             if not _SHA256.fullmatch(value):
@@ -85,6 +91,8 @@ class G1MomentumUnloadingEvolution:
         *,
         body_hash: str,
         kick_prior_hash: str,
+        recovery_controller_hash: str,
+        recovery_config_hash: str,
         regime_commitment: str,
         parent: ShotParameters,
         candidate: ShotParameters,
@@ -100,6 +108,8 @@ class G1MomentumUnloadingEvolution:
         return cls(
             body_hash=body_hash,
             kick_prior_hash=kick_prior_hash,
+            recovery_controller_hash=recovery_controller_hash,
+            recovery_config_hash=recovery_config_hash,
             regime_commitment=regime_commitment,
             parent=parent,
             candidate=candidate,
@@ -133,6 +143,8 @@ class G1MomentumUnloadingEvolution:
         )
         receipt = G1RecoveryRouteReceipt(
             candidate_hash=self.candidate_hash,
+            recovery_controller_hash=self.recovery_controller_hash,
+            recovery_config_hash=self.recovery_config_hash,
             evaluated_regime_commitment=regime_commitment,
             promoted_regime_commitment=self.regime_commitment,
             selected_policy_hash=selected.policy_hash,
@@ -147,6 +159,8 @@ class G1MomentumUnloadingEvolution:
             "schema_version": self.schema_version,
             "body_hash": self.body_hash,
             "kick_prior_hash": self.kick_prior_hash,
+            "recovery_controller_hash": self.recovery_controller_hash,
+            "recovery_config_hash": self.recovery_config_hash,
             "regime_commitment": self.regime_commitment,
             "parent": self.parent.to_dict(),
             "candidate": self.candidate.to_dict(),

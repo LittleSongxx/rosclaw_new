@@ -158,6 +158,8 @@ class RolloutService:
             raise ValueError("rollout changed policy version inside a pinned assignment")
         if trajectory.policy.body_hash != item.body_hash:
             raise ValueError("rollout trajectory Body does not match its assignment")
+        if trajectory.segments[0].regime_hash != item.scenario_commitment:
+            raise ValueError("rollout trajectory scenario does not match its assignment")
         if not trajectory.strict_replay:
             raise ValueError("rollout service accepts only strict-replay trajectories")
         event = self.log.append(

@@ -105,6 +105,8 @@ def test_recovery_smoothly_blends_qualified_pose_after_landing() -> None:
     # Left hip roll also receives the bounded -0.05 rad posture bias.
     assert complete.target[1] == pytest.approx(0.65)
     receipt = controller.build_receipt(strict_replay=True)
+    assert receipt.controller_hash == controller.controller_hash
+    assert receipt.config_hash == controller.config_hash
     assert receipt.contact_latched
     assert receipt.kick_foot_landing_latched
     assert receipt.activation_policy_frame == 470
@@ -181,6 +183,56 @@ def test_recovery_causally_smooths_only_upper_body_after_landing() -> None:
     receipt = controller.build_receipt(strict_replay=True)
     assert receipt.smoothing_activation_policy_frame == 400
     assert receipt.peak_smoothing_residual_rms_rad > 0.0
+
+
+def test_recovery_adds_bounded_terminal_damping_after_settling() -> None:
+    controller = _controller(
+        G1CerebellarRecoveryConfig(
+            start_policy_frame=100,
+            blend_frames=100,
+            settling_start_policy_frame=200,
+            settling_blend_frames=100,
+            settling_standing_pose_blend=0.40,
+            settling_roll_posture_bias_rad=0.0,
+            terminal_damping_start_policy_frame=300,
+            terminal_damping_blend_frames=100,
+            terminal_kp_scale=0.90,
+            terminal_kd_scale=1.50,
+            terminal_damping_joint_group="legs",
+        )
+    )
+
+    effect = controller.adapt_target(
+        target=np.ones(29, dtype=np.float64),
+        policy_frame=350,
+        timestamp_sec=7.0,
+        ball_contact_detected=True,
+        left_support=True,
+        right_support=True,
+    )
+    receipt = controller.build_receipt(strict_replay=True)
+
+    assert effect.terminal_damping_fraction == pytest.approx(0.5)
+    assert effect.terminal_kp_scale == pytest.approx(0.95)
+    assert effect.terminal_kd_scale == pytest.approx(1.25)
+    assert effect.terminal_damping_joint_group == "legs"
+    assert receipt.terminal_damping_activation_policy_frame == 350
+    assert receipt.peak_terminal_damping_fraction == pytest.approx(0.5)
+
+
+def test_recovery_rejects_terminal_damping_that_overlaps_settling() -> None:
+    with pytest.raises(ValueError, match="cannot overlap"):
+        G1CerebellarRecoveryConfig(
+            start_policy_frame=100,
+            blend_frames=100,
+            settling_start_policy_frame=200,
+            settling_blend_frames=100,
+            settling_standing_pose_blend=0.40,
+            settling_roll_posture_bias_rad=0.0,
+            terminal_damping_start_policy_frame=299,
+            terminal_kp_scale=0.95,
+            terminal_kd_scale=1.20,
+        )
 
 
 def test_recovery_quality_detects_lower_wobble_and_preserved_goal() -> None:
@@ -287,6 +339,8 @@ def test_momentum_unloading_gate_requires_measured_motion_and_replay_gains() -> 
     evolution = G1MomentumUnloadingEvolution.evaluate(
         body_hash=_HASH_A,
         kick_prior_hash=_HASH_B,
+        recovery_controller_hash="sha256:" + "6" * 64,
+        recovery_config_hash="sha256:" + "7" * 64,
         regime_commitment="sha256:" + "4" * 64,
         parent=ShotParameters(),
         candidate=ShotParameters(stance_offset_y=-0.08, swing_amplitude=1.125),
@@ -300,10 +354,15 @@ def test_momentum_unloading_gate_requires_measured_motion_and_replay_gains() -> 
     assert evolution.decision is G1RecoveryEvolutionDecision.SIM_CHAMPION
     assert selected.policy_hash == evolution.candidate.policy_hash
     assert selected_receipt.used_candidate
+    assert selected_receipt.recovery_controller_hash == evolution.recovery_controller_hash
+    assert selected_receipt.recovery_config_hash == evolution.recovery_config_hash
     assert fallback.policy_hash == evolution.parent.policy_hash
     assert not fallback_receipt.used_candidate
     assert fallback_receipt.fallback_reason == "out_of_evidence_regime"
     assert fallback_receipt.rollback_target_hash == evolution.parent.policy_hash
+    assert replace(evolution, recovery_config_hash="sha256:" + "8" * 64).candidate_hash != (
+        evolution.candidate_hash
+    )
 
 
 def test_naturalness_gate_requires_jerk_gains_without_stability_regression() -> None:

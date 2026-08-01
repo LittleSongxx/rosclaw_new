@@ -63,6 +63,7 @@ class ExperienceRecord:
     partition: ExperiencePartition
     anchor_policy_hash: str | None = None
     boundary_reason: str | None = None
+    boundary_request_hash: str | None = None
     self_change_hash: str | None = None
     near_boundary_score: float = 0.0
     schema_version: str = "rosclaw.continual.experience_record.v1"
@@ -77,10 +78,13 @@ class ExperienceRecord:
                 raise ValueError("boundary experience requires a reason")
             if not self.trajectory.has_critical_cost and self.near_boundary_score < 0.80:
                 raise ValueError("boundary experience requires a safety event or near miss")
+        elif self.boundary_request_hash is not None:
+            raise ValueError("only boundary experience may bind a boundary replay request")
         if self.partition is ExperiencePartition.SELF and not self.self_change_hash:
             raise ValueError("self experience requires a body-change commitment")
         for label, value in (
             ("anchor_policy_hash", self.anchor_policy_hash),
+            ("boundary_request_hash", self.boundary_request_hash),
             ("self_change_hash", self.self_change_hash),
         ):
             if value is not None and not _SHA256.fullmatch(value):
@@ -91,7 +95,7 @@ class ExperienceRecord:
         return canonical_hash(self.to_dict())
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "schema_version": self.schema_version,
             "trajectory_hash": self.trajectory.trajectory_hash,
             "partition": self.partition.value,
@@ -100,6 +104,11 @@ class ExperienceRecord:
             "self_change_hash": self.self_change_hash,
             "near_boundary_score": self.near_boundary_score,
         }
+        # Preserve hashes of legacy v1 records while binding queue-backed
+        # completions to the exact request commitment when one is present.
+        if self.boundary_request_hash is not None:
+            value["boundary_request_hash"] = self.boundary_request_hash
+        return value
 
 
 @dataclass(frozen=True)
