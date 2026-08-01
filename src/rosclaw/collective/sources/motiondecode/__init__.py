@@ -22,6 +22,13 @@ from rosclaw.collective.sources.motiondecode.manifest import (
     register_motiondecode_source,
 )
 from rosclaw.collective.sources.motiondecode.parser import CanonicalMotionEpisode
+from rosclaw.collective.sources.motiondecode.repair import (
+    MotionDecodeRepairReport,
+    MotionRepairDisposition,
+    SegmentationRepairManifest,
+    repair_motiondecode_snapshot,
+    replay_segmentation_repair,
+)
 from rosclaw.collective.sources.motiondecode.taxonomy import MotionFamily
 
 __all__ = [
@@ -31,10 +38,15 @@ __all__ = [
     "MotionDecodeIngestReport",
     "MotionDecodeLicenseSnapshot",
     "MotionDecodeRegistration",
+    "MotionDecodeRepairReport",
     "MotionDecodeSourceManifest",
     "MotionFamily",
     "MotionQualificationLevel",
+    "MotionRepairDisposition",
+    "SegmentationRepairManifest",
     "audit_motiondecode_snapshot",
     "register_motiondecode_source",
+    "repair_motiondecode_snapshot",
+    "replay_segmentation_repair",
     "snapshot_license",
 ]

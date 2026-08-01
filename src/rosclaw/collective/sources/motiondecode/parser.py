@@ -45,6 +45,7 @@ class CanonicalMotionEpisode:
     joint_velocity: np.ndarray
     joint_acceleration: np.ndarray
     implicit_timeline: bool
+    derivation_manifest_hash: str | None = None
     ball_pose_available: bool = False
     action_semantics_available: bool = False
     reward_semantics_available: bool = False
@@ -61,6 +62,11 @@ class CanonicalMotionEpisode:
                 raise ValueError(f"{label} must be a sha256: content hash")
         if not isinstance(self.mapping, MotionDecodeJointMapping):
             raise ValueError("mapping must be MotionDecodeJointMapping")
+        if self.derivation_manifest_hash is not None and (
+            not self.derivation_manifest_hash.startswith("sha256:")
+            or len(self.derivation_manifest_hash) != 71
+        ):
+            raise ValueError("derivation_manifest_hash must be a sha256: content hash")
         if not math.isfinite(self.sample_rate_hz) or self.sample_rate_hz <= 0.0:
             raise ValueError("sample_rate_hz must be finite and positive")
         frames = int(self.time.shape[0])
@@ -96,7 +102,7 @@ class CanonicalMotionEpisode:
         return False
 
     def summary(self) -> dict[str, Any]:
-        return {
+        summary = {
             "schema_version": self.schema_version,
             "source_manifest_hash": self.source_manifest_hash,
             "source_file_hash": self.source_file_hash,
@@ -116,6 +122,9 @@ class CanonicalMotionEpisode:
             "transition_semantics_available": self.transition_semantics_available,
             "hardware_authorized": self.hardware_authorized,
         }
+        if self.derivation_manifest_hash is not None:
+            summary["derivation_manifest_hash"] = self.derivation_manifest_hash
+        return summary
 
 
 def parse_motion_csv(

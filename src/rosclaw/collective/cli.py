@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from rosclaw.collective.contracts import LicenseDecision, LicenseUse
 from rosclaw.continual.services.persistence import atomic_write_json
+from rosclaw.feedback.contracts import canonical_hash
 
 if TYPE_CHECKING:
     from rosclaw.collective.sources.motiondecode.manifest import MotionDecodeRegistration
@@ -96,6 +97,20 @@ def _parser() -> argparse.ArgumentParser:
     ingest.add_argument("--source-checkout", type=Path, default=Path.cwd())
     ingest.add_argument("--force", action="store_true")
     ingest.set_defaults(handler=_ingest)
+
+    repair = commands.add_parser(
+        "repair",
+        help="dry-run bounded repairs and re-audit retained motion",
+    )
+    repair.add_argument("adapter", choices=["motiondecode"])
+    repair.add_argument("--registration", type=Path, required=True)
+    repair.add_argument("--ingest-report", type=Path, required=True)
+    repair.add_argument("--dataset-root", type=Path, required=True)
+    repair.add_argument("--target-model", type=Path, required=True)
+    repair.add_argument("--output", type=Path, required=True)
+    repair.add_argument("--source-checkout", type=Path, default=Path.cwd())
+    repair.add_argument("--force", action="store_true")
+    repair.set_defaults(handler=_repair)
     return parser
 
 
@@ -209,6 +224,74 @@ def _ingest(args: argparse.Namespace) -> int:
         }
     )
     return 0 if report.kinematic_valid_count > 0 else 1
+
+
+def _repair(args: argparse.Namespace) -> int:
+    from rosclaw.collective.sources.motiondecode.audit import (
+        MotionDecodeAuditThresholds,
+    )
+    from rosclaw.collective.sources.motiondecode.repair import (
+        repair_motiondecode_snapshot,
+    )
+
+    output = _output_path(args.output, args.source_checkout, force=args.force)
+    registration = _read_registration(args.registration)
+    ingest = _read_object(args.ingest_report)
+    report_value = ingest.get("report")
+    if not isinstance(report_value, dict):
+        raise ValueError("ingest artifact lacks a report object")
+    expected_ingest_hash = ingest.get("report_hash")
+    if not isinstance(expected_ingest_hash, str) or expected_ingest_hash != canonical_hash(
+        report_value
+    ):
+        raise ValueError("ingest report_hash does not replay")
+    thresholds_value = report_value.get("thresholds")
+    if not isinstance(thresholds_value, dict):
+        raise ValueError("ingest report lacks audit thresholds")
+    expected_fields = set(MotionDecodeAuditThresholds().to_dict())
+    if set(thresholds_value) != expected_fields or any(
+        isinstance(value, bool) or not isinstance(value, (int, float))
+        for value in thresholds_value.values()
+    ):
+        raise ValueError("ingest report audit thresholds are invalid")
+    thresholds = MotionDecodeAuditThresholds(**thresholds_value)
+    report = repair_motiondecode_snapshot(
+        registration,
+        args.dataset_root,
+        target_model_path=args.target_model,
+        expected_ingest_report_hash=expected_ingest_hash,
+        thresholds=thresholds,
+    )
+    artifact = {
+        "schema_version": "rosclaw.collective.motiondecode_repair_artifact.v1",
+        "report": report.to_dict(),
+        "report_hash": report.report_hash,
+    }
+    atomic_write_json(output, artifact)
+    _print(
+        {
+            "schema_version": "rosclaw.collective.repair_receipt.v1",
+            "ok": report.q1_after_count > 0,
+            "output": str(output),
+            "report_hash": report.report_hash,
+            "original_ingest_report_hash": report.original_ingest_report_hash,
+            "detector_hash": report.detector_hash,
+            "clip_count": len(report.results),
+            "disposition_counts": report.disposition_counts,
+            "repaired_q1_count": report.repaired_q1_count,
+            "q1_after_count": report.q1_after_count,
+            "rejected_count": report.rejected_count,
+            "reason_clip_counts": report.reason_clip_counts,
+            "quality_commitment": report.quality_commitment,
+            "dry_run_only": True,
+            "raw_motion_persisted": False,
+            "training_eligible": report.training_eligible,
+            "training_blockers": report.training_blockers,
+            "activation_authorized": False,
+            "hardware_authorized": False,
+        }
+    )
+    return 0 if report.q1_after_count > 0 else 1
 
 
 def _families(value: str) -> tuple[MotionFamily, ...]:
