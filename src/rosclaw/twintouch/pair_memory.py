@@ -61,7 +61,11 @@ class MemoryScope:
     def matches(self, query: MemoryScope) -> bool:
         """Exact-match on every hard field.  temperature_regime=None in
         the QUERY means unscoped (matches any regime); in the MEMORY it
-        means regime-unknown (matches only an unscoped query)."""
+        means regime-unknown (matches only an unscoped query).
+        calibration_hashes=() in the QUERY means unscoped; in the
+        MEMORY it means calibration-unknown — a memory whose
+        calibration is unknown never matches a query that names
+        calibration hashes."""
         if self.left_body_hash != query.left_body_hash:
             return False
         if self.right_body_hash != query.right_body_hash:
@@ -72,9 +76,10 @@ class MemoryScope:
             return False
         if self.camera_pose_hash != query.camera_pose_hash:
             return False
+        if query.calibration_hashes and self.calibration_hashes != query.calibration_hashes:
+            return False
         return not (
             query.temperature_regime is not None
-            and self.temperature_regime is not None
             and self.temperature_regime != query.temperature_regime
         )
 
@@ -165,28 +170,39 @@ class FingerPairMemory:
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> FingerPairMemory:
+        schema_version = record.get("schema_version")
+        if schema_version != SCHEMA_PAIR_MEMORY:
+            raise ValueError(
+                f"unsupported schema_version {schema_version!r} "
+                f"(expected {SCHEMA_PAIR_MEMORY!r})"
+            )
         s = record.get("scope") or {}
-        return cls(
-            scope=MemoryScope(
-                left_body_hash=str(s.get("left_body_hash") or ""),
-                right_body_hash=str(s.get("right_body_hash") or ""),
-                pair_id=str(s.get("pair_id") or ""),
-                interaction_mode=str(s.get("interaction_mode") or ""),
-                camera_pose_hash=str(s.get("camera_pose_hash") or ""),
-                calibration_hashes=tuple(s.get("calibration_hashes") or ()),
-                temperature_regime=s.get("temperature_regime"),
-            ),
-            successful_envelope=(
-                None
-                if record.get("successful_envelope") is None
-                else SuccessfulEnvelope.from_record(record["successful_envelope"])
-            ),
-            failure_signatures={
-                str(k): int(v) for k, v in (record.get("failure_signatures") or {}).items()
-            },
-            recovery_hint=record.get("recovery_hint"),
-            evidence_refs=tuple(record.get("evidence_refs") or ()),
-        )
+        if not isinstance(s, dict):
+            raise ValueError(f"malformed scope (expected a mapping): {s!r}")
+        try:
+            return cls(
+                scope=MemoryScope(
+                    left_body_hash=str(s.get("left_body_hash") or ""),
+                    right_body_hash=str(s.get("right_body_hash") or ""),
+                    pair_id=str(s.get("pair_id") or ""),
+                    interaction_mode=str(s.get("interaction_mode") or ""),
+                    camera_pose_hash=str(s.get("camera_pose_hash") or ""),
+                    calibration_hashes=tuple(s.get("calibration_hashes") or ()),
+                    temperature_regime=s.get("temperature_regime"),
+                ),
+                successful_envelope=(
+                    None
+                    if record.get("successful_envelope") is None
+                    else SuccessfulEnvelope.from_record(record["successful_envelope"])
+                ),
+                failure_signatures={
+                    str(k): int(v) for k, v in (record.get("failure_signatures") or {}).items()
+                },
+                recovery_hint=record.get("recovery_hint"),
+                evidence_refs=tuple(record.get("evidence_refs") or ()),
+            )
+        except (TypeError, AttributeError, ValueError) as exc:
+            raise ValueError(f"malformed pair memory record: {exc}") from exc
 
 
 def filter_pair_memories(
@@ -195,8 +211,10 @@ def filter_pair_memories(
     """The §16.3 hard filter: exact scope match or invisible.  A
     thumb_thumb memory NEVER applies to index_index; a left-active
     memory NEVER silently applies to mutual; a stale camera pose hides
-    everything measured under it."""
-    return [m for m in memories if m.scope.matches(query)]
+    everything measured under it.  Memories that fail their own
+    envelope validation (e.g. < 2 evidence) are dropped too — an
+    invalid memory is never applicable."""
+    return [m for m in memories if m.scope.matches(query) and not m.validate()]
 
 
 # ------------------------------------------------------------ signatures

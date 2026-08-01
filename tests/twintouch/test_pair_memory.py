@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from rosclaw.twintouch.pair_memory import (
     FAILURE_SIGNATURES,
     FingerPairMemory,
@@ -109,6 +111,83 @@ def test_regime_scoping():
     assert filter_pair_memories(pool, _scope(temperature_regime="warm_stable")) == [warm]
     # cold query matches only cold
     assert filter_pair_memories(pool, _scope(temperature_regime="cold")) == [cold]
+
+
+def test_regime_unknown_memory_matches_only_unscoped_query():
+    unknown = _memory(scope=_scope(temperature_regime=None))
+    # a regime-unknown memory must NOT match a scoped query
+    assert filter_pair_memories([unknown], _scope(temperature_regime="warm_stable")) == []
+    # ...but matches an unscoped query
+    assert filter_pair_memories([unknown], _scope(temperature_regime=None)) == [unknown]
+
+
+def test_calibration_hashes_hard_filter():
+    calibrated = _memory(scope=_scope(calibration_hashes=("cal_a", "cal_b")))
+    other_cal = _memory(scope=_scope(calibration_hashes=("cal_a", "cal_c")))
+    unknown_cal = _memory(scope=_scope(calibration_hashes=()))
+    pool = [calibrated, other_cal, unknown_cal]
+    # exact calibration match
+    assert filter_pair_memories(pool, _scope(calibration_hashes=("cal_a", "cal_b"))) == [
+        calibrated
+    ]
+    # any entry mismatch hides the memory
+    assert filter_pair_memories(pool, _scope(calibration_hashes=("cal_a", "cal_c"))) == [
+        other_cal
+    ]
+    # a calibration-unknown memory never matches a query that names hashes
+    assert unknown_cal not in filter_pair_memories(
+        pool, _scope(calibration_hashes=("cal_a", "cal_b"))
+    )
+    # an unscoped query matches every calibration state
+    assert sorted(id(m) for m in filter_pair_memories(pool, _scope())) == sorted(
+        (id(calibrated), id(other_cal), id(unknown_cal))
+    )
+
+
+def test_from_record_rejects_wrong_schema_version():
+    record = _memory().to_record()
+    record["schema_version"] = "rosclaw.twintouch_pair_memory.v0"
+    with pytest.raises(ValueError, match="schema_version"):
+        FingerPairMemory.from_record(record)
+    del record["schema_version"]
+    with pytest.raises(ValueError, match="schema_version"):
+        FingerPairMemory.from_record(record)
+
+
+def test_from_record_malformed_fields_raise_value_error():
+    record = _memory().to_record()
+    record["scope"] = ["not", "a", "mapping"]
+    with pytest.raises(ValueError, match="malformed scope"):
+        FingerPairMemory.from_record(record)
+    record = _memory().to_record()
+    record["failure_signatures"] = ["not", "a", "mapping"]
+    with pytest.raises(ValueError, match="malformed pair memory record"):
+        FingerPairMemory.from_record(record)
+
+
+def test_filter_drops_memories_failing_validation():
+    valid = _memory()
+    thin = FingerPairMemory(
+        scope=valid.scope,
+        successful_envelope=SuccessfulEnvelope(
+            precontact={},
+            contact_range={},
+            visual_near_range_m=(0.0, 0.0),
+            force_baseline={},
+            contact_force_envelope={},
+            release_margin_raw=0,
+            evidence_count=1,
+        ),
+        failure_signatures={},
+        recovery_hint=None,
+    )
+    bogus = FingerPairMemory(
+        scope=valid.scope,
+        successful_envelope=None,
+        failure_signatures={"MADE_UP_FAILURE": 1},
+        recovery_hint=None,
+    )
+    assert filter_pair_memories([valid, thin, bogus], _scope()) == [valid]
 
 
 def test_failure_signature_mapping():

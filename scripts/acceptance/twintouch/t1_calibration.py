@@ -983,12 +983,6 @@ def run() -> int:
             camera_freshness_ms=config.camera_freshness_ms,
             temperature_abort_c=config.temperature_abort_c,
         )
-        def _write_report(payload: dict) -> None:
-            out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "t1_calibration_report.json").write_text(
-                json.dumps(payload, indent=2, ensure_ascii=False, default=str)
-            )
-
         for pair_id in pairs:
             pair = pair_by_id(pair_id)
             if pair is None or pair_id not in APPROVED_CALIBRATION_PAIRS:

@@ -56,6 +56,7 @@ DISPATCH_SKEW_VIOLATION = "DISPATCH_SKEW_VIOLATION"
 LEASE_CONFLICT = "LEASE_CONFLICT"
 PRECONDITION_FAILED = "PRECONDITION_FAILED"
 ENVELOPE_INVALID = "ENVELOPE_INVALID"
+ENVELOPE_CONTRACT_MISMATCH = "ENVELOPE_CONTRACT_MISMATCH"
 PERMIT_INVALID = "PERMIT_INVALID"
 EXECUTOR_FAILURE = "EXECUTOR_FAILURE"
 
@@ -161,7 +162,15 @@ class DispatchReport:
 class EstopReport:
     left_confirmed: bool
     right_confirmed: bool
-    leases_released: bool
+    # Sides whose lease the E-Stop actually freed.  A lease held by an
+    # in-flight dispatch is NOT freed (see estop()) — it is reported
+    # under leases_draining instead.
+    leases_released: tuple[str, ...]
+    # Sides still leased to an in-flight dispatch at E-Stop time: the
+    # dispatch is draining and releases the lease itself when it
+    # unwinds.  Releasing it here would let a new dispatch re-acquire
+    # and touch hardware concurrently with the draining dispatch.
+    leases_draining: tuple[str, ...]
     permit_revoked: bool
 
     @property
@@ -190,6 +199,12 @@ class BimanualActionGateway:
         self._camera_freshness_ms = camera_freshness_ms
         self._clock = clock
         self._active_permit: SequencePermit | None = None
+        # Guards _active_permit and the in-flight lease accounting so an
+        # E-Stop interleaving with a dispatch is fail-closed: the permit
+        # is re-checked under this lock after lease acquisition, and a
+        # lease with in_flight > 0 is never released by estop().
+        self._state_lock = threading.Lock()
+        self._in_flight: dict[str, int] = dict.fromkeys(LEASE_ORDER, 0)
 
     # ---------------------------------------------------------- helpers
 
@@ -274,6 +289,26 @@ class BimanualActionGateway:
                 retreat_confirmed={},
                 permit_state="unused",
             )
+        # 1b. The envelope must name the contract that authorizes it:
+        # a valid permit for contract C never dispatches an envelope
+        # whose safety block points at a stale or foreign contract.
+        contract_hash = contract.contract_hash()
+        if envelope.safety.contract_hash != contract_hash:
+            violations = [
+                f"envelope safety contract {envelope.safety.contract_hash!r} does not match "
+                f"authorizing contract {contract_hash!r}"
+            ]
+            return DispatchReport(
+                receipt=self._abort_receipt(
+                    envelope, violations=violations, left_dispatched=False, right_dispatched=False
+                ),
+                violation_kind=ENVELOPE_CONTRACT_MISMATCH,
+                violations=tuple(violations),
+                left_dispatched=False,
+                right_dispatched=False,
+                retreat_confirmed={},
+                permit_state="unused",
+            )
         # 2. Permit (contract hash binding, deadline, single-use).
         permit_state = self._permit_state_for_dispatch(permit, contract)
         if permit_state != PERMIT_OK:
@@ -328,9 +363,44 @@ class BimanualActionGateway:
                 retreat_confirmed={},
                 permit_state="unused",
             )
-        # 5. Atomic lease (fixed order, all-or-nothing).
-        acquired, conflicting = self._leases.acquire_all(owner)
+        # 5. Atomic lease (fixed order, all-or-nothing).  Acquisition,
+        # the in-flight accounting and a permit re-check all happen
+        # under the state lock, so an E-Stop racing this dispatch either
+        # revokes the permit BEFORE we re-check (we refuse here) or
+        # finds in_flight > 0 and leaves our leases alone (we drain).
+        with self._state_lock:
+            acquired, conflicting = self._leases.acquire_all(owner)
+            permit_recheck: str | None = None
+            if acquired:
+                permit_recheck = self._permit_state_for_dispatch(permit, contract)
+                if permit_recheck != PERMIT_OK:
+                    self._leases.release_all(owner)
+                    acquired = False
+                else:
+                    # Consume + activate under the lock: an E-Stop either
+                    # landed before this section (the re-check above
+                    # refuses) or lands after and revokes THIS permit.
+                    permit.consume(reason="sequence_started")
+                    self._active_permit = permit
+                    for side in LEASE_ORDER:
+                        self._in_flight[side] += 1
         if not acquired:
+            if permit_recheck is not None:
+                violations = [f"permit revoked before dispatch: {permit_recheck}"]
+                return DispatchReport(
+                    receipt=self._abort_receipt(
+                        envelope,
+                        violations=violations,
+                        left_dispatched=False,
+                        right_dispatched=False,
+                    ),
+                    violation_kind=PERMIT_INVALID,
+                    violations=tuple(violations),
+                    left_dispatched=False,
+                    right_dispatched=False,
+                    retreat_confirmed={},
+                    permit_state=permit_recheck,
+                )
             violations = [f"lease conflict on {conflicting} body"]
             return DispatchReport(
                 receipt=self._abort_receipt(
@@ -347,6 +417,9 @@ class BimanualActionGateway:
             return self._dispatch_under_lease(envelope, permit, owner)
         finally:
             self._leases.release_all(owner)
+            with self._state_lock:
+                for side in LEASE_ORDER:
+                    self._in_flight[side] -= 1
 
     def _dispatch_under_lease(
         self,
@@ -354,8 +427,8 @@ class BimanualActionGateway:
         permit: SequencePermit,
         owner: str,
     ) -> DispatchReport:
-        permit.consume(reason="sequence_started")
-        self._active_permit = permit
+        # The permit was consumed and made active under the state lock
+        # in dispatch() — nothing to do here but run the barrier.
         timeout = envelope.coordination.timeout_ms
         max_skew_ms = envelope.coordination.maximum_start_skew_ms
 
@@ -370,6 +443,13 @@ class BimanualActionGateway:
                 envelope.left.action, timeout_ms=timeout
             )
         except Exception as exc:  # noqa: BLE001 — executor failure is data
+            # Nothing moved, but the attempt consumed the sequence:
+            # revoke so a failed executor is never retried under the
+            # same permit.
+            permit.revoke(reason="dispatch_failed")
+            with self._state_lock:
+                if self._active_permit is permit:
+                    self._active_permit = None
             violations = [f"left executor: {exc!r}"]
             return DispatchReport(
                 receipt=self._abort_receipt(
@@ -380,7 +460,7 @@ class BimanualActionGateway:
                 left_dispatched=False,
                 right_dispatched=False,
                 retreat_confirmed={},
-                permit_state="consumed",
+                permit_state="revoked_dispatch_failed",
             )
         t_left = self._clock()
         try:
@@ -395,6 +475,9 @@ class BimanualActionGateway:
                 envelope.safety.retreat_action
             )
             permit.revoke(reason="partial_dispatch")
+            with self._state_lock:
+                if self._active_permit is permit:
+                    self._active_permit = None
             receipt = self._abort_receipt(
                 envelope,
                 violations=violations,
@@ -427,6 +510,9 @@ class BimanualActionGateway:
                     envelope.safety.retreat_action
                 )
             permit.revoke(reason="barrier_skew_violation")
+            with self._state_lock:
+                if self._active_permit is permit:
+                    self._active_permit = None
             receipt = self._abort_receipt(
                 envelope,
                 violations=violations,
@@ -482,24 +568,44 @@ class BimanualActionGateway:
     def estop(self) -> EstopReport:
         """Fan the E-Stop out to BOTH bodies (v4 §21 PR-TT-2).  Every
         side's confirmation is reported individually — an unconfirmed
-        stop is named, never averaged away."""
+        stop is named, never averaged away.
+
+        Lease semantics: a lease held by an in-flight dispatch is NOT
+        released here — that dispatch is still touching hardware and
+        must drain (its own finally-block releases the lease).  Releasing
+        it would let a new dispatch re-acquire and run concurrently with
+        the draining one.  The permit, by contrast, is revoked
+        unconditionally: the first dispatch consumed it, so any check of
+        ``used`` would make the revocation dead code."""
         results: dict[str, bool] = {}
         for side in LEASE_ORDER:
             try:
                 results[side] = bool(self._executors[side].estop())
             except Exception:  # noqa: BLE001 — an estop that raises is unconfirmed
                 results[side] = False
-        permit_revoked = False
-        if self._active_permit is not None and not self._active_permit.used:
-            self._active_permit.revoke(reason="estop")
-            permit_revoked = True
-        # Leases are released for any owner — an E-Stop overrides lease
-        # ownership semantics (hardware stop outranks software state).
-        for side in LEASE_ORDER:
-            self._leases.release_any(side)
+        with self._state_lock:
+            permit_revoked = False
+            if self._active_permit is not None:
+                self._active_permit.revoke(reason="estop")
+                # Clearing the active reference guarantees
+                # _permit_state_for_dispatch can never re-authorize this
+                # permit again — its active-sequence path keys on
+                # ``self._active_permit is permit``.
+                self._active_permit = None
+                permit_revoked = True
+            released: list[str] = []
+            draining: list[str] = []
+            for side in LEASE_ORDER:
+                if self._in_flight[side] > 0:
+                    draining.append(side)
+                elif self._leases.release_any(side):
+                    # No in-flight dispatch: hardware stop outranks
+                    # software lease ownership.
+                    released.append(side)
         return EstopReport(
             left_confirmed=results.get("left", False),
             right_confirmed=results.get("right", False),
-            leases_released=True,
+            leases_released=tuple(released),
+            leases_draining=tuple(draining),
             permit_revoked=permit_revoked,
         )

@@ -42,15 +42,18 @@ from typing import Any
 
 from rosclaw.twintouch.pairs import is_valid_pair_id, pair_by_id
 from rosclaw.twintouch.receipt import (
+    OUTCOME_CLEARANCE_UNVERIFIED,
     OUTCOME_CONTACT_CONFIRMED,
     OUTCOME_EARLY_CONTACT,
     OUTCOME_NO_CONTACT,
     OUTCOME_ONE_SIDED_FORCE,
     OUTCOME_PEER_NOT_READY,
+    OUTCOME_POSTURE_MISMATCH,
     OUTCOME_RELEASE_FAILED,
     OUTCOME_STALE_OBSERVATION,
     OUTCOME_THERMAL_ABORT,
     OUTCOME_TRANSPORT_FAILURE,
+    OUTCOME_UNCORROBORATED_FORCE,
     OUTCOME_UNINTENDED_CONTACT,
     OUTCOME_VISUAL_FORCE_CONFLICT,
     OUTCOME_WRONG_FINGER_CONTACT,
@@ -131,6 +134,8 @@ class SupervisorTuning:
     release_force_epsilon_raw: float = 20.0
     max_release_steps: int = 4
     max_clear_wait_cycles: int = 20  # VERIFY_CLEAR bounded wait (hysteresis decays in seconds)
+    max_clearance_wait_cycles: int = 20  # CLEARANCE_VERIFIED bounded wait (fresh separation)
+    max_candidate_wait_cycles: int = 10  # bilateral force without corroboration
     release_visual_clear_m: float = 0.02  # separation corroborating clearance
     camera_freshness_ms: float = 500.0
     temperature_abort_c: float = 49.0
@@ -291,6 +296,8 @@ class _EpisodeTrack:
     dwell_actual_ms: float | None = None
     clear_wait_cycles: int = 0
     candidate_press_steps: int = 0
+    clearance_wait_cycles: int = 0
+    candidate_wait_cycles: int = 0
 
 
 class ContactSupervisor:
@@ -399,30 +406,65 @@ class ContactSupervisor:
 
     # -------------------------------------------------------- global guards
 
-    def _global_guard(self, obs: SupervisorObservation) -> SupervisorDecision | None:
-        """Guards that outrank any state logic.  Returns a recovery
-        decision or None when the cycle is clean."""
+    def _guard_trip(
+        self, anomaly: str, detail: str, *, in_recovery: bool
+    ) -> SupervisorDecision | None:
+        """A guard fired.  Outside recovery this enters the spine; inside
+        recovery the spine IS the correct response (retreat, verify,
+        record), so the anomaly is updated in place — guards outrank the
+        original cause — without restarting the spine."""
+        if not in_recovery:
+            return self._enter_recovery(anomaly, detail)
+        if self.track.anomaly != anomaly:
+            self.track.anomaly_detail += f" | during recovery: {anomaly} ({detail})"
+            self.track.anomaly = anomaly
+        return None
+
+    def _global_guard(
+        self, obs: SupervisorObservation, *, in_recovery: bool = False
+    ) -> SupervisorDecision | None:
+        """Guards that outrank any state logic — including recovery.
+        Returns a recovery decision or None when the cycle is clean (or
+        when in_recovery, after recording any new anomaly)."""
         # transport: any hand lost -> both retreat (v4 §3.2)
         if obs.left is None or not obs.left.ok or obs.right is None or not obs.right.ok:
-            return self._enter_recovery(
+            return self._guard_trip(
                 OUTCOME_TRANSPORT_FAILURE,
                 "hand telemetry lost — both hands must retreat",
+                in_recovery=in_recovery,
             )
         # thermal
         for side, hand in (("left", obs.left), ("right", obs.right)):
             temp = hand.temperature_max_c
             if temp is not None and temp >= self.tuning.temperature_abort_c:
-                return self._enter_recovery(
+                return self._guard_trip(
                     OUTCOME_THERMAL_ABORT,
                     f"{side} at {temp}°C >= abort {self.tuning.temperature_abort_c}°C",
+                    in_recovery=in_recovery,
                 )
+        # force-channel coverage: a channel alive at baseline that is
+        # dead NOW reads delta 0.0 and silently blinds the non-target
+        # guard below — fail closed.  (PEER_READY does its own all-dead
+        # readiness check, so this guard only applies once the episode
+        # is underway.)
+        if self.state not in (SAFE_RESET, PAIR_SELECTED, PEER_READY):
+            for side, hand in (("left", obs.left), ("right", obs.right)):
+                assert hand is not None
+                dead = [f for f in self.baselines[side].medians if hand.force_act.get(f) is None]
+                if dead:
+                    return self._guard_trip(
+                        OUTCOME_TRANSPORT_FAILURE,
+                        f"{side} force channel(s) dead mid-episode: {', '.join(dead)}",
+                        in_recovery=in_recovery,
+                    )
         # stale camera blocks anything that is still APPROACHING
         if self.state in (VISUAL_ALIGN, COARSE_APPROACH, FINE_APPROACH, CONTACT_CANDIDATE) and (
             obs.visual is None or obs.visual.age_ms > self.tuning.camera_freshness_ms
         ):
-            return self._enter_recovery(
+            return self._guard_trip(
                 OUTCOME_STALE_OBSERVATION,
                 "camera observation stale — no approach allowed",
+                in_recovery=in_recovery,
             )
         # non-target force (unintended contact) — the highest-priority
         # safety check after transport/thermal; valid in every state
@@ -446,9 +488,10 @@ class ContactSupervisor:
                 if rising and rising <= set(CONTACT_FINGERS)
                 else OUTCOME_UNINTENDED_CONTACT
             )
-            return self._enter_recovery(
+            return self._guard_trip(
                 outcome,
                 "; ".join(consensus.non_target_violations),
+                in_recovery=in_recovery,
             )
         return None
 
@@ -459,6 +502,11 @@ class ContactSupervisor:
             return SupervisorDecision(kind=DECISION_NONE, note=f"terminal {self.state}")
 
         if self.state in RECOVERY_STATES:
+            # Guards outrank state logic — recovery included.  A NEW
+            # anomaly (thermal, non-target contact, dead channel) during
+            # the spine is recorded on the track; the spine itself is
+            # already the correct response, so it is not restarted.
+            self._global_guard(obs, in_recovery=True)
             return self._recovery_step(obs)
 
         guard = self._global_guard(obs)
@@ -502,10 +550,22 @@ class ContactSupervisor:
             assert hand is not None
             for joint, expected in self.expected_start[side].items():
                 actual = hand.angle_actual.get(joint)
-                if actual is not None and abs(actual - expected) > 150:
-                    # not at the declared start — retreat first, not an anomaly
+                if actual is None:
+                    # unreadable joint = the start pose cannot be
+                    # verified — fail closed, never skip the joint
+                    return self._enter_recovery(
+                        OUTCOME_POSTURE_MISMATCH,
+                        f"{side}.{joint} angle unreadable — declared start pose unverifiable",
+                    )
+                if abs(actual - expected) > 150:
+                    # not at the declared start — retreat first; the
+                    # anomaly is recorded so the receipt names the real
+                    # cause instead of falling back to TRANSPORT_FAILURE
                     self._transition(RETREAT_BOTH)
-                    self.track.anomaly = None
+                    self.track.anomaly = OUTCOME_POSTURE_MISMATCH
+                    self.track.anomaly_detail = (
+                        f"{side}.{joint} at {actual} vs declared start {expected}"
+                    )
                     return SupervisorDecision(
                         kind=DECISION_RETREAT,
                         note=(
@@ -659,6 +719,7 @@ class ContactSupervisor:
                 f"(visual_near={visual_near}, motion_response={motion_response})",
             )
         if not both_rise:
+            self.track.candidate_wait_cycles = 0
             # press-build: a decisive first touch froze the approach at
             # first contact — the receive side often needs a few more
             # fine steps before its channel crosses (campaign
@@ -693,6 +754,17 @@ class ContactSupervisor:
             # mutual_0: L +136 / R −83 yet aborted on cumulative
             # one-sided frames)
             self.track.one_sided_frames = 0
+            # Bilateral force WITHOUT corroboration (visual not near,
+            # no motion response) cannot wait forever: bounded cycles,
+            # then an explicit anomaly — a contact we cannot
+            # corroborate is not a contact we keep pressing into.
+            self.track.candidate_wait_cycles += 1
+            if self.track.candidate_wait_cycles > self.tuning.max_candidate_wait_cycles:
+                return self._enter_recovery(
+                    OUTCOME_UNCORROBORATED_FORCE,
+                    f"bilateral force rise for {self.track.candidate_wait_cycles} cycles "
+                    f"without visual-near or motion-response corroboration",
+                )
         return SupervisorDecision(kind=DECISION_NONE, note="awaiting bilateral consensus")
 
     def _motion_response_saturated(self, obs: SupervisorObservation) -> bool:
@@ -756,8 +828,12 @@ class ContactSupervisor:
             and abs(consensus.right_target_delta) <= self.tuning.release_force_epsilon_raw
         )
         visual = obs.visual
+        # A STALE frame is not clearance evidence: only a fresh camera
+        # observation of separation may substitute for forces returning
+        # to baseline (same freshness rule the approach states enforce).
         visual_clear = (
             visual is not None
+            and visual.age_ms <= self.tuning.camera_freshness_ms
             and visual.min_distance_m is not None
             and visual.min_distance_m >= self.tuning.release_visual_clear_m
         )
@@ -787,19 +863,49 @@ class ContactSupervisor:
         )
 
     def _step_clearance(self, obs, deltas, consensus) -> SupervisorDecision:
+        # Clearance is verified ONLY by a FRESH visual frame showing the
+        # pair separated.  A stale or missing frame is not evidence
+        # (fail-closed): the episode waits inside a bounded cycle budget
+        # and then records an explicit anomaly instead of hanging.
         visual = obs.visual
-        if (
-            visual is not None
-            and visual.min_distance_m is not None
-            and (visual.min_distance_m <= self.tuning.near_contact_m)
-        ):
-            return SupervisorDecision(kind=DECISION_NONE, note="awaiting visual clearance")
-        self._transition(EPISODE_COMMITTED)
+        fresh = visual is not None and visual.age_ms <= self.tuning.camera_freshness_ms
+        if visual is not None and fresh and visual.min_distance_m is not None:
+            if visual.min_distance_m <= self.tuning.near_contact_m:
+                self.track.clearance_wait_cycles += 1
+                if self.track.clearance_wait_cycles > self.tuning.max_clearance_wait_cycles:
+                    return self._enter_recovery(
+                        OUTCOME_CLEARANCE_UNVERIFIED,
+                        f"pair still within {self.tuning.near_contact_m} m after "
+                        f"{self.track.clearance_wait_cycles} clearance cycles",
+                    )
+                return SupervisorDecision(
+                    kind=DECISION_NONE,
+                    note=(
+                        f"awaiting visual clearance (cycle "
+                        f"{self.track.clearance_wait_cycles}/"
+                        f"{self.tuning.max_clearance_wait_cycles})"
+                    ),
+                )
+            self._transition(EPISODE_COMMITTED)
+            return SupervisorDecision(
+                kind=DECISION_COMMIT,
+                note=f"episode committed: {self.pair_id}",
+                receipt=self._build_receipt(
+                    outcome=OUTCOME_CONTACT_CONFIRMED, obs=obs, consensus=consensus
+                ),
+            )
+        self.track.clearance_wait_cycles += 1
+        if self.track.clearance_wait_cycles > self.tuning.max_clearance_wait_cycles:
+            return self._enter_recovery(
+                OUTCOME_STALE_OBSERVATION,
+                f"no fresh visual frame for {self.track.clearance_wait_cycles} "
+                "clearance cycles — clearance unverifiable",
+            )
         return SupervisorDecision(
-            kind=DECISION_COMMIT,
-            note=f"episode committed: {self.pair_id}",
-            receipt=self._build_receipt(
-                outcome=OUTCOME_CONTACT_CONFIRMED, obs=obs, consensus=consensus
+            kind=DECISION_NONE,
+            note=(
+                f"awaiting fresh visual clearance (cycle "
+                f"{self.track.clearance_wait_cycles}/{self.tuning.max_clearance_wait_cycles})"
             ),
         )
 
