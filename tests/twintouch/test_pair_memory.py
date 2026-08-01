@@ -82,7 +82,6 @@ def test_unknown_signature_rejected():
 def test_hard_filter_pair_and_mode_and_camera():
     index_memory = _memory()
     thumb_memory = _memory(scope=_scope(pair_id="thumb_thumb"))
-    mutual_memory = _memory()
     left_active_memory = _memory(scope=_scope(interaction_mode="active_passive"))
     other_camera = _memory(scope=_scope(camera_pose_hash="pose_moved"))
     pool = [index_memory, thumb_memory, left_active_memory, other_camera]
@@ -104,7 +103,7 @@ def test_regime_scoping():
     pool = [warm, cold]
     # unscoped query matches both
     assert sorted(
-        (id(m) for m in filter_pair_memories(pool, _scope(temperature_regime=None)))
+        id(m) for m in filter_pair_memories(pool, _scope(temperature_regime=None))
     ) == sorted((id(warm), id(cold)))
     # warm query matches only warm
     assert filter_pair_memories(pool, _scope(temperature_regime="warm_stable")) == [warm]

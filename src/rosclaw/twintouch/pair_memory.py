@@ -72,10 +72,11 @@ class MemoryScope:
             return False
         if self.camera_pose_hash != query.camera_pose_hash:
             return False
-        if query.temperature_regime is not None and self.temperature_regime is not None:
-            if self.temperature_regime != query.temperature_regime:
-                return False
-        return True
+        return not (
+            query.temperature_regime is not None
+            and self.temperature_regime is not None
+            and self.temperature_regime != query.temperature_regime
+        )
 
 
 @dataclass(frozen=True)

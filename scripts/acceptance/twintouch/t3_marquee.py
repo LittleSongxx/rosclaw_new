@@ -31,6 +31,7 @@ one-pair-at-a-time).  Every motion through the gateway.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import sys
@@ -50,16 +51,19 @@ t1 = importlib.util.module_from_spec(_spec)
 sys.modules["t1c"] = t1
 _spec.loader.exec_module(t1)
 
-import numpy as np  # noqa: E402
 import pyrealsense2 as rs  # noqa: E402
 
 from rosclaw.evolution.hardware.camera import D435iCapture  # noqa: E402
 from rosclaw.evolution.hardware.thermal import default_temp_probe  # noqa: E402
 from rosclaw.perception.handcam import CameraPoseContract, intrinsics_from_pyrealsense  # noqa: E402
-from rosclaw.twintouch.choreography import CANONICAL_MARQUEE_PAIRS, ContactChoreographyContract, SequencePermit  # noqa: E402
+from rosclaw.twintouch.choreography import (  # noqa: E402
+    CANONICAL_MARQUEE_PAIRS,
+    ContactChoreographyContract,
+    SequencePermit,
+)
 from rosclaw.twintouch.config import TwinTouchConfig  # noqa: E402
 from rosclaw.twintouch.gateway import BimanualActionGateway, LeaseRegistry  # noqa: E402
-from rosclaw.twintouch.pairs import RH56_JOINTS, is_valid_pair_id, pair_by_id  # noqa: E402
+from rosclaw.twintouch.pairs import RH56_JOINTS, is_valid_pair_id  # noqa: E402
 from rosclaw.twintouch.supervisor import (  # noqa: E402
     EPISODE_COMMITTED,
     RECORD_FAILURE,
@@ -132,7 +136,7 @@ def run_marquee(
                 return 2
 
         # hands open + session baselines (open pose, for the watchdog pre-present)
-        for side, ctl in controllers.items():
+        for _side, ctl in controllers.items():
             tel = ctl.read_telemetry()
             angles = tel.angle_actual or {}
             if any((angles.get(j) or 0) < 900 for j in ("little", "ring", "middle", "index")):
@@ -141,7 +145,7 @@ def run_marquee(
         from rosclaw.twintouch.supervisor import ForceBaseline
 
         session_baselines: dict[str, ForceBaseline] = {}
-        for side, ctl in controllers.items():
+        for _side, ctl in controllers.items():
             samples = []
             for _ in range(8):
                 tel = ctl.read_telemetry()
@@ -282,16 +286,14 @@ def run_marquee(
     finally:
         if collector is not None:
             collector.stop()
-        for side, ctl in controllers.items():
+        for _side, ctl in controllers.items():
             try:
                 ctl.move_to_gesture("t3_coast", [1000] * len(RH56_JOINTS), 300, 50)
                 ctl.close()
             except Exception:  # noqa: BLE001
                 pass
-        try:
+        with contextlib.suppress(Exception):
             cap.stop()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def _run_cell(
