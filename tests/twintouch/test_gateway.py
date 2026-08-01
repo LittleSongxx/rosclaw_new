@@ -22,6 +22,7 @@ from rosclaw.twintouch import (
 )
 from rosclaw.twintouch.gateway import (
     DISPATCH_SKEW_VIOLATION,
+    ENVELOPE_CONTRACT_MISMATCH,
     ENVELOPE_INVALID,
     EXECUTOR_FAILURE,
     LEASE_CONFLICT,
@@ -69,7 +70,12 @@ class FakeProbe:
         return list(self._snapshot_violations)
 
 
-def _envelope(pair_id: str = "index_index") -> BimanualActionEnvelope:
+def _envelope(
+    pair_id: str = "index_index", contract: ContactChoreographyContract | None = None
+) -> BimanualActionEnvelope:
+    # The envelope's safety block must name the contract that authorizes
+    # it — the gateway refuses a stale/foreign binding before leasing.
+    contract = contract or _contract()
     return BimanualActionEnvelope(
         interaction_id="int_1",
         sequence_id="seq_1",
@@ -78,7 +84,7 @@ def _envelope(pair_id: str = "index_index") -> BimanualActionEnvelope:
         right=BodyActionBlock("rh56_right_01", {"gesture": "hold"}, "snap_r", "cal_r"),
         coordination=CoordinationBlock("mutual", "start_together", 250.0, 2000.0),
         safety=SafetyBlock(
-            contract_hash="chor_x",
+            contract_hash=contract.contract_hash(),
             permitted_contact_pair=pair_id,
             forbidden_contact_pairs=tuple(sorted(FORBIDDEN_FINGERTIP_PAIRS)),
             retreat_action={"gesture": "safe_open"},
@@ -278,6 +284,142 @@ def test_estop_reports_unconfirmed_side_honestly():
     report = gateway.estop()
     assert not report.all_confirmed
     assert report.left_confirmed and not report.right_confirmed
+
+
+# ------------------------------------------------- contract binding (fix 2)
+
+
+def test_envelope_with_foreign_contract_hash_refused_despite_valid_permit():
+    """The envelope's safety block must name the authorizing contract:
+    a valid permit never dispatches an envelope bound to a stale or
+    foreign contract hash."""
+    gateway, leases, left, right = _gateway()
+    contract = _contract()
+    env = _envelope()
+    stale = BimanualActionEnvelope(
+        **{
+            **env.__dict__,
+            "safety": SafetyBlock(
+                contract_hash="chor_stale_foreign",
+                permitted_contact_pair=env.pair_id,
+                forbidden_contact_pairs=env.safety.forbidden_contact_pairs,
+                retreat_action=env.safety.retreat_action,
+            ),
+        }
+    )
+    report = gateway.dispatch(stale, contract=contract, permit=_permit(contract))
+    assert report.violation_kind == ENVELOPE_CONTRACT_MISMATCH
+    assert report.receipt.outcome == OUTCOME_ABORTED_BEFORE_DISPATCH
+    assert left.calls == [] and right.calls == []
+    assert leases.holders() == {"left": None, "right": None}
+
+
+# ------------------------------------------- estop permit revocation (fix 1)
+
+
+def test_estop_revokes_active_sequence_permit_and_blocks_redispatch():
+    """Regression: the first dispatch consumes the sequence permit, so an
+    E-Stop that only revokes 'unused' permits never actually revokes.
+    After estop the same permit must never authorize again."""
+    gateway, _, left, right = _gateway()
+    contract = _contract()
+    permit = _permit(contract)
+    first = gateway.dispatch(_envelope(), contract=contract, permit=permit)
+    assert first.violation_kind is None
+    assert permit.used  # consumed by the first dispatch
+    report = gateway.estop()
+    assert report.permit_revoked is True
+    assert permit.revoked_reason == "estop"
+    again = gateway.dispatch(_second_envelope(), contract=contract, permit=permit)
+    assert again.violation_kind == PERMIT_INVALID
+    # the executors were NOT called a second time
+    assert left.calls == ["dispatch:approach", "estop"]
+    assert right.calls == ["dispatch:hold", "estop"]
+
+
+# --------------------------------------- estop vs in-flight leases (fix 3)
+
+
+class BlockingExecutor(FakeExecutor):
+    """Left dispatch blocks until released, simulating an in-flight
+    hardware call during an E-Stop."""
+
+    def __init__(self, name: str):
+        super().__init__(name)
+        import threading
+
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def dispatch(self, action, *, timeout_ms: float) -> str:
+        self.calls.append(f"dispatch:{action.get('gesture')}")
+        self.entered.set()
+        self.release.wait(timeout=5.0)
+        return f"arec_{self.name}_{len(self.calls)}"
+
+
+def test_estop_does_not_release_leases_held_by_in_flight_dispatch():
+    """Releasing a lease under an in-flight dispatch lets a new dispatch
+    re-acquire and touch hardware concurrently.  E-Stop must leave those
+    leases alone (revoked-and-draining) and report them honestly."""
+    import threading
+
+    blocking = BlockingExecutor("left")
+    gateway, leases, left, right = _gateway(left=blocking)
+    contract = _contract()
+    permit = _permit(contract)
+    outcome: list[object] = []
+    thread = threading.Thread(
+        target=lambda: outcome.append(
+            gateway.dispatch(_envelope(), contract=contract, permit=permit)
+        ),
+        daemon=True,
+    )
+    thread.start()
+    assert blocking.entered.wait(timeout=5.0)  # dispatch is in flight
+    report = gateway.estop()
+    assert report.all_confirmed
+    assert report.permit_revoked is True
+    # the in-flight leases were NOT released out from under the dispatch
+    assert report.leases_released == ()
+    assert set(report.leases_draining) == {"left", "right"}
+    assert leases.holders() != {"left": None, "right": None}
+    # and no new dispatch can acquire while the old one drains
+    blocked = gateway.dispatch(_second_envelope(), contract=contract, permit=_permit(contract))
+    assert blocked.violation_kind in (LEASE_CONFLICT, PERMIT_INVALID)
+    blocking.release.set()
+    thread.join(timeout=5.0)
+    assert len(outcome) == 1
+    # after draining, the dispatch's own cleanup released the leases
+    assert leases.holders() == {"left": None, "right": None}
+    assert right.calls[-1] == "dispatch:hold" or "estop" in right.calls
+
+
+def test_estop_report_discloses_released_sides():
+    gateway, leases, _, _ = _gateway()
+    leases.acquire_all("someone_else")
+    report = gateway.estop()
+    assert set(report.leases_released) == {"left", "right"}
+    assert report.leases_draining == ()
+    assert leases.holders() == {"left": None, "right": None}
+
+
+# ------------------------------------- executor failure revokes (fix 4)
+
+
+def test_left_executor_failure_revokes_permit_against_retry():
+    """A failed executor consumes the attempt: the permit is revoked so
+    the same permit cannot retry the failed dispatch."""
+    gateway, _, left, right = _gateway(left=FakeExecutor("left", fail_on={"dispatch"}))
+    contract = _contract()
+    permit = _permit(contract)
+    report = gateway.dispatch(_envelope(), contract=contract, permit=permit)
+    assert report.violation_kind == EXECUTOR_FAILURE
+    assert report.permit_state == "revoked_dispatch_failed"
+    assert permit.revoked_reason == "dispatch_failed"
+    again = gateway.dispatch(_second_envelope(), contract=contract, permit=permit)
+    assert again.violation_kind == PERMIT_INVALID
+    assert right.calls == []
 
 
 # ------------------------------------------------- sequence permit reuse

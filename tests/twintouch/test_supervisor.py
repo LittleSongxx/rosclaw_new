@@ -122,6 +122,25 @@ def _drive_recovery(sup: ContactSupervisor, ts: float) -> list[str]:
     raise AssertionError(f"recovery did not terminate: {sup.history}")
 
 
+def _drive_to_release(sup: ContactSupervisor) -> tuple[float, HandObservation]:
+    """Drive the happy path to RELEASE with both target forces high;
+    return (ts, the rising hand observation)."""
+    ts = _drive_to_coarse(sup)
+    sup.step(_obs(ts, visual=_visual(0.015)))  # -> FINE
+    ts += 0.1
+    both = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 130.0})
+    sup.step(_obs(ts, left=both, right=both, visual=_visual(0.005)))  # -> CANDIDATE
+    ts += 0.1
+    sup.step(_obs(ts, left=both, right=both, visual=_visual(0.004)))  # -> CONFIRMED
+    assert sup.state == CONTACT_CONFIRMED
+    ts += 0.1
+    sup.step(_obs(ts, left=both, right=both, visual=_visual(0.004)))  # -> DWELL
+    ts += 0.35
+    sup.step(_obs(ts, left=both, right=both, visual=_visual(0.004)))  # -> RELEASE
+    assert sup.state == RELEASE
+    return ts, both
+
+
 # -------------------------------------------------------------- happy path
 
 
@@ -426,8 +445,21 @@ def test_safe_reset_retreats_when_hand_not_open():
     curled = _hand(angle={"index": 300, **{j: 1000 for j in JOINTS if j != "index"}})
     decision = sup.step(_obs(0.0, left=curled))
     assert decision.kind == DECISION_RETREAT
-    assert sup.state == RETREAT_BOTH  # posture correction, not an anomaly
-    assert sup.track.anomaly is None
+    assert sup.state == RETREAT_BOTH  # posture correction
+    # the anomaly names the real cause so the receipt does not fall
+    # back to TRANSPORT_FAILURE
+    assert sup.track.anomaly == "POSTURE_MISMATCH"
+
+
+def test_unreadable_joint_angle_fails_pose_verification():
+    """A None joint angle must not be skipped: the start pose cannot be
+    verified, so SAFE_RESET fails closed into the recovery spine."""
+    sup = _supervisor()
+    unreadable = _hand(angle={**dict.fromkeys(JOINTS, 1000), "index": None})
+    sup.step(_obs(0.0, left=unreadable))
+    assert sup.state == STOP_APPROACH
+    assert sup.track.anomaly == "POSTURE_MISMATCH"
+    assert "unreadable" in sup.track.anomaly_detail
 
 
 def test_declared_present_pose_is_accepted_undeclared_is_retreated():
@@ -450,3 +482,127 @@ def test_declared_present_pose_is_accepted_undeclared_is_retreated():
     decision = sup_declared.step(_obs(0.0, left=presented))
     assert sup_declared.state == PAIR_SELECTED
     assert decision.kind == DECISION_NONE
+
+
+# ------------------------------------------------- fix 5: stale visual
+
+
+def test_stale_visual_cannot_verify_release():
+    """Regression: a 5s-old frame showing separation must NOT advance
+    RELEASE -> CLEARANCE_VERIFIED while forces are still high — stale
+    visual is not clearance evidence."""
+    sup = _supervisor()
+    ts, both = _drive_to_release(sup)
+    ts += 0.1
+    decision = sup.step(_obs(ts, left=both, right=both, visual=_visual(0.05, age_ms=5000.0)))
+    assert sup.state == RELEASE
+    assert decision.kind == DECISION_ISSUE_STEP  # still releasing
+
+
+def test_stale_visual_cannot_commit_clearance():
+    """A stale frame showing separation must not commit the episode; the
+    bounded wait expires into an explicit STALE_OBSERVATION anomaly."""
+    sup = _supervisor()
+    ts, _ = _drive_to_release(sup)
+    ts += 0.1
+    sup.step(_obs(ts, visual=_visual(0.004)))  # forces clear -> CLEARANCE_VERIFIED
+    assert sup.state == CLEARANCE_VERIFIED
+    ts += 0.1
+    decision = sup.step(_obs(ts, visual=_visual(0.03, age_ms=5000.0)))
+    assert sup.state == CLEARANCE_VERIFIED  # NOT committed on a stale frame
+    assert decision.kind == DECISION_NONE
+    for _ in range(20):
+        ts += 0.1
+        sup.step(_obs(ts, visual=_visual(0.03, age_ms=5000.0)))
+    assert sup.track.anomaly == "STALE_OBSERVATION"
+    assert sup.state == STOP_APPROACH
+
+
+# ------------------------------------------------- fix 6: bounded waits
+
+
+def test_clearance_wait_is_bounded_when_pair_stays_near():
+    """CLEARANCE_VERIFIED cannot hang forever on a pair that never
+    separates: the cycle budget expires into CLEARANCE_UNVERIFIED."""
+    sup = _supervisor()
+    ts, _ = _drive_to_release(sup)
+    ts += 0.1
+    sup.step(_obs(ts, visual=_visual(0.004)))  # -> CLEARANCE_VERIFIED
+    assert sup.state == CLEARANCE_VERIFIED
+    for _ in range(21):
+        ts += 0.1
+        sup.step(_obs(ts, visual=_visual(0.004)))  # fresh, but still near
+    assert sup.track.anomaly == "CLEARANCE_UNVERIFIED"
+    assert sup.state == STOP_APPROACH
+
+
+def test_bilateral_force_without_corroboration_is_bounded():
+    """CONTACT_CANDIDATE with both forces rising but neither visual-near
+    nor motion response must not wait forever — explicit anomaly on
+    budget expiry."""
+    sup = _supervisor()
+    ts = _drive_to_coarse(sup)
+    sup.step(_obs(ts, visual=_visual(0.015)))  # -> FINE
+    ts += 0.1
+    both = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": 130.0})
+    sup.step(_obs(ts, left=both, right=both, visual=_visual(0.02)))  # -> CANDIDATE
+    assert sup.state == CONTACT_CANDIDATE
+    # visual mid-range: not near (no confirm), not far (no conflict);
+    # no steps issued, so no motion-response saturation either
+    for _ in range(11):
+        ts += 0.1
+        sup.step(_obs(ts, left=both, right=both, visual=_visual(0.02)))
+    assert sup.track.anomaly == "UNCORROBORATED_FORCE"
+    assert sup.state == STOP_APPROACH
+
+
+# -------------------------------------- fix 7: guards run during recovery
+
+
+def test_thermal_trip_mid_recovery_is_recorded():
+    """Global guards outrank recovery bookkeeping: a thermal overrun
+    during the spine updates the anomaly and the failure receipt."""
+    sup = _supervisor()
+    ts = _drive_to_coarse(sup)
+    bad = _hand(force={**dict.fromkeys(JOINTS, 0.0), "middle": 90.0})
+    sup.step(_obs(ts, left=bad))
+    assert sup.state == STOP_APPROACH
+    assert sup.track.anomaly == "WRONG_FINGER_CONTACT"
+    ts += 0.1
+    sup.step(_obs(ts, left=_hand(temp=50.0)))
+    assert sup.track.anomaly == "THERMAL_ABORT"
+    decision = None
+    for _ in range(6):
+        ts += 0.1
+        decision = sup.step(_obs(ts))
+        if sup.state == RECORD_FAILURE:
+            break
+    assert sup.state == RECORD_FAILURE
+    assert decision is not None and decision.receipt is not None
+    assert decision.receipt.outcome == "THERMAL_ABORT"
+
+
+def test_non_target_contact_during_recovery_is_recorded():
+    sup = _supervisor()
+    ts = _drive_to_coarse(sup)
+    sup.step(_obs(ts, left=_hand(temp=50.0)))  # THERMAL_ABORT -> recovery
+    assert sup.state == STOP_APPROACH
+    ts += 0.1
+    bad = _hand(force={**dict.fromkeys(JOINTS, 0.0), "thumb_rot": 80.0})
+    sup.step(_obs(ts, right=bad))
+    assert sup.track.anomaly == "UNINTENDED_CONTACT"
+
+
+# -------------------------------------- fix 8: dead force channel
+
+
+def test_dead_force_channel_mid_episode_is_fail_closed():
+    """A channel that was alive at baseline and dies mid-episode reads
+    delta 0.0, blinding the non-target guard — it must be an anomaly."""
+    sup = _supervisor()
+    ts = _drive_to_coarse(sup)
+    dead_index = _hand(force={**dict.fromkeys(JOINTS, 0.0), "index": None})
+    sup.step(_obs(ts, left=dead_index))
+    assert sup.state == STOP_APPROACH
+    assert sup.track.anomaly == "TRANSPORT_FAILURE"
+    assert "index" in sup.track.anomaly_detail

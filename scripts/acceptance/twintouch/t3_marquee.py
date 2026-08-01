@@ -183,11 +183,14 @@ def run_marquee(
             camera_freshness_ms=config.camera_freshness_ms,
         )
 
-        # one choreography contract + one Sequence Permit for the WHOLE
-        # marquee (v4 §18): the canonical sequence is the APPROVAL
-        # SCOPE; execution is gated pair-by-pair by T1 calibration —
-        # uncalibrated pairs are recorded as skipped cells, never
-        # silently dropped and never attempted.
+        # one choreography contract for the WHOLE marquee (v4 §18): the
+        # canonical sequence is the APPROVAL SCOPE; execution is gated
+        # pair-by-pair by T1 calibration — uncalibrated pairs are
+        # recorded as skipped cells, never silently dropped and never
+        # attempted.  Sequence Permits are re-issued per pair/cycle
+        # cell (fresh intent hash per cell) so every permit stays
+        # within config.permit_lifetime_s — a hard, never-raisable
+        # limit the runner must never override.
         snapshot_hashes = {"left": f"t3_{run_id}_left", "right": f"t3_{run_id}_right"}
         contract = ContactChoreographyContract(
             pattern="fingertip_marquee",
@@ -204,14 +207,6 @@ def run_marquee(
             report["aborts"].append(f"marquee contract invalid: {violations}")
             print(json.dumps(report, indent=2, default=str))
             return 2
-        permit = SequencePermit.issue(
-            contract,
-            intent_hash=(
-                f"t3_marquee pairs={pairs} cycles={cycles} mode={mode} "
-                "authorization=v4-doc-§11-T3 operator=user-via-standing-task-doc"
-            ),
-            lifetime_s=max(config.permit_lifetime_s, 120.0 * len(pairs) * cycles),
-        )
 
         tuning = SupervisorTuning(
             contact_force_delta_raw=35.0,
@@ -269,6 +264,18 @@ def run_marquee(
                     _emit_state(cell)
                     report["cells"].append(cell)
                     continue
+                # fresh Sequence Permit per pair/cycle cell: a fresh
+                # intent hash per cell and a lifetime that never
+                # exceeds config.permit_lifetime_s (hard limit)
+                permit = SequencePermit.issue(
+                    contract,
+                    intent_hash=(
+                        f"t3_marquee pair={pair_id} cycle={cycle} cell={cell['cell']} "
+                        f"mode={mode} authorization=v4-doc-§11-T3 "
+                        "operator=user-via-standing-task-doc"
+                    ),
+                    lifetime_s=config.permit_lifetime_s,
+                )
                 sequence_ok = _run_cell(
                     cell=cell,
                     run_id=run_id,
@@ -352,6 +359,13 @@ def _run_cell(
         ):
             overlays = [{"thumb": t1.THUMB_TUCK_RAW}, side_present]
         for overlay in overlays:
+            if collector.abort_reason:
+                cell["outcome"] = "WATCHDOG_ABORT"
+                cell["notes"] = [collector.abort_reason]
+                for s in ("left", "right"):
+                    executors[s].retreat({"speed": 300, "force": 150})
+                emit(dict(cell))
+                return False
             staged[side].update(overlay)
             # previous target fingers of this side return toward open
             for other in ("index", "middle", "ring", "little"):
@@ -378,7 +392,9 @@ def _run_cell(
                 emit(dict(cell))
                 return False
             time.sleep(1.6 if envelope_index < 2 else 2.2)
-    current_targets = staged
+    # thread the staged pose back into the SHARED targets dict — the
+    # next cell's transition starts from this pose, not from OPEN
+    current_targets.update(staged)
 
     # per-cell re-baseline at the pre-approach pose
     episode_baselines: dict = {}
@@ -414,10 +430,11 @@ def _run_cell(
     cell["history"] = []
     while supervisor.state not in (EPISODE_COMMITTED, RECORD_FAILURE) and time.time() < deadline:
         if collector.abort_reason:
+            # thermal/watchdog abort unloads the hands fully — never
+            # hold a flexed pose (mirror of the episode-boundary path)
             for side in ("left", "right"):
-                executors[side].dispatch(
-                    {"targets": present[side], "speed": 300, "force": 100}, timeout_ms=4000
-                )
+                executors[side].retreat({"speed": 300, "force": 150})
+            current_targets.update({s: dict(t1.OPEN_RAW) for s in ("left", "right")})
             cell["outcome"] = "WATCHDOG_ABORT"
             cell["notes"] = [collector.abort_reason]
             break
@@ -452,14 +469,14 @@ def _run_cell(
                         {"targets": present[side], "speed": 300, "force": 100}, timeout_ms=4000
                     )
                 break
-            current_targets = new_targets
+            current_targets.update(new_targets)
             time.sleep(1.5)
         elif decision.kind == "RETREAT":
             for side in ("left", "right"):
                 executors[side].dispatch(
                     {"targets": present[side], "speed": 300, "force": 100}, timeout_ms=4000
                 )
-            current_targets = {s: dict(t) for s, t in present.items()}
+            current_targets.update({s: dict(t) for s, t in present.items()})
             time.sleep(1.5)
         else:
             time.sleep(0.3)
