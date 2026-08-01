@@ -34,18 +34,31 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import json
+import os
 import sys
 import time
 from pathlib import Path
 
-REPO_SRC = "/home/nvidia/workspace/rosclaw/rosclaw_test/rosclaw/src"
+REPO_SRC = str(Path(__file__).resolve().parents[2] / "src")
 sys.path.insert(0, REPO_SRC)
-sys.path.insert(0, "/home/nvidia/workspace/rosclaw_rh56_real/rosclaw-rh56-runtime/src")
-sys.path.insert(0, "/home/nvidia/workspace/rosclaw/rosclaw_test/examples/rh56_rps/src")
+sys.path.insert(
+    0,
+    os.environ.get(
+        "ROSCLAW_RH56_RUNTIME_SRC",
+        "/home/nvidia/workspace/rosclaw_rh56_real/rosclaw-rh56-runtime/src",
+    ),
+)
+sys.path.insert(
+    0,
+    os.environ.get(
+        "ROSCLAW_RH56_RPS_SRC",
+        "/home/nvidia/workspace/rosclaw/rosclaw_test/examples/rh56_rps/src",
+    ),
+)
 
 # reuse the proven T1 machinery as a library (registered for dataclasses)
 _spec = importlib.util.spec_from_file_location(
-    "t1c", "/home/nvidia/workspace/rosclaw/rosclaw_test/rosclaw/scripts/acceptance/twintouch/t1_calibration.py"
+    "t1c", str(Path(__file__).resolve().parent / "t1_calibration.py")
 )
 t1 = importlib.util.module_from_spec(_spec)
 sys.modules["t1c"] = t1

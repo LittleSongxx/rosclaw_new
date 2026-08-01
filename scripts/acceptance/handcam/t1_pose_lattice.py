@@ -21,14 +21,27 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
 
-REPO_SRC = "/home/nvidia/workspace/rosclaw/rosclaw_test/rosclaw/src"
+REPO_SRC = str(Path(__file__).resolve().parents[2] / "src")
 sys.path.insert(0, REPO_SRC)
-sys.path.insert(0, "/home/nvidia/workspace/rosclaw_rh56_real/rosclaw-rh56-runtime/src")
-sys.path.insert(0, "/home/nvidia/workspace/rosclaw/rosclaw_test/examples/rh56_rps/src")
+sys.path.insert(
+    0,
+    os.environ.get(
+        "ROSCLAW_RH56_RUNTIME_SRC",
+        "/home/nvidia/workspace/rosclaw_rh56_real/rosclaw-rh56-runtime/src",
+    ),
+)
+sys.path.insert(
+    0,
+    os.environ.get(
+        "ROSCLAW_RH56_RPS_SRC",
+        "/home/nvidia/workspace/rosclaw/rosclaw_test/examples/rh56_rps/src",
+    ),
+)
 
 import pyrealsense2 as rs  # noqa: E402
 from rosclaw_rps.hand.rh56_controller import RH56Controller  # noqa: E402
