@@ -105,6 +105,8 @@ def test_recovery_smoothly_blends_qualified_pose_after_landing() -> None:
     # Left hip roll also receives the bounded -0.05 rad posture bias.
     assert complete.target[1] == pytest.approx(0.65)
     receipt = controller.build_receipt(strict_replay=True)
+    assert receipt.controller_hash == controller.controller_hash
+    assert receipt.config_hash == controller.config_hash
     assert receipt.contact_latched
     assert receipt.kick_foot_landing_latched
     assert receipt.activation_policy_frame == 470
@@ -287,6 +289,8 @@ def test_momentum_unloading_gate_requires_measured_motion_and_replay_gains() -> 
     evolution = G1MomentumUnloadingEvolution.evaluate(
         body_hash=_HASH_A,
         kick_prior_hash=_HASH_B,
+        recovery_controller_hash="sha256:" + "6" * 64,
+        recovery_config_hash="sha256:" + "7" * 64,
         regime_commitment="sha256:" + "4" * 64,
         parent=ShotParameters(),
         candidate=ShotParameters(stance_offset_y=-0.08, swing_amplitude=1.125),
@@ -300,10 +304,15 @@ def test_momentum_unloading_gate_requires_measured_motion_and_replay_gains() -> 
     assert evolution.decision is G1RecoveryEvolutionDecision.SIM_CHAMPION
     assert selected.policy_hash == evolution.candidate.policy_hash
     assert selected_receipt.used_candidate
+    assert selected_receipt.recovery_controller_hash == evolution.recovery_controller_hash
+    assert selected_receipt.recovery_config_hash == evolution.recovery_config_hash
     assert fallback.policy_hash == evolution.parent.policy_hash
     assert not fallback_receipt.used_candidate
     assert fallback_receipt.fallback_reason == "out_of_evidence_regime"
     assert fallback_receipt.rollback_target_hash == evolution.parent.policy_hash
+    assert replace(evolution, recovery_config_hash="sha256:" + "8" * 64).candidate_hash != (
+        evolution.candidate_hash
+    )
 
 
 def test_naturalness_gate_requires_jerk_gains_without_stability_regression() -> None:

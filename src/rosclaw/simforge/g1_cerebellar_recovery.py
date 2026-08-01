@@ -74,11 +74,16 @@ class G1CerebellarRecoveryConfig:
         if self.settling_blend_frames <= 0:
             raise ValueError("settling_blend_frames must be positive")
         if self.settling_start_policy_frame is not None:
+            if (
+                self.settling_standing_pose_blend is None
+                or self.settling_roll_posture_bias_rad is None
+            ):
+                raise ValueError("enabled settling recovery requires complete parameters")
             if self.settling_start_policy_frame < self.start_policy_frame + self.blend_frames:
                 raise ValueError("settling recovery cannot overlap the unloading blend")
-            if not 0.0 <= float(self.settling_standing_pose_blend) <= 0.50:
+            if not 0.0 <= self.settling_standing_pose_blend <= 0.50:
                 raise ValueError("settling_standing_pose_blend must be in [0, 0.50]")
-            settling_roll = float(self.settling_roll_posture_bias_rad)
+            settling_roll = self.settling_roll_posture_bias_rad
             if not math.isfinite(settling_roll) or not -0.08 <= settling_roll <= 0.08:
                 raise ValueError(
                     "settling_roll_posture_bias_rad must be finite and in [-0.08, 0.08]"
@@ -86,9 +91,7 @@ class G1CerebellarRecoveryConfig:
         if not math.isfinite(self.settling_waist_pitch_bias_rad) or not (
             -0.12 <= self.settling_waist_pitch_bias_rad <= 0.12
         ):
-            raise ValueError(
-                "settling_waist_pitch_bias_rad must be finite and in [-0.12, 0.12]"
-            )
+            raise ValueError("settling_waist_pitch_bias_rad must be finite and in [-0.12, 0.12]")
         if self.settling_start_policy_frame is None and self.settling_waist_pitch_bias_rad != 0.0:
             raise ValueError("settling waist pitch bias requires settling recovery")
         if not 0.25 <= self.target_smoothing_alpha <= 1.0:
@@ -122,6 +125,7 @@ class G1CerebellarRecoveryEffect:
 @dataclass(frozen=True)
 class G1CerebellarRecoveryReceipt:
     controller_hash: str
+    config_hash: str
     body_hash: str
     motion_hash: str
     standing_pose_hash: str
@@ -142,7 +146,7 @@ class G1CerebellarRecoveryReceipt:
     strict_replay: bool
     evidence_domain: str
     config: dict[str, Any]
-    schema_version: str = "rosclaw.g1_goalforge.cerebellar_recovery_receipt.v3"
+    schema_version: str = "rosclaw.g1_goalforge.cerebellar_recovery_receipt.v4"
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -194,6 +198,15 @@ class G1CerebellarRecoveryController:
         self._roll_pattern = _roll_posture_pattern()
         self._waist_pitch_pattern = _waist_pitch_pattern()
         self.reset()
+
+    @property
+    def config_hash(self) -> str:
+        return hash_json(
+            {
+                "schema_version": "rosclaw.g1_goalforge.cerebellar_recovery_config.v1",
+                "config": asdict(self.config),
+            }
+        )
 
     @property
     def controller_hash(self) -> str:
@@ -280,6 +293,10 @@ class G1CerebellarRecoveryController:
                 self.config.settling_start_policy_frame is not None
                 and policy_frame >= self.config.settling_start_policy_frame
             ):
+                settling_standing_pose_blend = self.config.settling_standing_pose_blend
+                settling_roll_posture_bias = self.config.settling_roll_posture_bias_rad
+                if settling_standing_pose_blend is None or settling_roll_posture_bias is None:
+                    raise RuntimeError("validated settling recovery config became incomplete")
                 settling_linear = min(
                     1.0,
                     max(
@@ -288,16 +305,14 @@ class G1CerebellarRecoveryController:
                         / self.config.settling_blend_frames,
                     ),
                 )
-                settling_fraction = settling_linear * settling_linear * (
-                    3.0 - 2.0 * settling_linear
+                settling_fraction = (
+                    settling_linear * settling_linear * (3.0 - 2.0 * settling_linear)
                 )
                 standing_pose_blend += settling_fraction * (
-                    float(self.config.settling_standing_pose_blend)
-                    - standing_pose_blend
+                    settling_standing_pose_blend - standing_pose_blend
                 )
                 roll_posture_bias += settling_fraction * (
-                    float(self.config.settling_roll_posture_bias_rad)
-                    - roll_posture_bias
+                    settling_roll_posture_bias - roll_posture_bias
                 )
             standing_weight = fraction * standing_pose_blend
             adapted = (
@@ -368,6 +383,7 @@ class G1CerebellarRecoveryController:
     ) -> G1CerebellarRecoveryReceipt:
         return G1CerebellarRecoveryReceipt(
             controller_hash=self.controller_hash,
+            config_hash=self.config_hash,
             body_hash=self.body_hash,
             motion_hash=self.motion_hash,
             standing_pose_hash=self.standing_pose_hash,

@@ -7,7 +7,12 @@ import pytest
 
 from rosclaw.continual.contracts import ExperiencePartition
 from rosclaw.continual.experience import ContinualExperienceStore, ExperienceRecord
-from rosclaw.continual.serde import experience_batch_from_dict, experience_batch_to_dict
+from rosclaw.continual.serde import (
+    experience_batch_from_dict,
+    experience_batch_to_dict,
+    experience_record_from_dict,
+    experience_record_to_dict,
+)
 from tests.continual.helpers import digest, policy, trajectory
 
 
@@ -62,3 +67,19 @@ def test_experience_batch_codec_rejects_tampered_transition() -> None:
 
     with pytest.raises(ValueError, match="trajectory hash mismatch"):
         experience_batch_from_dict(envelope)
+
+
+def test_boundary_request_commitment_survives_record_codec() -> None:
+    v0, _ = policy(0)
+    request_hash = digest("boundary-request")
+    record = ExperienceRecord(
+        trajectory(v0, episode="boundary-bound", critical=True),
+        ExperiencePartition.BOUNDARY,
+        boundary_reason="fall replay",
+        boundary_request_hash=request_hash,
+    )
+
+    restored = experience_record_from_dict(experience_record_to_dict(record))
+
+    assert restored.record_hash == record.record_hash
+    assert restored.boundary_request_hash == request_hash

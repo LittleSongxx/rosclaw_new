@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
 from rosclaw.feedback.contracts import canonical_hash
+
+_SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class AdaptationState(StrEnum):
@@ -201,6 +204,32 @@ class AdaptationTrigger:
             else "matched evaluation rejected the candidate"
         )
         return self._receipt(previous, reason)
+
+    def close_cycle(self, *, completion_evidence_hash: str) -> AdaptationReceipt:
+        """Leave a terminal state only after content-addressed completion evidence.
+
+        ROLLBACK and CONSOLIDATED remain fail-closed terminal states until the
+        caller supplies the immutable receipt proving that rollback or champion
+        consolidation actually completed.  Closing a cycle resets only the
+        persistence counters; the lifetime observation count remains auditable.
+        """
+
+        if self.state not in {AdaptationState.CONSOLIDATED, AdaptationState.ROLLBACK}:
+            raise RuntimeError("only a terminal adaptation cycle may be closed")
+        if not _SHA256.fullmatch(completion_evidence_hash):
+            raise ValueError("adaptation completion evidence must be a sha256 content hash")
+        previous = self.state
+        outcome = "consolidation" if previous is AdaptationState.CONSOLIDATED else "rollback"
+        self.state = AdaptationState.NORMAL
+        receipt = self._receipt(
+            previous,
+            f"verified {outcome} closed the adaptation cycle: {completion_evidence_hash}",
+        )
+        self._suspected = 0
+        self._confirmed = 0
+        self._recovered = 0
+        self._last_score = 0.0
+        return receipt
 
     def score(self, residuals: PredictionResiduals) -> float:
         values = residuals.components().values()

@@ -33,16 +33,7 @@ def experience_record_to_dict(record: ExperienceRecord) -> dict[str, Any]:
     return {
         "schema_version": _RECORD_ENVELOPE_SCHEMA,
         "trajectory": record.trajectory.to_dict(),
-        "record": {
-            "schema_version": record.schema_version,
-            "partition": record.partition.value,
-            "anchor_policy_hash": record.anchor_policy_hash,
-            "boundary_reason": record.boundary_reason,
-            "self_change_hash": record.self_change_hash,
-            "near_boundary_score": record.near_boundary_score,
-            "trajectory_hash": record.trajectory.trajectory_hash,
-            "record_hash": record.record_hash,
-        },
+        "record": _record_summary(record),
     }
 
 
@@ -60,6 +51,7 @@ def experience_record_from_dict(value: Mapping[str, Any]) -> ExperienceRecord:
         partition=ExperiencePartition(str(item["partition"])),
         anchor_policy_hash=_optional_string(item.get("anchor_policy_hash")),
         boundary_reason=_optional_string(item.get("boundary_reason")),
+        boundary_request_hash=_optional_string(item.get("boundary_request_hash")),
         self_change_hash=_optional_string(item.get("self_change_hash")),
         near_boundary_score=float(item["near_boundary_score"]),
     )
@@ -86,19 +78,7 @@ def experience_batch_to_dict(batch: ExperienceBatch) -> dict[str, Any]:
         },
         "permitted_uses": [item.value for item in batch.permitted_uses],
         "trajectories": dict(sorted(trajectories.items())),
-        "records": [
-            {
-                "schema_version": record.schema_version,
-                "partition": record.partition.value,
-                "anchor_policy_hash": record.anchor_policy_hash,
-                "boundary_reason": record.boundary_reason,
-                "self_change_hash": record.self_change_hash,
-                "near_boundary_score": record.near_boundary_score,
-                "trajectory_hash": record.trajectory.trajectory_hash,
-                "record_hash": record.record_hash,
-            }
-            for record in batch.records
-        ],
+        "records": [_record_summary(record) for record in batch.records],
         "batch_hash": batch.batch_hash,
     }
 
@@ -132,6 +112,7 @@ def experience_batch_from_dict(value: Mapping[str, Any]) -> ExperienceBatch:
             partition=ExperiencePartition(str(item["partition"])),
             anchor_policy_hash=_optional_string(item.get("anchor_policy_hash")),
             boundary_reason=_optional_string(item.get("boundary_reason")),
+            boundary_request_hash=_optional_string(item.get("boundary_request_hash")),
             self_change_hash=_optional_string(item.get("self_change_hash")),
             near_boundary_score=float(item["near_boundary_score"]),
         )
@@ -152,6 +133,22 @@ def experience_batch_from_dict(value: Mapping[str, Any]) -> ExperienceBatch:
     if value.get("batch_hash") != batch.batch_hash:
         raise ValueError("experience batch hash mismatch")
     return batch
+
+
+def _record_summary(record: ExperienceRecord) -> dict[str, Any]:
+    value = {
+        "schema_version": record.schema_version,
+        "partition": record.partition.value,
+        "anchor_policy_hash": record.anchor_policy_hash,
+        "boundary_reason": record.boundary_reason,
+        "self_change_hash": record.self_change_hash,
+        "near_boundary_score": record.near_boundary_score,
+        "trajectory_hash": record.trajectory.trajectory_hash,
+        "record_hash": record.record_hash,
+    }
+    if record.boundary_request_hash is not None:
+        value["boundary_request_hash"] = record.boundary_request_hash
+    return value
 
 
 def _trajectory(value: Mapping[str, Any]) -> VersionedTrajectory:

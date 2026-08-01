@@ -180,6 +180,68 @@ def test_adaptation_trigger_requires_retention_before_consolidation() -> None:
     assert consolidated.state is AdaptationState.CONSOLIDATED
 
 
+def test_adaptation_terminal_cycles_require_evidence_before_reopening() -> None:
+    completion_hash = "sha256:" + "a" * 64
+    trigger = AdaptationTrigger(
+        AdaptationTriggerConfig(
+            suspected_persistence=1,
+            confirmed_persistence=1,
+            shadow_min_samples=1,
+        )
+    )
+    with pytest.raises(RuntimeError, match="terminal"):
+        trigger.close_cycle(completion_evidence_hash=completion_hash)
+
+    trigger.observe(_residual(0.6))
+    trigger.observe(_residual(0.8))
+    trigger.begin_shadow_learning()
+    trigger.candidate_update(
+        sample_count=1,
+        target_improvement=0.2,
+        anchor_degradation=0.0,
+        critical_safety_regressions=0,
+        converged=True,
+    )
+    trigger.consolidate(matched_gate_passed=False)
+    with pytest.raises(ValueError, match="sha256"):
+        trigger.close_cycle(completion_evidence_hash="operator said rollback completed")
+
+    receipt = trigger.close_cycle(completion_evidence_hash=completion_hash)
+
+    assert receipt.previous_state is AdaptationState.ROLLBACK
+    assert receipt.state is AdaptationState.NORMAL
+    assert completion_hash in receipt.reason
+    assert trigger.state is AdaptationState.NORMAL
+    trigger.observe(_residual(0.6))
+    assert trigger.state is AdaptationState.SUSPECTED_SHIFT
+
+
+def test_consolidated_cycle_can_close_with_champion_commitment() -> None:
+    trigger = AdaptationTrigger(
+        AdaptationTriggerConfig(
+            suspected_persistence=1,
+            confirmed_persistence=1,
+            shadow_min_samples=1,
+        )
+    )
+    trigger.observe(_residual(0.6))
+    trigger.observe(_residual(0.8))
+    trigger.begin_shadow_learning()
+    trigger.candidate_update(
+        sample_count=1,
+        target_improvement=0.2,
+        anchor_degradation=0.0,
+        critical_safety_regressions=0,
+        converged=True,
+    )
+    trigger.consolidate(matched_gate_passed=True)
+
+    receipt = trigger.close_cycle(completion_evidence_hash="sha256:" + "b" * 64)
+
+    assert receipt.previous_state is AdaptationState.CONSOLIDATED
+    assert receipt.state is AdaptationState.NORMAL
+
+
 def _regime_observation(
     episode_id: str,
     support_friction: float,
