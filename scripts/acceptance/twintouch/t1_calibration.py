@@ -135,6 +135,11 @@ EXPECTED_POSE_HASHES = {
 T0_BUNDLE = Path("/home/nvidia/.rosclaw/acceptance/twintouch/t0/latest/t0_evidence_bundle.json")
 OUT_ROOT = Path("/home/nvidia/.rosclaw/acceptance/twintouch/t1")
 
+# §12.2 bootstrap: the supervisor is told reachability_calibrated=True ONLY
+# for pairs covered by the approved calibration contract; everything else
+# stays forbidden (the module docstring promise, now enforced).
+APPROVED_CALIBRATION_PAIRS = frozenset({"index_index"})
+
 SLAVE_CANDIDATES = (1, 2)
 BODY_IDS = {"left": "rh56_left_01", "right": "rh56_right_01"}
 OPEN_RAW = dict.fromkeys(RH56_JOINTS, 1000)
@@ -785,6 +790,11 @@ def run() -> int:
         "aborts": [],
     }
 
+    def _write_report(report: dict) -> None:
+        (out_dir / "t1_calibration_report.json").write_text(
+            json.dumps(report, indent=2, ensure_ascii=False, default=str)
+        )
+
     controllers: dict = {}
     cap = D435iCapture()
     collector: ObservationCollector | None = None
@@ -973,9 +983,18 @@ def run() -> int:
             camera_freshness_ms=config.camera_freshness_ms,
             temperature_abort_c=config.temperature_abort_c,
         )
+        def _write_report(payload: dict) -> None:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "t1_calibration_report.json").write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False, default=str)
+            )
+
         for pair_id in pairs:
             pair = pair_by_id(pair_id)
-            assert pair is not None
+            if pair is None or pair_id not in APPROVED_CALIBRATION_PAIRS:
+                report["aborts"].append(f"pair {pair_id!r} is not an approved calibration pair")
+                print(json.dumps(report, indent=2, default=str))
+                return 3
             for mode in modes:
                 for repeat in range(args.repeats):
                     if collector.abort_reason:
@@ -983,12 +1002,14 @@ def run() -> int:
                         executors["left"].retreat({"speed": 300, "force": 150})
                         executors["right"].retreat({"speed": 300, "force": 150})
                         print(json.dumps(report, indent=2, default=str))
+                        _write_report(report)
                         return 3
                     temp_now = default_temp_probe()
                     temps_now = [v for v in temp_now.values() if isinstance(v, (int, float))]
                     if temps_now and max(temps_now) > config.temperature_start_max_c:
                         report["aborts"].append(f"thermal continue gate: {max(temps_now)}°C")
                         print(json.dumps(report, indent=2, default=str))
+                        _write_report(report)
                         return 3
                     # per-EPISODE tuning: ALL modes fine-only — a
                     # 40-raw coarse step skips through every contact
@@ -1146,6 +1167,19 @@ def _run_episode(
                     json.dumps(record.__dict__, indent=2, ensure_ascii=False, default=str)
                 )
                 return record
+            if collector.abort_reason:
+                # the documented spikes (thumb-tuck +184, arc-crossing +216)
+                # happen exactly in this staging window — never stay blind
+                record.outcome = "WATCHDOG_ABORT"
+                record.notes.append(
+                    f"watchdog during present staging ({side}): {collector.abort_reason}"
+                )
+                for s in ("left", "right"):
+                    executors[s].retreat({"speed": 300, "force": 150})
+                (out_dir / f"episode_{pair_id}_{mode}_{repeat}.json").write_text(
+                    json.dumps(record.__dict__, indent=2, ensure_ascii=False, default=str)
+                )
+                return record
             time.sleep(2.0 if envelope_index < len(overlays) else 2.5)
     current_targets = {s: dict(t) for s, t in staged_targets.items()}
 
@@ -1193,10 +1227,10 @@ def _run_episode(
 
     while supervisor.state not in (EPISODE_COMMITTED, RECORD_FAILURE) and time.time() < deadline:
         if collector.abort_reason:
+            # full retreat to OPEN — the backstop must unload, not hold a
+            # flexed pose (thermal trip especially)
             for side in ("left", "right"):
-                executors[side].dispatch(
-                    {"targets": present[side], "speed": 300, "force": 100}, timeout_ms=4000
-                )
+                executors[side].retreat({"speed": 300, "force": 150})
             record.outcome = "WATCHDOG_ABORT"
             record.notes.append(collector.abort_reason)
             break

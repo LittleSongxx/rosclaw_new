@@ -445,6 +445,7 @@ def qualify_motiondecode_snapshot(
             bundle.trace,
             target_model_path=target_model_path,
             scene_path=scene_path,
+            license_decision=registration.manifest.license_snapshot.decision,
             thresholds=selected_physics,
         )
         clips.append(
@@ -480,10 +481,17 @@ def qualify_canonical_motion(
     *,
     target_model_path: Path,
     scene_path: Path,
+    license_decision: LicenseDecision,
     thresholds: PhysicsQualificationThresholds | None = None,
 ) -> MotionPhysicsQualification:
-    """Advance real CPU MuJoCo physics with the scene's position actuators."""
+    """Advance real CPU MuJoCo physics with the scene's position actuators.
 
+    The license gate is structural: no physics step runs for a source whose
+    license is not PERMITTED, regardless of which entry point is used.
+    """
+
+    if license_decision is not LicenseDecision.PERMITTED:
+        raise ValueError("physics qualification requires a PERMITTED license decision")
     selected = thresholds or PhysicsQualificationThresholds()
     if contact.episode_hash != episode.episode_hash:
         raise ValueError("contact trace does not match the motion episode")
