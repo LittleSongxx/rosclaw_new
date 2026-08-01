@@ -37,15 +37,29 @@ metric).
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
 
-REPO_SRC = "/home/nvidia/workspace/rosclaw/rosclaw_test/rosclaw/src"
+REPO_SRC = str(Path(__file__).resolve().parents[2] / "src")
 sys.path.insert(0, REPO_SRC)
-sys.path.insert(0, "/home/nvidia/workspace/rosclaw_rh56_real/rosclaw-rh56-runtime/src")
-sys.path.insert(0, "/home/nvidia/workspace/rosclaw/rosclaw_test/examples/rh56_rps/src")
+sys.path.insert(
+    0,
+    os.environ.get(
+        "ROSCLAW_RH56_RUNTIME_SRC",
+        "/home/nvidia/workspace/rosclaw_rh56_real/rosclaw-rh56-runtime/src",
+    ),
+)
+sys.path.insert(
+    0,
+    os.environ.get(
+        "ROSCLAW_RH56_RPS_SRC",
+        "/home/nvidia/workspace/rosclaw/rosclaw_test/examples/rh56_rps/src",
+    ),
+)
 
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
@@ -306,7 +320,7 @@ def main() -> int:
 
         # T0 force baseline: open hand, no contact — 5 reads per hand.
         baselines: dict = {}
-        for label, ctl in controllers.items():
+        for _label, ctl in controllers.items():
             reads = []
             for _ in range(5):
                 tel = ctl.read_telemetry()
@@ -325,7 +339,7 @@ def main() -> int:
         best_step = None
         for raw in SWEEP_RAW:
             target = [raw] * len(JOINTS)
-            for label, ctl in controllers.items():
+            for _label, ctl in controllers.items():
                 ctl.move_to_gesture(f"sweep{raw}", target, SWEEP_SPEED, SWEEP_FORCE)
             time.sleep(SETTLE_S)
             step_measures = []
@@ -378,10 +392,8 @@ def main() -> int:
                 ctl.close()
             except Exception:  # noqa: BLE001
                 pass
-        try:
+        with contextlib.suppress(Exception):
             cap.stop()
-        except Exception:  # noqa: BLE001
-            pass
 
     report_path = run_dir / "t0_reachability_report.json"
     report_path.write_text(json.dumps(outcomes, indent=2, ensure_ascii=False, default=str))

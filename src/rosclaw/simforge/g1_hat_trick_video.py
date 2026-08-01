@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, cast
@@ -127,41 +128,44 @@ def render_goalforge_hat_trick_video(
         comparison_data = mujoco.MjData(model)
         renderer = mujoco.Renderer(model, height=_RENDER_HEIGHT, width=_RENDER_WIDTH)
         try:
-            process = subprocess.Popen(
-                _ffmpeg_command(
-                    ffmpeg=ffmpeg,
-                    output=output,
-                    fps=fps,
-                    sources=sources,
-                    durations=durations,
-                ),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            if process.stdin is None:
-                raise RuntimeError("ffmpeg raw-video pipe is unavailable")
-            try:
-                _write_frames(
-                    mujoco=mujoco,
-                    model=model,
-                    data=data,
-                    comparison_data=comparison_data,
-                    renderer=renderer,
-                    sources=sources,
-                    timelines=timelines,
-                    stream=cast(BinaryIO, process.stdin),
+            with tempfile.TemporaryDirectory(prefix="rosclaw-hat-trick-drawtext-") as text_root:
+                metric_files = _write_metric_text_files(Path(text_root), sources)
+                process = subprocess.Popen(
+                    _ffmpeg_command(
+                        ffmpeg=ffmpeg,
+                        output=output,
+                        fps=fps,
+                        sources=sources,
+                        durations=durations,
+                        metric_files=metric_files,
+                    ),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
                 )
-            except BaseException:
+                if process.stdin is None:
+                    raise RuntimeError("ffmpeg raw-video pipe is unavailable")
+                try:
+                    _write_frames(
+                        mujoco=mujoco,
+                        model=model,
+                        data=data,
+                        comparison_data=comparison_data,
+                        renderer=renderer,
+                        sources=sources,
+                        timelines=timelines,
+                        stream=cast(BinaryIO, process.stdin),
+                    )
+                except BaseException:
+                    process.stdin.close()
+                    process.kill()
+                    process.wait()
+                    raise
                 process.stdin.close()
-                process.kill()
-                process.wait()
-                raise
-            process.stdin.close()
-            stderr = process.stderr.read().decode(errors="replace") if process.stderr else ""
-            code = process.wait()
-            if code:
-                raise RuntimeError(f"Hat Trick ffmpeg failed ({code}): {stderr[-2000:]}")
+                stderr = process.stderr.read().decode(errors="replace") if process.stderr else ""
+                code = process.wait()
+                if code:
+                    raise RuntimeError(f"Hat Trick ffmpeg failed ({code}): {stderr[-2000:]}")
         finally:
             renderer.close()
     finally:
@@ -513,7 +517,7 @@ def _sample_trajectory(
 
 
 def _interpolate_pose(left: np.ndarray, right: np.ndarray, ratio: float) -> np.ndarray:
-    result = np.empty(7, dtype=np.float64)
+    result: np.ndarray = np.empty(7, dtype=np.float64)
     result[:3] = _lerp(left[:3], right[:3], ratio)
     result[3:] = _slerp_wxyz(left[3:], right[3:], ratio)
     return result
@@ -607,50 +611,26 @@ def _ffmpeg_command(
     fps: int,
     sources: tuple[_Source, ...],
     durations: tuple[float, ...],
+    metric_files: tuple[Path, ...],
 ) -> list[str]:
+    if len(metric_files) != len(sources):
+        raise ValueError("Hat Trick drawtext files must align with video sources")
     font = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
-    font_option = f"fontfile={font}:" if font.is_file() else ""
+    font_option = f"fontfile={_escape_filtergraph_option(str(font))}:" if font.is_file() else ""
     filters = [
         "drawbox=x=0:y=0:w=iw:h=112:color=0x050A12@0.78:t=fill",
         "drawbox=x=0:y=h-70:w=iw:h=70:color=0x050A12@0.78:t=fill",
-        f"drawtext={font_option}text='ROSClaw GoalForge Hat Trick':x=34:y=18:fontsize=36:fontcolor=white",
-        f"drawtext={font_option}text='SIM EVIDENCE REPLAY · VISUALIZATION ONLY':x=34:y=h-46:fontsize=22:fontcolor=0x8DD8FF",
+        f"drawtext={font_option}text={_escape_filtergraph_option('ROSClaw GoalForge Hat Trick')}:"
+        "expansion=none:x=34:y=18:fontsize=36:fontcolor=white",
+        f"drawtext={font_option}text={_escape_filtergraph_option('SIM EVIDENCE REPLAY · VISUALIZATION ONLY')}:"
+        "expansion=none:x=34:y=h-46:fontsize=22:fontcolor=0x8DD8FF",
     ]
     offset = 0.0
-    for source, duration in zip(sources, durations, strict=True):
+    for source, duration, metric_file in zip(sources, durations, metric_files, strict=True):
         end = offset + duration
-        result = source.result
-        if source.naturalness_comparison:
-            backward_reduction = 100.0 * float(
-                source.naturalness_comparison["backward_reversal_reduction"]
-            )
-            lateral_reduction = 100.0 * float(
-                source.naturalness_comparison["lateral_peak_return_reduction"]
-            )
-            wobble_reduction = 100.0 * float(
-                source.naturalness_comparison["tail_wobble_reduction"]
-            )
-            metrics = (
-                f"SHOT 3 · TWO-STAGE BODY RECOVERY  ·  BACKSTEP -{backward_reduction:.0f}pct  ·  "
-                f"SIDE SWAY -{lateral_reduction:.0f}pct  ·  WOBBLE -{wobble_reduction:.0f}pct"
-            )
-        elif float(source.scenario["target_z_m"]) >= 0.55:
-            metrics = (
-                f"{source.title}  ·  HIGH TARGET {float(source.scenario['target_z_m']):.2f} m  ·  "
-                f"{float(result['ball_speed_mps']):.2f} m/s  ·  "
-                f"error {float(result['target_error_m']):.3f} m"
-            )
-        else:
-            wobble_reduction = 100.0 * float(
-                source.recovery_comparison.get("tail_wobble_reduction", 0.0)
-            )
-            metrics = (
-                f"{source.title}  ·  {float(result['ball_speed_mps']):.2f} m/s  ·  "
-                f"error {float(result['target_error_m']):.3f} m  ·  "
-                f"RECOVERY WOBBLE -{wobble_reduction:.0f} pct"
-            )
         filters.append(
-            f"drawtext={font_option}text='{metrics}':x=34:y=68:fontsize=22:"
+            f"drawtext={font_option}textfile={_escape_filtergraph_option(str(metric_file))}:"
+            "expansion=none:x=34:y=68:fontsize=22:"
             f"fontcolor=0x65F59A:enable='between(t,{offset:.6f},{end:.6f})'"
         )
         if source.comparison is not None:
@@ -666,8 +646,10 @@ def _ffmpeg_command(
             )
             filters.extend(
                 (
-                    f"drawtext={font_option}text='{left_label}':x=105:y=145:fontsize=20:fontcolor=0xFFB45F:enable='between(t,{offset:.6f},{end:.6f})'",
-                    f"drawtext={font_option}text='{right_label}':x=735:y=145:fontsize=20:fontcolor=0x65F59A:enable='between(t,{offset:.6f},{end:.6f})'",
+                    f"drawtext={font_option}text={_escape_filtergraph_option(left_label)}:"
+                    f"expansion=none:x=105:y=145:fontsize=20:fontcolor=0xFFB45F:enable='between(t,{offset:.6f},{end:.6f})'",
+                    f"drawtext={font_option}text={_escape_filtergraph_option(right_label)}:"
+                    f"expansion=none:x=735:y=145:fontsize=20:fontcolor=0x65F59A:enable='between(t,{offset:.6f},{end:.6f})'",
                 )
             )
         offset = end
@@ -701,6 +683,57 @@ def _ffmpeg_command(
         "+faststart",
         str(output),
     ]
+
+
+def _write_metric_text_files(root: Path, sources: tuple[_Source, ...]) -> tuple[Path, ...]:
+    root.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for index, source in enumerate(sources):
+        path = root / f"metrics-{index}.txt"
+        path.write_text(_metric_text(source), encoding="utf-8")
+        paths.append(path)
+    return tuple(paths)
+
+
+def _metric_text(source: _Source) -> str:
+    result = source.result
+    if source.naturalness_comparison:
+        backward_reduction = 100.0 * float(
+            source.naturalness_comparison["backward_reversal_reduction"]
+        )
+        lateral_reduction = 100.0 * float(
+            source.naturalness_comparison["lateral_peak_return_reduction"]
+        )
+        wobble_reduction = 100.0 * float(source.naturalness_comparison["tail_wobble_reduction"])
+        return (
+            f"SHOT 3 · TWO-STAGE BODY RECOVERY  ·  BACKSTEP -{backward_reduction:.0f}pct  ·  "
+            f"SIDE SWAY -{lateral_reduction:.0f}pct  ·  WOBBLE -{wobble_reduction:.0f}pct"
+        )
+    if float(source.scenario["target_z_m"]) >= 0.55:
+        return (
+            f"{source.title}  ·  HIGH TARGET {float(source.scenario['target_z_m']):.2f} m  ·  "
+            f"{float(result['ball_speed_mps']):.2f} m/s  ·  "
+            f"error {float(result['target_error_m']):.3f} m"
+        )
+    wobble_reduction = 100.0 * float(source.recovery_comparison.get("tail_wobble_reduction", 0.0))
+    return (
+        f"{source.title}  ·  {float(result['ball_speed_mps']):.2f} m/s  ·  "
+        f"error {float(result['target_error_m']):.3f} m  ·  "
+        f"RECOVERY WOBBLE -{wobble_reduction:.0f} pct"
+    )
+
+
+def _escape_filtergraph_option(value: str) -> str:
+    """Apply FFmpeg's option-value and filtergraph escaping layers.
+
+    The command is passed as an argv sequence, so shell escaping is neither
+    necessary nor desirable here.
+    """
+
+    def escape_level(text: str, special: str) -> str:
+        return "".join(("\\" + char) if char in special else char for char in text)
+
+    return escape_level(escape_level(value, "\\':"), "\\'[],;")
 
 
 def _hash_file(path: Path) -> str:

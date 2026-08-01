@@ -30,8 +30,9 @@ from __future__ import annotations
 import json
 import sys
 import time
+from pathlib import Path
 
-REPO_SRC = "/home/nvidia/workspace/rosclaw/rosclaw_test/rosclaw/src"
+REPO_SRC = str(Path(__file__).resolve().parents[2] / "src")
 sys.path.insert(0, REPO_SRC)
 
 from rosclaw.evolution.hardware.contracts import load_config  # noqa: E402

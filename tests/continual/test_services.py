@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from rosclaw.continual.boundary_feedback import BoundaryReplayRequest
-from rosclaw.continual.contracts import ExperiencePartition, SkillPhase
+from rosclaw.continual.contracts import ExperiencePartition, PolicyVersion, SkillPhase
 from rosclaw.continual.experience import (
     ContinualExperienceStore,
     ExperienceRecord,
@@ -93,17 +93,18 @@ def test_rollout_recovery_aborts_motion_and_never_replays_actions(tmp_path: Path
 
 def test_rollout_completes_only_matching_strict_versioned_trajectory(tmp_path: Path) -> None:
     parent, _ = policy(0)
+    scenario_commitment = digest("scenario-2")
     service = RolloutService(tmp_path, source_checkout=_source_checkout())
     assignment = service.assign(
         episode_id="kick-2",
-        scenario_commitment=digest("scenario-2"),
+        scenario_commitment=scenario_commitment,
         policy=parent,
     )
     service.start(assignment.assignment_id, worker_id="sim-worker-0")
 
     completed = service.complete(
         assignment.assignment_id,
-        trajectory=trajectory(parent, episode="kick-2"),
+        trajectory=trajectory(parent, episode="kick-2", regime_hash=scenario_commitment),
     )
 
     assert completed.state is RolloutState.COMPLETE
@@ -113,12 +114,13 @@ def test_rollout_completes_only_matching_strict_versioned_trajectory(tmp_path: P
 
 def test_experience_service_recovers_catalog_and_boundary_queue(tmp_path: Path) -> None:
     parent, records, _ = _four_partition_store()
+    candidate, _ = policy(1, parent=parent)
     request = BoundaryReplayRequest(
         scenario_id="unsafe-seed-7",
         scenario_commitment=digest("scenario-7"),
         replay_partition="boundary",
         parent_policy_hash=parent.version_hash,
-        candidate_policy_hash=digest("candidate-version"),
+        candidate_policy_hash=candidate.version_hash,
         parent_status="PASS",
         candidate_status="SAFETY_ABORT",
         critical_signals=("fall",),
@@ -136,9 +138,15 @@ def test_experience_service_recovers_catalog_and_boundary_queue(tmp_path: Path) 
         recovered.complete_boundary(
             request.request_hash,
             record=ExperienceRecord(
-                trajectory(parent, episode="boundary-rerollout", critical=True),
+                trajectory(
+                    candidate,
+                    episode=request.scenario_id,
+                    critical=True,
+                    regime_hash=request.scenario_commitment,
+                ),
                 ExperiencePartition.BOUNDARY,
                 boundary_reason="reproduced matched-evaluation fall",
+                boundary_request_hash=request.request_hash,
             ),
         )
 
@@ -146,6 +154,138 @@ def test_experience_service_recovers_catalog_and_boundary_queue(tmp_path: Path) 
         assert second["catalog_counts"] == first["catalog_counts"]
         assert len(recovered.pending_boundary_requests) == 0
         assert recovered.audit_receipt()["hardware_authorized"] is False
+
+
+def test_boundary_completion_rejects_unbound_or_mismatched_evidence(tmp_path: Path) -> None:
+    parent, _ = policy(0)
+    candidate, _ = policy(1, parent=parent)
+    request = BoundaryReplayRequest(
+        scenario_id="unsafe-seed-9",
+        scenario_commitment=digest("scenario-9"),
+        replay_partition="recent",
+        parent_policy_hash=parent.version_hash,
+        candidate_policy_hash=candidate.version_hash,
+        parent_status="PASS",
+        candidate_status="SAFETY_ABORT",
+        critical_signals=("fall",),
+        source_evidence_hash=digest("matched-evidence-9"),
+    )
+    service = ExperienceService(tmp_path, source_checkout=_source_checkout())
+    service.enqueue_boundary(request)
+
+    def record(
+        *,
+        policy_value: PolicyVersion = candidate,
+        episode: str = request.scenario_id,
+        regime_hash: str = request.scenario_commitment,
+        request_hash: str | None = request.request_hash,
+        critical: bool = True,
+    ) -> ExperienceRecord:
+        return ExperienceRecord(
+            trajectory(
+                policy_value,
+                episode=episode,
+                critical=critical,
+                regime_hash=regime_hash,
+            ),
+            ExperiencePartition.BOUNDARY,
+            boundary_reason="candidate fall replay",
+            boundary_request_hash=request_hash,
+            near_boundary_score=0.9 if not critical else 0.0,
+        )
+
+    with pytest.raises(ValueError, match="request commitment"):
+        service.complete_boundary(request.request_hash, record=record(request_hash=None))
+    with pytest.raises(ValueError, match="episode"):
+        service.complete_boundary(request.request_hash, record=record(episode="wrong-seed"))
+    with pytest.raises(ValueError, match="scenario commitment"):
+        service.complete_boundary(request.request_hash, record=record(regime_hash=digest("wrong")))
+    with pytest.raises(ValueError, match="candidate policy"):
+        service.complete_boundary(request.request_hash, record=record(policy_value=parent))
+    with pytest.raises(ValueError, match="critical signal"):
+        service.complete_boundary(request.request_hash, record=record(critical=False))
+
+    assert service.pending_boundary_requests == (request,)
+    service.close()
+
+
+def test_legacy_unbound_boundary_completion_is_quarantined_and_requeued(
+    tmp_path: Path,
+) -> None:
+    parent, _ = policy(0)
+    candidate, _ = policy(1, parent=parent)
+    request = BoundaryReplayRequest(
+        scenario_id="legacy-unsafe-seed",
+        scenario_commitment=digest("legacy-scenario"),
+        replay_partition="boundary",
+        parent_policy_hash=parent.version_hash,
+        candidate_policy_hash=candidate.version_hash,
+        parent_status="PASS",
+        candidate_status="SAFETY_ABORT",
+        critical_signals=("fall",),
+        source_evidence_hash=digest("legacy-source-evidence"),
+    )
+    legacy_record = ExperienceRecord(
+        trajectory(
+            candidate,
+            episode=request.scenario_id,
+            critical=True,
+            regime_hash=request.scenario_commitment,
+        ),
+        ExperiencePartition.BOUNDARY,
+        boundary_reason="legacy candidate fall replay",
+    )
+    with ExperienceService(tmp_path, source_checkout=_source_checkout()) as service:
+        service.enqueue_boundary(request)
+        service.append(legacy_record)
+
+    log = DurableEventLog(tmp_path / "experience" / "journal", service="experience")
+    log.append(
+        "BOUNDARY_COMPLETED",
+        {"request_hash": request.request_hash, "record_hash": legacy_record.record_hash},
+    )
+    database = sqlite3.connect(tmp_path / "experience" / "catalog.sqlite3")
+    with database:
+        database.execute(
+            "UPDATE boundary_requests SET completed_record_hash=? WHERE request_hash=?",
+            (legacy_record.record_hash, request.request_hash),
+        )
+    database.close()
+
+    with ExperienceService(tmp_path, source_checkout=_source_checkout()) as recovered:
+        receipt = recovered.audit_receipt()
+        assert recovered.pending_boundary_requests == (request,)
+        assert receipt["legacy_completion_quarantine_count"] == 1
+        recovered.complete_boundary(
+            request.request_hash,
+            record=ExperienceRecord(
+                legacy_record.trajectory,
+                ExperiencePartition.BOUNDARY,
+                boundary_reason="bound candidate fall replay",
+                boundary_request_hash=request.request_hash,
+            ),
+        )
+
+    with ExperienceService(tmp_path, source_checkout=_source_checkout()) as recovered_again:
+        assert recovered_again.pending_boundary_requests == ()
+        assert recovered_again.audit_receipt()["legacy_completion_quarantine_count"] == 1
+
+
+def test_rollout_rejects_trajectory_from_another_scenario(tmp_path: Path) -> None:
+    parent, _ = policy(0)
+    service = RolloutService(tmp_path, source_checkout=_source_checkout())
+    assignment = service.assign(
+        episode_id="kick-scenario-boundary",
+        scenario_commitment=digest("assigned-scenario"),
+        policy=parent,
+    )
+    service.start(assignment.assignment_id, worker_id="sim-worker-0")
+
+    with pytest.raises(ValueError, match="scenario"):
+        service.complete(
+            assignment.assignment_id,
+            trajectory=trajectory(parent, episode=assignment.episode_id),
+        )
 
 
 def test_experience_recovery_rejects_corrupted_catalog_row(tmp_path: Path) -> None:
