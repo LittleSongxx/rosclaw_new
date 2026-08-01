@@ -732,11 +732,64 @@ def _detector_hash(thresholds: MotionDecodeAuditThresholds) -> str:
     )
 
 
+def clean_motiondecode_spans(
+    episode: CanonicalMotionEpisode,
+    *,
+    joint_lower: np.ndarray,
+    joint_upper: np.ndarray,
+    minimum_frames: int = 32,
+) -> tuple[tuple[int, int], ...]:
+    """Return half-open, physically continuous spans for representation learning.
+
+    This does not repair or relabel frames.  It excludes reset boundaries,
+    non-unit quaternions, joint-limit excursions, and implausible derivatives,
+    so a long clip can contribute clean windows without teaching a learner its
+    capture discontinuities.
+    """
+
+    frame_count = int(episode.time.shape[0])
+    if minimum_frames < 2:
+        raise ValueError("clean MotionDecode span must contain at least two frames")
+    lower = np.asarray(joint_lower, dtype=np.float64)
+    upper = np.asarray(joint_upper, dtype=np.float64)
+    if lower.shape != upper.shape or lower.shape != (episode.joint_position.shape[1],):
+        raise ValueError("clean MotionDecode span joint limits do not match the episode")
+    quaternion_error = np.abs(np.linalg.norm(episode.root_quaternion, axis=1) - 1.0)
+    in_limits = np.all(
+        (episode.joint_position >= lower - 1e-4)
+        & (episode.joint_position <= upper + 1e-4),
+        axis=1,
+    )
+    frame_valid = (quaternion_error <= 0.02) & in_limits
+    root_step_speed = (
+        np.linalg.norm(np.diff(episode.root_position, axis=0), axis=1) * episode.sample_rate_hz
+    )
+    joint_step_speed = (
+        np.max(np.abs(np.diff(episode.joint_position, axis=0)), axis=1)
+        * episode.sample_rate_hz
+    )
+    edge_valid = (root_step_speed <= 8.0) & (joint_step_speed <= 25.0)
+    spans: list[tuple[int, int]] = []
+    start: int | None = None
+    for frame in range(frame_count):
+        valid = bool(frame_valid[frame]) and (frame == 0 or bool(edge_valid[frame - 1]))
+        if valid and start is None:
+            start = frame
+        if not valid and start is not None:
+            if frame - start >= minimum_frames:
+                spans.append((start, frame))
+            start = None
+    if start is not None and frame_count - start >= minimum_frames:
+        spans.append((start, frame_count))
+    return tuple(spans)
+
+
 __all__ = [
     "MotionDecodeRepairReport",
     "MotionDecodeRepairResult",
     "MotionRepairDisposition",
     "SegmentationRepairManifest",
+    "clean_motiondecode_spans",
     "repair_motiondecode_snapshot",
     "replay_segmentation_repair",
 ]

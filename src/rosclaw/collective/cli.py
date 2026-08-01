@@ -7,7 +7,7 @@ import json
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from rosclaw.collective.contracts import LicenseDecision, LicenseUse
 from rosclaw.continual.services.persistence import atomic_write_json
@@ -24,7 +24,7 @@ def dispatch_collective_argv(argv: list[str]) -> int | None:
     args = _parser().parse_args(argv[1:])
     try:
         return int(args.handler(args))
-    except (OSError, ValueError, KeyError, PermissionError) as exc:
+    except (OSError, RuntimeError, ValueError, KeyError, PermissionError) as exc:
         _print(
             {
                 "schema_version": "rosclaw.collective.cli_error.v1",
@@ -143,6 +143,55 @@ def _parser() -> argparse.ArgumentParser:
     qualify.add_argument("--source-checkout", type=Path, default=Path.cwd())
     qualify.add_argument("--force", action="store_true")
     qualify.set_defaults(handler=_qualify)
+
+    prior = commands.add_parser(
+        "prior",
+        help="build and train a self-supervised kinematic motion prior",
+    )
+    prior_commands = prior.add_subparsers(dest="prior_command", required=True)
+
+    prior_build = prior_commands.add_parser(
+        "build",
+        help="build a bounded audited tensor pack from an ingest report",
+    )
+    prior_build.add_argument("adapter", choices=["motiondecode"])
+    prior_build.add_argument("--registration", type=Path, required=True)
+    prior_build.add_argument("--ingest-report", type=Path, required=True)
+    prior_build.add_argument("--dataset-root", type=Path, required=True)
+    prior_build.add_argument("--target-model", type=Path, required=True)
+    prior_build.add_argument("--output", type=Path, required=True)
+    prior_build.add_argument("--sequence-length", type=int, default=32)
+    prior_build.add_argument("--maximum-windows", type=int, default=12_000)
+    prior_build.add_argument("--seed", type=int, default=20260801)
+    prior_build.add_argument(
+        "--stratum",
+        action="append",
+        choices=[
+            "football",
+            "balance",
+            "gait",
+            "transition_recovery",
+            "other",
+        ],
+    )
+    prior_build.add_argument("--source-checkout", type=Path, default=Path.cwd())
+    prior_build.add_argument("--force", action="store_true")
+    prior_build.set_defaults(handler=_prior_build)
+
+    prior_train = prior_commands.add_parser(
+        "train",
+        help="train four independent physical-GPU representation candidates",
+    )
+    prior_train.add_argument("adapter", choices=["motiondecode"])
+    prior_train.add_argument("--pack", type=Path, required=True)
+    prior_train.add_argument("--output-dir", type=Path, required=True)
+    prior_train.add_argument("--epochs", type=int, default=10)
+    prior_train.add_argument("--hidden-dim", type=int, default=96)
+    prior_train.add_argument("--batch-size", type=int, default=256)
+    prior_train.add_argument("--base-seed", type=int, default=8200)
+    prior_train.add_argument("--source-checkout", type=Path, default=Path.cwd())
+    prior_train.add_argument("--force", action="store_true")
+    prior_train.set_defaults(handler=_prior_train)
     return parser
 
 
@@ -429,6 +478,109 @@ def _qualify(args: argparse.Namespace) -> int:
         }
     )
     return 0 if report.q3_count > 0 else 1
+
+
+def _prior_build(args: argparse.Namespace) -> int:
+    try:
+        from rosclaw.collective.sources.motiondecode.motion_prior import (
+            build_motion_prior_pack,
+        )
+    except ModuleNotFoundError as exc:
+        _raise_missing_rl_extra(exc)
+
+    output = _output_path(args.output, args.source_checkout, force=args.force)
+    if output.exists() and args.force:
+        output.unlink()
+    sidecar = output.with_suffix(".json")
+    if sidecar.exists() and args.force:
+        sidecar.unlink()
+    registration = _read_registration(args.registration)
+    metadata = build_motion_prior_pack(
+        registration=registration,
+        ingest_report_path=args.ingest_report,
+        dataset_root=args.dataset_root,
+        model_path=args.target_model,
+        output_path=output,
+        sequence_length=args.sequence_length,
+        maximum_windows=args.maximum_windows,
+        seed=args.seed,
+        allowed_strata=tuple(args.stratum) if args.stratum else None,
+    )
+    _print(
+        {
+            "schema_version": "rosclaw.collective.prior_build_receipt.v1",
+            "ok": True,
+            "output": str(output),
+            "pack_hash": metadata["pack_hash"],
+            "registration_hash": metadata["registration_hash"],
+            "ingest_report_hash": metadata["ingest_report_hash"],
+            "source_manifest_hash": metadata["source_manifest_hash"],
+            "body_hash": metadata["body_hash"],
+            "feature_count": len(metadata["feature_names"]),
+            "sequence_length": metadata["sequence_length"],
+            "training_windows": metadata["training_windows"],
+            "validation_windows": metadata["validation_windows"],
+            "source_episode_count": metadata["source_episode_count"],
+            "allowed_strata": metadata["allowed_strata"],
+            "skipped_clip_count": len(metadata["skipped_clips"]),
+            "action_semantics": metadata["action_semantics"],
+            "raw_data_exported": metadata["raw_data_exported"],
+            "training_eligible": False,
+            "activation_authorized": False,
+            "hardware_authorized": False,
+        }
+    )
+    return 0
+
+
+def _prior_train(args: argparse.Namespace) -> int:
+    try:
+        from rosclaw.collective.sources.motiondecode.motion_prior import (
+            run_four_gpu_motion_prior,
+        )
+    except ModuleNotFoundError as exc:
+        _raise_missing_rl_extra(exc)
+
+    output_dir = _output_path(args.output_dir, args.source_checkout, force=args.force)
+    if output_dir.exists() and args.force:
+        import shutil
+
+        shutil.rmtree(output_dir)
+    report = run_four_gpu_motion_prior(
+        pack_path=args.pack,
+        output_dir=output_dir,
+        epochs=args.epochs,
+        hidden_dim=args.hidden_dim,
+        batch_size=args.batch_size,
+        base_seed=args.base_seed,
+    )
+    passed = report["decision"] == "REPRESENTATION_CANDIDATE"
+    _print(
+        {
+            "schema_version": "rosclaw.collective.prior_train_receipt.v1",
+            "ok": passed,
+            "output_dir": str(output_dir),
+            "decision": report["decision"],
+            "four_physical_gpus_exercised": report["four_physical_gpus_exercised"],
+            "quality_gate": report["quality_gate"],
+            "selected": report["selected"],
+            "failure_count": len(report["failures"]),
+            "training_eligible": False,
+            "promotion_evidence_eligible": False,
+            "activation_authorized": False,
+            "hardware_authorized": False,
+        }
+    )
+    return 0 if passed else 2
+
+
+def _raise_missing_rl_extra(exc: ModuleNotFoundError) -> NoReturn:
+    if exc.name == "torch":
+        raise RuntimeError(
+            "Motion-prior build/train requires the optional RL dependencies; "
+            "install 'rosclaw[rl]'"
+        ) from exc
+    raise exc
 
 
 def _families(value: str) -> tuple[MotionFamily, ...]:

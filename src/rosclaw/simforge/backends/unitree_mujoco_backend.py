@@ -38,6 +38,11 @@ from rosclaw.simforge.g1_muscle_memory import (
     G1_MUSCLE_MEMORY_OBSERVATIONS,
     G1MuscleMemoryArtifact,
 )
+from rosclaw.simforge.g1_neural_torque import (
+    G1TorqueControlFrame,
+    G1TorquePolicy,
+    G1TorquePolicyReceipt,
+)
 from rosclaw.simforge.g1_recovery_state_memory import (
     G1_RECOVERY_STATE_OBSERVATIONS,
     G1RecoveryStateArtifact,
@@ -101,6 +106,7 @@ class GoalForgeEpisode:
     feedback_receipt: FeedbackReceipt | None = None
     feedforward_hash: str | None = None
     recovery_receipt: G1CerebellarRecoveryReceipt | None = None
+    torque_policy_receipt: G1TorquePolicyReceipt | None = None
 
     @property
     def result_hash(self) -> str:
@@ -268,7 +274,14 @@ class G1MuJoCoBackend:
         feedback_runtime: FeedbackRuntime | None = None,
         feedforward: ILCFeedforward | None = None,
         recovery_controller: G1CerebellarRecoveryController | None = None,
+        torque_policy: G1TorquePolicy | None = None,
     ) -> GoalForgeEpisode:
+        if torque_policy is not None and any(
+            value is not None for value in (feedback_runtime, feedforward, recovery_controller)
+        ):
+            raise ValueError(
+                "direct neural torque policy cannot be combined with target-space adapters"
+            )
         if (
             feedback_runtime is not None
             and feedback_runtime.spec.body_hash != self.qualification.body_hash
@@ -310,6 +323,7 @@ class G1MuJoCoBackend:
             feedback_runtime=feedback_runtime,
             feedforward=feedforward,
             recovery_controller=recovery_controller,
+            torque_policy=torque_policy,
         )
 
     def run_and_record(
@@ -405,6 +419,7 @@ class G1MuJoCoBackend:
         feedback_runtime: FeedbackRuntime | None = None,
         feedforward: ILCFeedforward | None = None,
         recovery_controller: G1CerebellarRecoveryController | None = None,
+        torque_policy: G1TorquePolicy | None = None,
     ) -> GoalForgeEpisode:
         import mujoco
 
@@ -417,6 +432,8 @@ class G1MuJoCoBackend:
             feedback_runtime.reset()
         if recovery_controller is not None:
             recovery_controller.reset()
+        if torque_policy is not None:
+            torque_policy.reset()
         _configure_scene(model, scenario)
         state = state_type(29)
         output = output_type(29)
@@ -611,6 +628,10 @@ class G1MuJoCoBackend:
             len(G1_MUSCLE_MEMORY_ACTIONS),
             dtype=np.float64,
         )
+        joint_limited = model.jnt_limited[1:30].astype(bool)
+        joint_ranges = np.asarray(model.jnt_range[1:30], dtype=np.float64)
+        joint_lower_limits = np.where(joint_limited, joint_ranges[:, 0], -1.0e6)
+        joint_upper_limits = np.where(joint_limited, joint_ranges[:, 1], 1.0e6)
 
         for frame in range(total_control_frames):
             recovery_observation_updated = False
@@ -824,6 +845,38 @@ class G1MuJoCoBackend:
                 raw_scale = float(np.max(np.abs(raw_torque) / hard_limits))
                 peak_torque_scale = max(peak_torque_scale, min(raw_scale, self.torque_guard_scale))
                 frame_torque = np.clip(raw_torque, -guarded_limits, guarded_limits)
+                if torque_policy is not None:
+                    parent_torque = frame_torque.copy()
+                    frame_torque = _apply_direct_torque_policy(
+                        policy=torque_policy,
+                        frame=G1TorqueControlFrame(
+                            joint_position=np.asarray(data.qpos[7:36], dtype=np.float64),
+                            joint_velocity=np.asarray(data.qvel[6:35], dtype=np.float64),
+                            joint_lower_limits=joint_lower_limits,
+                            joint_upper_limits=joint_upper_limits,
+                            torso_quaternion_wxyz=np.asarray(
+                                data.xquat[ids.torso], dtype=np.float64
+                            ),
+                            pelvis_position=np.asarray(data.qpos[:3], dtype=np.float64),
+                            ball_position=np.asarray(
+                                data.qpos[ids.ball_qpos : ids.ball_qpos + 3],
+                                dtype=np.float64,
+                            ),
+                            ball_velocity=np.asarray(
+                                data.qvel[ids.ball_qvel : ids.ball_qvel + 3],
+                                dtype=np.float64,
+                            ),
+                            target_y_m=scenario.target_y_m,
+                            target_z_m=scenario.target_z_m,
+                            policy_phase=policy_phase,
+                            left_contact=latest_left_support,
+                            right_contact=latest_right_support,
+                        ),
+                        parent_torque=parent_torque,
+                        guarded_limits=guarded_limits,
+                    )
+                    raw_scale = float(np.max(np.abs(frame_torque) / hard_limits))
+                    peak_torque_scale = max(peak_torque_scale, raw_scale)
                 torque_violation = torque_violation or bool(
                     np.any(np.abs(frame_torque) > hard_limits)
                 )
@@ -1066,6 +1119,12 @@ class G1MuJoCoBackend:
             if recovery_controller is not None
             else None
         )
+        receipt_builder = getattr(torque_policy, "build_receipt", None)
+        torque_policy_receipt = receipt_builder() if callable(receipt_builder) else None
+        if torque_policy_receipt is not None and not isinstance(
+            torque_policy_receipt, G1TorquePolicyReceipt
+        ):
+            raise ValueError("direct torque policy returned an invalid receipt")
         return GoalForgeEpisode(
             scenario=scenario,
             parameters=parameters,
@@ -1076,6 +1135,7 @@ class G1MuJoCoBackend:
             feedback_receipt=feedback_receipt,
             feedforward_hash=feedforward.trajectory_hash if feedforward is not None else None,
             recovery_receipt=recovery_receipt,
+            torque_policy_receipt=torque_policy_receipt,
         )
 
 
@@ -1128,6 +1188,26 @@ class _Contacts:
 class _FeedbackEffect:
     joint_residual: np.ndarray
     kick_phase_rate: float
+
+
+def _apply_direct_torque_policy(
+    *,
+    policy: G1TorquePolicy,
+    frame: G1TorqueControlFrame,
+    parent_torque: np.ndarray,
+    guarded_limits: np.ndarray,
+) -> np.ndarray:
+    """Apply a SIM-only torque callback behind the backend's final hard guard."""
+
+    try:
+        proposed = np.asarray(policy.command(frame, parent_torque), dtype=np.float64)
+        if proposed.shape != (29,) or not np.all(np.isfinite(proposed)):
+            raise ValueError("direct torque callback returned an invalid 29-vector")
+    except (ValueError, FloatingPointError):
+        proposed = parent_torque
+    applied = np.clip(proposed, -guarded_limits, guarded_limits)
+    policy.note_applied(applied)
+    return applied
 
 
 def _load_robonaldo(root: Path) -> tuple[Any, Any, Any, np.ndarray]:
