@@ -304,6 +304,7 @@ def test_sideways_reference_is_a_hard_q1_physics_failure(tmp_path: Path) -> None
         bundle.trace,
         target_model_path=G1_MODEL,
         scene_path=G1_SCENE,
+        license_decision=LicenseDecision.PERMITTED,
     )
 
     assert result.qualification is MotionQualificationLevel.Q1_KINEMATIC_ONLY
@@ -410,3 +411,25 @@ def test_cli_contact_receipt_contains_no_frame_level_labels(
     assert qualification_receipt["physics_step_count"] == 0
     assert qualification_receipt["q3_count"] == 0
     assert qualification_receipt["hardware_authorized"] is False
+
+
+def test_exported_qualify_entrypoint_requires_permitted_license(tmp_path: Path) -> None:
+    _dataset(tmp_path, frames=240)
+    registration, ingest, repair = _reports(tmp_path)
+    batch = infer_motiondecode_contact_batch(
+        registration,
+        tmp_path,
+        target_model_path=G1_MODEL,
+        expected_ingest_report_hash=ingest.report_hash,
+        expected_repair_report_hash=repair.report_hash,
+    )
+    bundle = batch.bundles[0]
+
+    with pytest.raises(ValueError, match="PERMITTED"):
+        qualify_canonical_motion(
+            bundle.episode,
+            bundle.trace,
+            target_model_path=G1_MODEL,
+            scene_path=G1_SCENE,
+            license_decision=LicenseDecision.PENDING,
+        )

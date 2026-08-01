@@ -331,7 +331,7 @@ class G1ContextualRecoveryPolicy:
                 [float(observation[name]) for name in G1_MUSCLE_MEMORY_OBSERVATIONS],
                 dtype=np.float64,
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return self._latch_fallback()
         if not np.all(np.isfinite(ordered)):
             return self._latch_fallback()

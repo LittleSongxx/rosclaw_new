@@ -188,6 +188,8 @@ def parse_motion_csv(
         time = matrix[:, 0].copy()
         implicit_timeline = False
         observed_steps = np.diff(time)
+        if not bool(np.all(observed_steps > 0)):
+            raise ValueError("explicit MotionDecode timeline is not strictly increasing")
         inferred_rate = 1.0 / float(np.median(observed_steps))
         if not math.isclose(inferred_rate, sample_rate_hz, rel_tol=0.02):
             raise ValueError("explicit MotionDecode timeline is not consistent with declared rate")
