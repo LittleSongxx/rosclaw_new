@@ -26,6 +26,12 @@ def main() -> int:
     if result is not None:
         return result
 
+    from rosclaw.collective.cli import dispatch_collective_argv
+
+    result = dispatch_collective_argv(sys.argv[1:])
+    if result is not None:
+        return result
+
     from rosclaw.dream.cli import dispatch_dream_argv
 
     result = dispatch_dream_argv(sys.argv[1:])
