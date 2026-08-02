@@ -1,0 +1,581 @@
+"""AgentService — the rosclaw-agentd application object (PR-NA-040).
+
+Assembles MissionStore + ContextCompiler + ModelGateway + AgentLoop from
+``AgentConfig``. Runs unprivileged; holds no hardware authority. Exposes a
+small local HTTP/WebSocket-free JSON API for the CLI and the console.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from datetime import UTC, datetime
+from pathlib import Path
+
+from pydantic import BaseModel as _BaseModel
+
+from rosclaw.agentd.config import AgentConfig
+from rosclaw.agentd.context.compiler import ContextCompiler
+from rosclaw.agentd.context.prompt_registry import load_prompt
+from rosclaw.agentd.context.sources import SourceBundle
+from rosclaw.agentd.loop import AgentLoop, LoopTurnResult
+from rosclaw.agentd.mission import MissionStore
+from rosclaw.agentd.models.gateway import (
+    ModelGateway,
+    ModelGatewayError,
+    ModelProbeResult,
+    OpenAICompatGateway,
+)
+from rosclaw.agentd.runtime_sources import (
+    ConfigConsentSource,
+    EmptyMemorySource,
+    SimBodySource,
+    SimSelfSource,
+    StaticCapabilitySource,
+)
+from rosclaw.agentd.tools import SIM_BODY_TOOL, SIM_STATE_TOOL, BuiltinToolRegistry
+from rosclaw.agentd.usage import UsageRecorder
+from rosclaw.contracts.agent.mission import (
+    BodyBinding,
+    ExecutionMode,
+    Goal,
+    MissionSessionV1,
+)
+from rosclaw.contracts.common import ValidationError
+
+AGENTD_DIR = "agentd"
+
+
+class RegistryOrgSource:
+    """L6 organization layer backed by the WorkerRegistry."""
+
+    def __init__(self, registry) -> None:
+        self._registry = registry
+
+    def get_org(self):
+        from rosclaw.agentd.context.sources import OrgFacts
+
+        lines = []
+        for card in self._registry.list():
+            status = self._registry.status_of(card.worker_id) or "UNKNOWN"
+            caps = ", ".join(c.name for c in card.capabilities)
+            lines.append(f"- {card.worker_id} [{card.kind.value}/{status}] capabilities: {caps}")
+        return OrgFacts(workers_summary="Registered workers:\n" + "\n".join(lines) if lines else "")
+
+
+class BrokerConsentSource:
+    """L7 consent layer bound to real grants (§5.5: grant 生效/撤销/过期
+    触发重编译——public hash 变化即触发）。"""
+
+    def __init__(self, base, conn) -> None:
+        self._base = base
+        self._conn = conn
+
+    @property
+    def policy_hash(self) -> str:
+        return self._base.policy_hash
+
+    def get_consent(self, mission_id: str):
+        import json as _json
+
+        from rosclaw.agentd.context.sources import ConsentFacts
+
+        facts = self._base.get_consent(mission_id)
+        row = self._conn.execute(
+            "SELECT public_json FROM mission_grants WHERE revoked = 0 "
+            "ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        grant_hash = None
+        if row is not None:
+            grant_hash = _json.loads(row["public_json"]).get("public_hash")
+        return ConsentFacts(
+            policy_hash=facts.policy_hash,
+            mission_grant_public_hash=grant_hash,
+            public_scope_summary=facts.public_scope_summary,
+            allowed_risk_tiers=facts.allowed_risk_tiers,
+        )
+
+
+class AgentService:
+    def __init__(
+        self,
+        config: AgentConfig,
+        rosclaw_home: Path,
+        *,
+        gateway: ModelGateway | None = None,
+    ) -> None:
+        self._config = config
+        self._home = rosclaw_home
+        db_dir = rosclaw_home / AGENTD_DIR
+        db_dir.mkdir(parents=True, exist_ok=True)
+        self._store = MissionStore(db_dir / "missions.db")
+        # Worker registry first: the context compiler's org layer reads it.
+        from rosclaw.agentd.handlers import ServiceIntentHandlers
+        from rosclaw.agentd.workers import NativeWorkerAdapter, WorkerManager, WorkerRegistry
+
+        self._registry = WorkerRegistry(self._store.connection)
+        self._registry.register_builtins(actor_id=self.actor_id)
+        self._body_source = SimBodySource(config.sim_body_id)
+        self._tools = BuiltinToolRegistry(
+            body_id=config.sim_body_id,
+            body_summary=self._body_source.get_body(config.sim_body_id).summary,  # type: ignore[union-attr]
+        )
+        tool_names = [SIM_STATE_TOOL, SIM_BODY_TOOL]
+        consent_source = ConfigConsentSource()
+        from rosclaw.operator import OperatorBroker
+
+        self._broker = OperatorBroker(
+            self._store.connection, policy_hash=consent_source.policy_hash
+        )
+        self._compiler = ContextCompiler(
+            SourceBundle(
+                constitution_text=load_prompt("native_agent_v1.md").text,
+                body=self._body_source,
+                self_source=SimSelfSource(),
+                capabilities=StaticCapabilitySource(tool_names),
+                memory=EmptyMemorySource(),
+                organization=RegistryOrgSource(self._registry),
+                consent=BrokerConsentSource(consent_source, self._store.connection),
+                runtime_status_summary="agentd local; rosclawd not required in SIMULATION",
+            ),
+            max_input_tokens=config.max_input_tokens,
+            dynamic_tool_limit=config.dynamic_tool_limit,
+        )
+        if gateway is not None:
+            self._gateway: ModelGateway = gateway
+        else:
+            policy = config.to_policy()
+            self._gateway = OpenAICompatGateway(policy.default)
+        self._prompt = load_prompt("native_agent_v1.md")
+        self._loops: dict[str, AgentLoop] = {}
+        self._lock = asyncio.Lock()
+        self._usage = UsageRecorder(self._store.connection)
+        self._worker_manager = WorkerManager(
+            self._store.connection,
+            adapters={"native_inproc": NativeWorkerAdapter(self._gateway)},
+            actor_id=self.actor_id,
+        )
+        body = self._body_source.get_body(config.sim_body_id)
+        self._handlers = ServiceIntentHandlers(
+            registry=self._registry,
+            manager=self._worker_manager,
+            actor_id=self.actor_id,
+            broker=self._broker,
+            body_hash=body.effective_body_hash if body else "",
+            mode=config.default_mode,
+        )
+        # Daemon action channel (K3): only if a rosclawd socket is actually
+        # reachable — otherwise request_action degrades honestly.
+        self._action_channel = None
+        daemon_socket = os.environ.get("ROSCLAW_DAEMON_SOCKET") or str(
+            rosclaw_home / "run" / "rosclawd.sock"
+        )
+        if Path(daemon_socket).exists():
+            from rosclaw.agentd.action_channel import DaemonActionChannel
+            from rosclaw.daemon.client import DaemonClient
+
+            self._action_channel = DaemonActionChannel(
+                DaemonClient(socket_path=daemon_socket),
+                actor_id=self.actor_id,
+                body_id=config.sim_body_id,
+                body_hash=body.effective_body_hash if body else "",
+            )
+            self._handlers._action_channel = self._action_channel
+        # Team Fabric: enabled via config `team.enabled`. Local coordinator
+        # in P0 (local_sim); ROS 2/Zenoh transports are later PRs.
+        team_cfg = (config.raw.get("team") or {}) if config.raw else {}
+        if team_cfg.get("enabled"):
+            from rosclaw.team import TeamCoordinator
+
+            self._team_coordinator = TeamCoordinator(
+                self._store.connection,
+                team_id=str(team_cfg.get("team_id", "default_team")),
+                actor_id=self.actor_id,
+                policy_hash=consent_source.policy_hash,
+            )
+            self._handlers._team_coordinator = self._team_coordinator
+        else:
+            self._team_coordinator = None
+
+    # ------------------------------------------------------------------
+    @property
+    def store(self) -> MissionStore:
+        return self._store
+
+    @property
+    def actor_id(self) -> str:
+        safe = self._config.sim_body_id.replace("/", "_")
+        return f"agent:rosclaw-native:{safe}"
+
+    def _loop_for(self, mission_id: str) -> AgentLoop:
+        loop = self._loops.get(mission_id)
+        if loop is None:
+            loop = AgentLoop(
+                store=self._store,
+                compiler=self._compiler,
+                gateway=self._gateway,
+                prompt=self._prompt,
+                tools=self._tools,
+                handlers=self._handlers,
+                actor_id=self.actor_id,
+                max_tool_rounds=self._config.max_tool_rounds,
+                usage_recorder=self._usage,
+            )
+            self._loops[mission_id] = loop
+        return loop
+
+    # ------------------------------------------------------------------
+    def create_mission(
+        self,
+        goal_text: str,
+        *,
+        mode: str | None = None,
+        owner_principal: str = "user:local:1000",
+    ) -> MissionSessionV1:
+        requested_mode = ExecutionMode(mode or self._config.default_mode)
+        if requested_mode is not ExecutionMode.SIMULATION:
+            # --mode REAL is a *request*; enumerate the missing prerequisites
+            # instead of silently downgrading or upgrading (总纲 §8.2).
+            gaps = [
+                "no MissionGrant issued (Operator Broker not enabled)",
+                "no real body linked and verified (RobotPack + calibration)",
+                "rosclawd REAL executor not configured",
+            ]
+            raise ValidationError(
+                f"mode {requested_mode.value} requested but prerequisites are missing: "
+                + "; ".join(gaps)
+            )
+        body = self._body_source.get_body(self._config.sim_body_id)
+        assert body is not None
+        return self._store.create_mission(
+            owner_principal=owner_principal,
+            goal=Goal(text=goal_text, language=self._config.language),
+            body_binding=BodyBinding(
+                body_id=body.body_id, effective_body_hash=body.effective_body_hash
+            ),
+            mode=requested_mode,
+            actor_id=self.actor_id,
+        )
+
+    def list_missions(self) -> list[MissionSessionV1]:
+        return self._store.list_missions()
+
+    def get_mission(self, mission_id: str) -> MissionSessionV1 | None:
+        return self._store.get_mission(mission_id)
+
+    async def send_turn(self, mission_id: str, text: str, on_text_delta=None) -> LoopTurnResult:
+        mission = self._store.get_mission(mission_id)
+        if mission is None:
+            raise ValidationError(f"unknown mission {mission_id!r}")
+        async with self._lock:
+            loop = self._loop_for(mission_id)
+            return await loop.run_user_turn(
+                mission, text, now=datetime.now(UTC), on_text_delta=on_text_delta
+            )
+
+    def mission_usage(self, mission_id: str) -> dict:
+        return self._usage.mission_totals(mission_id)
+
+    def conversation(self, mission_id: str) -> list[dict]:
+        return self._store.conversation(mission_id)
+
+    async def cancel(self, mission_id: str) -> None:
+        loop = self._loops.get(mission_id)
+        if loop is not None:
+            loop.request_cancel()
+
+    # ------------------------------------------------------------------
+    # approvals (Operator Broker surface for CLI/console)
+    # ------------------------------------------------------------------
+    def pending_approvals(self, mission_id: str | None = None):
+        return self._broker.pending_requests(mission_id)
+
+    def decide_approval(self, request_id: str, *, principal: str, approve: bool):
+        return self._broker.decide(request_id, principal=principal, approve=approve)
+
+    def list_grants(self):
+        rows = self._store.connection.execute(
+            "SELECT public_json, revoked, consumed, expires_at FROM mission_grants "
+            "ORDER BY created_at DESC"
+        ).fetchall()
+        import json as _json
+
+        from rosclaw.contracts.operator.grant import MissionGrantV1
+
+        grants = []
+        for row in rows:
+            grant = MissionGrantV1(**_json.loads(row["public_json"]))
+            grants.append(
+                {
+                    "grant_id": grant.grant_id,
+                    "principal": grant.principal,
+                    "mode": grant.mode,
+                    "tier": grant.scope.tier,
+                    "risk_ceiling": grant.risk_ceiling,
+                    "revoked": bool(row["revoked"]),
+                    "consumed": bool(row["consumed"]),
+                    "expires_at": row["expires_at"],
+                    "public_hash": grant.public_hash,
+                }
+            )
+        return grants
+
+    def revoke_grant(self, grant_id: str, *, principal: str) -> None:
+        self._broker.revoke(grant_id, principal=principal)
+
+    # ------------------------------------------------------------------
+    async def probe(self) -> ModelProbeResult:
+        try:
+            return await self._gateway.probe()
+        except ModelGatewayError as exc:
+            return ModelProbeResult(reachable=False, error=f"{exc.kind}: {exc}")
+
+    def status(self) -> dict:
+        profile = self._gateway.profile
+        return {
+            "agent_enabled": self._config.enabled,
+            "default_mode": self._config.default_mode,
+            "profile": profile.name,
+            "provider": profile.provider,
+            "model": profile.model,
+            "base_url": profile.base_url,
+            "api_key_ref": profile.api_key_ref,
+            "missions": len(self._store.list_missions()),
+            "maturity": "experimental",
+        }
+
+    async def close(self) -> None:
+        await self._gateway.close()
+        self._store.close()
+
+
+# ----------------------------------------------------------------------
+# Local HTTP API (console + CLI clients). No domain state lives in the
+# HTTP layer; everything delegates to AgentService.
+# ----------------------------------------------------------------------
+class MissionCreate(_BaseModel):
+    goal: str
+    mode: str | None = None
+
+
+class TurnCreate(_BaseModel):
+    text: str
+
+
+class DecisionCreate(_BaseModel):
+    approve: bool
+    principal: str = "user:local:1000"
+
+
+def _turn_payload(result) -> dict:
+    return {
+        "mission_id": result.mission_id,
+        "reply": result.reply,
+        "state": result.state.value,
+        "tool_rounds": result.tool_rounds,
+        "model_turns": result.model_turns,
+        "tokens_used": result.tokens_used,
+        "degraded": result.degraded,
+    }
+
+
+def create_app(service: AgentService):
+    from fastapi import FastAPI, HTTPException
+    from fastapi.responses import HTMLResponse
+
+    app = FastAPI(title="rosclaw-agentd", version="0.1.0")
+
+    @app.get("/health")
+    async def health() -> dict:
+        return {"status": "ok", "service": "rosclaw-agentd"}
+
+    @app.get("/status")
+    async def status() -> dict:
+        return service.status()
+
+    @app.get("/probe")
+    async def probe() -> dict:
+        result = await service.probe()
+        return {
+            "reachable": result.reachable,
+            "models_visible": list(result.models_visible),
+            "expected_model_present": result.expected_model_present,
+            "chat_ok": result.chat_ok,
+            "tool_call_ok": result.tool_call_ok,
+            "error": result.error,
+        }
+
+    @app.post("/missions", status_code=201)
+    async def create_mission(payload: MissionCreate) -> dict:
+        try:
+            mission = service.create_mission(payload.goal, mode=payload.mode)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return mission.model_dump(mode="json")
+
+    @app.get("/missions")
+    async def list_missions() -> list[dict]:
+        return [m.model_dump(mode="json") for m in service.list_missions()]
+
+    @app.get("/missions/{mission_id}")
+    async def get_mission(mission_id: str) -> dict:
+        mission = service.get_mission(mission_id)
+        if mission is None:
+            raise HTTPException(status_code=404, detail="mission not found")
+        return mission.model_dump(mode="json")
+
+    @app.post("/missions/{mission_id}/turns")
+    async def send_turn(mission_id: str, payload: TurnCreate) -> dict:
+        try:
+            result = await service.send_turn(mission_id, payload.text)
+        except ValidationError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return _turn_payload(result)
+
+    @app.post("/missions/{mission_id}/turns/stream")
+    async def send_turn_stream(mission_id: str, payload: TurnCreate):
+        """SSE: text deltas as they arrive, then one final result event."""
+        import json as _json
+
+        from fastapi.responses import StreamingResponse
+
+        queue: asyncio.Queue[dict] = asyncio.Queue()
+
+        def on_delta(piece: str) -> None:
+            queue.put_nowait({"type": "delta", "text": piece})
+
+        async def run() -> None:
+            try:
+                result = await service.send_turn(mission_id, payload.text, on_delta)
+                queue.put_nowait({"type": "final", **_turn_payload(result)})
+            except Exception as exc:  # noqa: BLE001 - surfaced as SSE data
+                queue.put_nowait({"type": "error", "detail": str(exc)})
+            finally:
+                queue.put_nowait({"type": "eof"})
+
+        async def events():
+            task = asyncio.create_task(run())
+            try:
+                while True:
+                    event = await queue.get()
+                    if event["type"] == "eof":
+                        break
+                    yield f"data: {_json.dumps(event, ensure_ascii=False)}\n\n"
+            finally:
+                if not task.done():
+                    task.cancel()
+
+        return StreamingResponse(events(), media_type="text/event-stream")
+
+    @app.get("/missions/{mission_id}/usage")
+    async def mission_usage(mission_id: str) -> dict:
+        if service.get_mission(mission_id) is None:
+            raise HTTPException(status_code=404, detail="mission not found")
+        return service.mission_usage(mission_id)
+
+    @app.get("/missions/{mission_id}/conversation")
+    async def mission_conversation(mission_id: str) -> list[dict]:
+        if service.get_mission(mission_id) is None:
+            raise HTTPException(status_code=404, detail="mission not found")
+        return service.conversation(mission_id)
+
+    @app.post("/missions/{mission_id}/cancel")
+    async def cancel(mission_id: str) -> dict:
+        await service.cancel(mission_id)
+        return {"cancelled": True}
+
+    @app.get("/approvals/pending")
+    async def approvals_pending(mission_id: str | None = None) -> list[dict]:
+        return [r.model_dump(mode="json") for r in service.pending_approvals(mission_id)]
+
+    @app.post("/approvals/{request_id}/decide")
+    async def approvals_decide(request_id: str, payload: DecisionCreate) -> dict:
+        try:
+            grant = service.decide_approval(
+                request_id, principal=payload.principal, approve=payload.approve
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "approved": payload.approve,
+            "grant_id": grant.grant_id if grant else None,
+            "public_hash": grant.public_hash if grant else None,
+        }
+
+    @app.get("/grants")
+    async def grants_list() -> list[dict]:
+        return service.list_grants()
+
+    @app.post("/grants/{grant_id}/revoke")
+    async def grants_revoke(grant_id: str) -> dict:
+        try:
+            service.revoke_grant(grant_id, principal="user:local:1000")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {"revoked": True}
+
+    @app.get("/console", response_class=HTMLResponse)
+    async def console() -> str:
+        return _CONSOLE_HTML
+
+    return app
+
+
+_CONSOLE_HTML = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>ROSClaw Console</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:840px;margin:2rem auto;padding:0 1rem}
+#log{border:1px solid #ccc;border-radius:8px;padding:1rem;height:55vh;overflow:auto;white-space:pre-wrap}
+.row{display:flex;gap:.5rem;margin-top:1rem}
+input{flex:1;padding:.5rem}button{padding:.5rem 1rem}
+.meta{color:#666;font-size:.85em}
+.turn{margin:.4rem 0}.who{font-weight:600}
+.tool{color:#795e26;font-size:.85em}
+</style></head><body>
+<h2>ROSClaw Console <span class="meta" id="status"></span></h2>
+<div class="row"><input id="goal" placeholder="新 Mission 目标（SIMULATION）">
+<button onclick="createMission()">创建 Mission</button></div>
+<div id="log"></div>
+<div class="row"><input id="text" placeholder="对当前 Mission 说话…"
+ onkeydown="if(event.key==='Enter')send()"><button onclick="send()">发送</button></div>
+<script>
+let missionId = null;
+const logEl = () => document.getElementById('log');
+function add(cls, who, text){ const d=document.createElement('div');
+  d.className='turn'; d.innerHTML=`<span class="who ${cls}">${who}</span> `;
+  const s=document.createElement('span'); s.textContent=text; d.appendChild(s);
+  logEl().appendChild(d); logEl().scrollTop=logEl().scrollHeight; return s; }
+async function status(){ const r = await fetch('/status'); const s = await r.json();
+  document.getElementById('status').textContent =
+    `profile=${s.profile} model=${s.model} mode=${s.default_mode}`; }
+async function createMission(){
+  const goal = document.getElementById('goal').value; if(!goal) return;
+  const r = await fetch('/missions',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({goal})});
+  const m = await r.json();
+  if(r.status!==201){ add('meta','系统','创建失败: '+(m.detail||'')); return; }
+  missionId = m.mission_id; add('meta','系统',`mission ${missionId} 已创建（${m.mode}）`); }
+async function send(){
+  if(!missionId){ add('meta','系统','请先创建 Mission'); return; }
+  const t = document.getElementById('text'); const text = t.value; if(!text) return;
+  t.value=''; add('','你',text);
+  const span = add('','ROSClaw','');
+  const r = await fetch(`/missions/${missionId}/turns/stream`,{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+  const reader = r.body.getReader(); const dec = new TextDecoder(); let buf='';
+  while(true){ const {done, value} = await reader.read(); if(done) break;
+    buf += dec.decode(value, {stream:true});
+    const parts = buf.split('\\n\\n'); buf = parts.pop();
+    for(const p of parts){ const line = p.split('\\n').find(l=>l.startsWith('data: '));
+      if(!line) continue; const ev = JSON.parse(line.slice(6));
+      if(ev.type==='delta'){ span.textContent += ev.text;
+        logEl().scrollTop=logEl().scrollHeight; }
+      else if(ev.type==='final'){
+        if(!span.textContent && ev.reply) span.textContent = ev.reply;
+        add('meta','状态',`state=${ev.state} 工具轮次=${ev.tool_rounds} tokens=${ev.tokens_used}`
+          +(ev.degraded?` degraded=${ev.degraded}`:''));
+        const u = await (await fetch(`/missions/${missionId}/usage`)).json();
+        add('meta','用量',`累计 tokens=${u.total_tokens} 轮次=${u.model_turns} 成本(微单位)=${u.cost_microunits}`);}
+      else if(ev.type==='error'){ span.textContent = '错误: '+ev.detail; } } } }
+status();
+</script></body></html>"""

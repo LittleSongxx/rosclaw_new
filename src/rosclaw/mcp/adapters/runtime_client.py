@@ -799,6 +799,38 @@ class RuntimeClient:
             },
         }
 
+    async def defer_operator_action(
+        self,
+        prepared: PreparedOperatorAction,
+        *,
+        display: dict[str, Any] | None = None,
+        ttl_sec: float = 60.0,
+    ) -> dict[str, Any]:
+        """Create a pending exact action for a separate trusted Operator Broker."""
+
+        from rosclaw.daemon.permits import action_intent_hash
+
+        expected_hash = prepared.approval_request.get("action_intent_hash")
+        if action_intent_hash(prepared.action) != expected_hash:
+            raise MCPError(
+                "OPERATOR_PROPOSAL_INTENT_MISMATCH",
+                "Prepared action no longer matches its displayed operator proposal.",
+            )
+        try:
+            result = await asyncio.to_thread(
+                self._daemon_client.create_operator_proposal,
+                prepared.action,
+                display=dict(display or prepared.approval_request.get("display") or {}),
+                ttl_sec=ttl_sec,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._raise_daemon_error("defer_operator_action", exc)
+        return {
+            **self._action_result_metadata(result, "REAL"),
+            "permit_injected": False,
+            "permit_exposed": False,
+        }
+
     def _build_action(
         self,
         *,
@@ -914,6 +946,30 @@ class RuntimeClient:
         except Exception as exc:  # noqa: BLE001
             self._raise_daemon_error("get_action_status", exc)
         return self._action_result_metadata(result, "UNKNOWN")
+
+    async def get_approval_status(self, request_id: str) -> dict[str, Any]:
+        """Read one owned Operator Broker proposal without decision secrets."""
+
+        try:
+            result = await asyncio.to_thread(
+                self._daemon_client.get_operator_proposal,
+                request_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._raise_daemon_error("get_approval_status", exc)
+        return self._action_result_metadata(result, "REAL")
+
+    async def cancel_approval(self, request_id: str) -> dict[str, Any]:
+        """Cancel one owned pending proposal before an Operator decides it."""
+
+        try:
+            result = await asyncio.to_thread(
+                self._daemon_client.cancel_operator_proposal,
+                request_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._raise_daemon_error("cancel_approval", exc)
+        return self._action_result_metadata(result, "REAL")
 
     async def cancel_action(self, action_id: str) -> dict[str, Any]:
         """Cancel only before dispatch; active motion requires emergency_stop."""

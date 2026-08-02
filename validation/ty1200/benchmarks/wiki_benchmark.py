@@ -118,9 +118,16 @@ def answer_with_deepseek(question: str, chunks: list[dict], timeout: float = 120
         f"[{c['chunk_id']}] ({c['title']})\n{c['content'][:900]}" for c in chunks
     )
     prompt = (
-        "你是 ROSClaw Wiki 问答器。只能依据下面给定的知识片段回答，禁止使用片段之外的任何知识。"
-        "每个事实性论断必须用 [chunk_id] 形式引用来源片段。"
-        "如果片段不足以回答，只回答：\"证据不足\"，不要编造。\n\n"
+        "你是 ROSClaw Wiki 问答器。规则：\n"
+        "1. 只能依据下面给定的知识片段回答，禁止使用片段之外的任何知识。\n"
+        "2. **每一个**事实性句子都必须在该句末尾用 [chunk_id] 引用来源；"
+        "没有来源支撑的话一句也不要说。\n"
+        "3. 模型 ID、路径、端口、版本号必须**逐字符照抄**片段原文，禁止改写或更正。\n"
+        "4. 片段不足以回答时，只回答：\"证据不足\"，不要编造。\n\n"
+        "示例（格式示范）：\n"
+        "问：Embedding 跑在哪个端口？\n"
+        "答：Qwen3-Embedding-0.6B 运行在 127.0.0.1:8000 [ty1200_platform_README::19:0]，"
+        "Cosmos-Reason2-2B 运行在 127.0.0.1:8001 [ty1200_platform_README::19:0]。\n\n"
         f"知识片段：\n{context}\n\n问题：{question}\n回答："
     )
     try:

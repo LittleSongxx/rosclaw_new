@@ -1,0 +1,176 @@
+# ROSClaw Native Agent（rosclaw-agentd）
+
+> Maturity: **experimental**（ADR-0000）。这是 ROSClaw 自有的原生 Agent 进程：
+> 不依赖 Codex/Claude Code/OpenClaw 即可对话、规划、调用工具并完成 SIMULATION
+> 任务。物理执行边界仍唯一属于 `rosclawd`（ADR-0001/0006）。
+
+## 快速开始
+
+```bash
+# 1. 配置模型（只写 api_key_ref，不写真实密钥）
+export ROSCLAW_KIMI_API_KEY=sk-kimi-...        # Kimi Coding Plan
+# 或 export MOONSHOT_API_KEY=sk-...            # Moonshot 开放平台
+rosclaw agentd init --provider kimi-code       # 或 kimi-api / openai-compat / local
+
+# 2. 就绪检查（connectivity / models / chat / strict tool call 四项 probe）
+rosclaw agentd doctor                          # READY 或诚实的 MODEL_NOT_READY
+
+# 3. 对话（默认 SIMULATION）
+rosclaw chat
+rosclaw chat --goal "检查仿真身体状态"
+
+# 4. 本地 HTTP 服务 + Console
+rosclaw agentd start --port 8765
+#   http://127.0.0.1:8765/console   最小聊天 Console
+#   /health /status /probe /missions /missions/{id}/turns
+```
+
+`--mode REAL` 只是请求：缺 MissionGrant、真实身体、daemon REAL executor 时
+必须拒绝并列出缺口（fail closed）。
+
+## 架构落点
+
+| 模块 | 职责 |
+|---|---|
+| `rosclaw.contracts.{agent,worker,team}` | 版本化跨进程契约（schema v1 冻结） |
+| `rosclaw.agentd.mission` | MissionStore：SQLite WAL + event journal + revision CAS + 预算 + 会话 journal |
+| `rosclaw.agentd.context` | ContextCompiler：L0–L8 分层、确定性 hash、fail-closed freshness |
+| `rosclaw.agentd.models` | ModelPolicy/Gateway：Kimi K3 等 OpenAI 兼容端点，严格工具 schema，流式聚合 |
+| `rosclaw.agentd.decisions` | DecisionValidator：DecisionV1 绑定当前 context revision |
+| `rosclaw.agentd.loop` | AgentLoop：显式状态机、工具循环、预算、崩溃恢复、决策块流式过滤 |
+| `rosclaw.agentd.service` | AgentService + FastAPI 本地 API（含 SSE 流式 turn）+ 最小 Console |
+| `rosclaw.agentd.usage` | model_usage 持久化计量（每轮一行，聚合由查询计算） |
+
+## 模型层能力（PR-NA-030b，借鉴 picoclaw/zeroclaw/hermes/openharness）
+
+- **SSE 流式**：`OpenAICompatRuntime.invoke_stream` — `stream_options.include_usage`、
+  心跳注释、10MB 上限、60s 空闲 watchdog；tool_calls 按 index 增量聚合。
+- **错误三级分类**：HTTP status → kind（429→rate_limited、408→timeout、
+  401/403→auth_error、5xx→http_error、其他 4xx→invalid_response 不重试）；
+  指数退避 + jitter + 尊重 Retry-After（≤30s）。
+- **持久化计量**：`model_usage` 表（migration 003）记录每轮
+  prompt/completion/reasoning tokens、成本（profile 单价，微单位）、延迟、
+  request_id、context 绑定；成本计入 mission `monetary_microunits` 预算。
+- **流式 UX**：`rosclaw chat` 边到边输出 + 每轮/累计用量行；Console 经
+  `POST /missions/{id}/turns/stream`（SSE）实时渲染；DecisionV1 协议块
+  在流中被 `DecisionBlockFilter` 过滤，不打扰用户。
+- **会话连续性**：对话追加进 mission journal，重启后 `--mission` 恢复完整历史。
+
+已知未做（诚实清单）：跨 provider cooldown/failover 链、多 key 轮换、
+上下文 compaction（microcompact + LLM 摘要）——机制已在调研报告中选型
+（picoclaw cooldown、openharness 两级压缩），待后续阶段引入。
+
+## Worker Fabric（PR-WF-050/051/053，experimental）
+
+认知 Worker 是受管理的承包人，不是第二套主人（ADR-0003）。与
+`rosclaw.daemon.worker_manager`（硬件 adapter 子进程）完全分离。
+
+- **WorkerCardV1**：声明而非事实；注册校验 adapter/许可证/能力 schema/
+  数据范围/hard-forbidden scopes（`daemon_private_ledger`、
+  `physical_permits`、`raw_secrets`、`direct_hardware`）。
+- **WorkOrder 双轨生命周期**：`DRAFT→OFFERED→CLAIMED→RUNNING→SUBMITTED
+  →VERIFYING→ACCEPTED`；lease 超时 SUSPECT→EXPIRED；副作用任务先
+  reconcile 再谈重派（禁止盲目双发）；旧 lease 结果记 late 不接纳。
+- **调度两阶段**：硬过滤（能力/状态/隔离/副作用类/并发/许可证/熔断）
+  不过即拒，安全永不进入加权；评分 0.30C+0.20R+0.15A+0.10L+0.10K+
+  0.10P+0.05D，feature vector 与策略版本全部入 journal。
+- **验证**：identity 绑定、期望工件、secret 扫描、claim-证据绑定、
+  用量合理性、伪造成功（COMPLETED 无工件）——任一不过则 FAILED。
+- **native-basic（T3）**：同模型隔离子任务（独立 conversation、预算
+  envelope、P0 禁止再委派）；worker 输出永远是 proposal。
+- **CLI**：`rosclaw worker list|catalog|inspect|enable|disable`。
+
+K4 验收（live）：委派闭环 ACCEPTED 且全归因（offered→claimed→started→
+submitted→accepted）；密钥注入拒绝；work order 中 0 secret。
+
+## Operator Broker 与授权（PR-OP-060/061/062，experimental）
+
+取消"手动 arm daemon"，不等于取消授权（ADR-0006）。EXACT_ACTION 流程：
+
+```text
+Agent REQUEST_APPROVAL → Broker 生成 ActionDisplay 卡片 → mission 进入
+WAIT_APPROVAL → 用户 /approve <id>（chat）或 Console /approvals 决定 →
+Broker 签发 MissionGrant（public scope + public_hash；HMAC 私签只存
+broker 侧，永不进入模型上下文）→ Agent REQUEST_ACTION 引用 grant_id →
+Broker.verify 独立核验（principal/body hash/mode/risk/action_intent）→
+EXACT_ACTION 单次消费，重放即拒
+```
+
+攻击回归（全部拒绝并给出 reason_code）：unknown/revoked/expired/
+principal_mismatch/body_hash_changed/mode_mismatch/risk_above_ceiling/
+forged_grant/grant_consumed。CLI：`/approvals`、`/approve`、`/deny`；
+HTTP：`/approvals/pending`、`/approvals/{id}/decide`、`/grants`、
+`/grants/{id}/revoke`。
+
+K5 验收（live）：真实模型完成 请求授权→批准→授权验证→单次消费 闭环；
+SIMULATION 下诚实声明"无物理派发，非执行回执"。
+
+## Team Fabric（PR-TF-070/071/072/073 精简版，experimental）
+
+多机器人不是开多个聊天窗口（ADR-0004）。每台机器人是自治安全单元，
+团队分配是契约建议，本地 Native Agent + rosclawd 保留拒绝权。
+
+- **Membership**：CANDIDATE→JOINING→READY→SUSPECT→LOST/LEFT；加入/离开
+  提交 epoch；TTL sweep（超时直接 LOST）；epoch 使旧 award/lease 失效。
+- **RoleLeaseV1**：DB 级 CAS——每个 (team, epoch, conflict_key) 至多一个
+  ACTIVE lease；旧 epoch/非 READY holder 拒绝；过期/失联自动释放；
+  冲突执行保守 contest 策略。
+- **Contract Net allocator**（contract_net.v1）：announce → 本地可行性
+  硬门槛（capability_fit=1、deadline、risk）→ 确定性特征评分
+  （eta/energy/capability/risk/reliability/load/comms）→ award；
+  特征向量全部入 journal，不用模型投票。
+- **World model**：latest_valid merge、tombstone、时钟偏差超容忍拒绝融合、
+  epoch 不匹配拒绝；freshness 查询是行动前提。
+- **降级矩阵**（总纲 §10.8 已实现并测试）：成员失联→角色过期+任务
+  重新公告（不原地重复）；Coordinator 失联→不产新任务；epoch 不一致→
+  拒绝混合；时钟偏差→拒绝融合。
+- **Transport**：`local_sim`（延迟/丢包/分区故障注入，seed 确定性）；
+  ROS 2/DDS、Zenoh adapter 为后续 PR。
+- agentd 集成：config `team.enabled` 开启本地协调器；TEAM_COORDINATE →
+  team_task_claim 走真实分配；TEAM_COORDINATE 无 operation 被验证器
+  强制修复（missing_operation）。
+
+K6 验收：双机协作全生命周期（角色→共享世界→announce/bid/award/accept/
+complete+证据）+ 故障矩阵（失联/分区/Coordinator down/epoch 混乱）+
+live 模型协调。3v3 联赛基准（T-SIM-2/3）属 PR-TF-075 后续范围。
+
+## 评测与学习（PR-EV-080/081，experimental）
+
+- **Benchmark harness**（`rosclaw eval run`）：scenario × seed × 基线组
+  （A=native-only / B=native+workers），指标含 success rate、
+  unsupported-claim rate（目标 0）、tokens/cost、delegation accept rate；
+  产物落盘（每 run 一个 JSON + aggregate.json），同 seed 确定性。
+- **Learning pipeline**（`rosclaw learning`）：Practice 证据门——只有
+  measured/verified_receipt/curated 事实形成 Memory/Know/How/Auto 候选，
+  unverified/inferred 显式拒绝并记录；Darwin 晋升门 = 评测引用 + 人类
+  principal，任何代码路径不能自动晋升。
+
+## 审计修复记录（对照总纲逐项审计后）
+
+1. EXACT_ACTION verify 必须声明动作意图（broker 从批准卡片重算，不采信
+   模型自报）；2. broker 签名密钥随机持久化（不可由公开 policy_hash
+   推导）；3. 成员失联只重公告无副作用任务（team_tasks.side_effect_class）；
+4. world merge 严格 latest-valid（后到旧观测忽略并告警）；5. 预算超限
+   进入 WAIT_INPUT 且不执行决策（新增 PLAN/VALIDATE→WAIT_INPUT 边）。
+归因链补齐：decisions/context_manifests（含 prompt hash）/work_results
+落库、operator_events、transition trace_id。
+
+
+## Kimi K3 两个产品面（2026-08-01 实测）
+
+| 产品 | endpoint | 模型 | Key |
+|---|---|---|---|
+| Moonshot 开放平台 | `https://api.moonshot.cn/v1` | `kimi-k3` | `MOONSHOT_API_KEY` |
+| Kimi Code（Coding Plan） | `https://api.kimi.com/coding/v1` | `k3`（1M ctx）/ `k3-256k` | `ROSCLAW_KIMI_API_KEY`（sk-kimi-*） |
+
+两者 OpenAI 兼容、支持 strict tool call 与 `reasoning_effort`（low/high/max）。
+Key/额度不互通，firstboot 必须按 Key 类型匹配 endpoint。
+
+## 测试
+
+```bash
+pytest tests/agentd tests/contracts tests/architecture -q          # 单元/契约/不变量
+ROSCLAW_KIMI_API_KEY=... pytest tests/agentd/test_kimi_live.py -m integration  # K0–K3 实网验收
+```
+
+Live 测试无 fixture 替代：API 不可达即失败，不伪造成功；密钥只走环境变量。

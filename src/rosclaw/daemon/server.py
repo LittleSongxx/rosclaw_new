@@ -33,6 +33,11 @@ _ALLOWED_METHODS = frozenset(
         "runtime.recovery.acknowledge",
         "runtime.shutdown",
         "permit.issue",
+        "operator.proposal.create",
+        "operator.proposal.status",
+        "operator.proposal.cancel",
+        "operator.proposal.pending",
+        "operator.proposal.decide",
         "action.request",
         "action.status",
         "action.receipt",
@@ -350,6 +355,53 @@ class RosclawDaemon:
                     principal_id=_required_id(params, "principal_id"),
                     target_peer_uid=_required_int(params, "target_peer_uid"),
                     expires_in_sec=_required_number(params, "expires_in_sec"),
+                    reason=_required_id(params, "reason", max_length=1024),
+                    peer=peer,
+                ),
+                False,
+            )
+        if method == "operator.proposal.create":
+            display = params.get("display")
+            if not isinstance(display, dict):
+                raise ControlPlaneError("INVALID_ARGUMENT", "display must be an object")
+            return (
+                self.service.create_operator_proposal(
+                    _required_action(params),
+                    display=display,
+                    ttl_sec=_required_number(params, "ttl_sec"),
+                    peer=peer,
+                ),
+                False,
+            )
+        if method == "operator.proposal.status":
+            return (
+                self.service.get_operator_proposal(
+                    _required_id(params, "request_id"),
+                    peer,
+                ),
+                False,
+            )
+        if method == "operator.proposal.cancel":
+            return (
+                self.service.cancel_operator_proposal(
+                    _required_id(params, "request_id"),
+                    peer,
+                ),
+                False,
+            )
+        if method == "operator.proposal.pending":
+            return self.service.list_pending_operator_proposals(peer), False
+        if method == "operator.proposal.decide":
+            return (
+                self.service.decide_operator_proposal(
+                    _required_id(params, "request_id"),
+                    decision=_required_id(params, "decision", max_length=16),
+                    principal_id=_required_id(params, "principal_id"),
+                    challenge_nonce=_required_id(params, "challenge_nonce", max_length=256),
+                    action_intent_hash_value=_required_id(
+                        params, "action_intent_hash", max_length=80
+                    ),
+                    channel=_required_id(params, "channel", max_length=128),
                     reason=_required_id(params, "reason", max_length=1024),
                     peer=peer,
                 ),
