@@ -116,6 +116,7 @@ rosclaw-ur5-mcp = "rosclaw.mcp.ur5_server:main"
 rosclaw-mcp = "rosclaw.mcp.minimal_server:main"
 rosclaw-mcp-serve = "rosclaw.mcp.server:main"
 rosclawd = "rosclaw.daemon.cli:main"
+rosclaw-agentd = "rosclaw.agentd.cli:main"
 
 [project.entry-points."rosclaw.runtime_handlers"]
 rosclaw_builtin = "rosclaw.runtime.handlers"

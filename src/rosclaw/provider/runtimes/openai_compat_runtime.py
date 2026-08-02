@@ -51,6 +51,7 @@ class OpenAICompatRuntime(RuntimeAdapter):
         timeout_sec: float = 30.0,
         retries: int = 1,
         headers: dict[str, str] | None = None,
+        stream_idle_timeout_sec: float = 60.0,
     ):
         super().__init__(name, config={"endpoint": endpoint, "timeout": timeout_sec})
         if api_kind not in (_API_CHAT, _API_EMBEDDINGS):
@@ -66,6 +67,7 @@ class OpenAICompatRuntime(RuntimeAdapter):
         self.timeout_sec = timeout_sec
         self.retries = retries
         self.headers = headers or {}
+        self.stream_idle_timeout_sec = stream_idle_timeout_sec
         self._session = None
 
     async def start(self) -> None:
@@ -98,6 +100,133 @@ class OpenAICompatRuntime(RuntimeAdapter):
             return self._parse_embeddings_response(raw)
         return self._parse_chat_response(raw)
 
+    # ------------------------------------------------------------------
+    # Streaming (PR-NA-030b; SSE per picoclaw parseStreamResponse)
+    # ------------------------------------------------------------------
+    async def invoke_stream(self, payload: dict[str, Any]):
+        """Yield raw SSE chunk dicts of a streaming chat completion.
+
+        Requests ``stream_options.include_usage`` so the final chunks carry
+        token usage (hermes pattern). Yields parsed JSON chunk objects;
+        the caller aggregates text/tool_calls/usage. The literal ``[DONE]``
+        sentinel terminates the stream. Raises RuntimeAdapterError on
+        classified failures; retries happen only *before* the stream opens
+        (mid-stream retries would duplicate side effects).
+        """
+        self.ensure_started()
+        if self.api_kind != _API_CHAT:
+            raise RuntimeAdapterError(
+                "streaming is only supported for chat_completions", provider=self.name
+            )
+        path, body = self._build_chat_request(payload)
+        body = dict(body)
+        body["stream"] = True
+        body["stream_options"] = {"include_usage": True}
+        async for chunk in self._post_stream(path, body):
+            yield chunk
+
+    _SSE_MAX_BUFFER = 10 * 1024 * 1024  # picoclaw's 10MB cap
+
+    async def _post_stream(self, path: str, body: dict[str, Any]):
+        import aiohttp
+
+        if self._session is None:
+            raise RuntimeAdapterError("Session not initialized", provider=self.name)
+        url = f"{self.endpoint}{path}"
+        last_error: RuntimeAdapterError | None = None
+        for attempt in range(self.retries + 1):
+            try:
+                async with self._session.post(
+                    url,
+                    json=body,
+                    timeout=aiohttp.ClientTimeout(total=self.timeout_sec),
+                ) as resp:
+                    if resp.status >= 400:
+                        raise await self._http_error(resp, url)
+                    async for chunk in self._iter_sse(resp):
+                        yield chunk
+                    return
+            except RuntimeAdapterError as e:
+                last_error = e
+                if not self._is_retryable(e) or attempt >= self.retries:
+                    raise
+            except TimeoutError:
+                last_error = RuntimeAdapterError(
+                    f"Timeout calling {url} after {self.timeout_sec}s",
+                    provider=self.name,
+                    kind=RuntimeAdapterError.KIND_TIMEOUT,
+                )
+                if attempt >= self.retries:
+                    raise last_error from None
+            except OSError as e:
+                last_error = RuntimeAdapterError(
+                    f"Cannot reach {url}: {e}",
+                    provider=self.name,
+                    kind=RuntimeAdapterError.KIND_UNAVAILABLE,
+                )
+                if attempt >= self.retries:
+                    raise last_error from None
+            await self._sleep_before_retry(attempt, last_error)
+        raise last_error or RuntimeAdapterError(
+            "OpenAI-compatible stream failed", provider=self.name
+        )
+
+    async def _iter_sse(self, resp):
+        """SSE framing: blank-line separated events, ``data:`` payload lines,
+        ``:`` comment heartbeats, ``[DONE]`` terminator, idle watchdog."""
+        import json as _json
+
+        data_lines: list[str] = []
+        buffered = 0
+        async for raw_line in self._read_lines_with_idle_timeout(resp):
+            line = raw_line.rstrip("\r\n")
+            if line.startswith(":"):
+                continue  # heartbeat comment
+            if line == "":
+                if not data_lines:
+                    continue
+                data = "\n".join(data_lines)
+                data_lines = []
+                if data.strip() == "[DONE]":
+                    return
+                try:
+                    yield _json.loads(data)
+                except _json.JSONDecodeError as exc:
+                    raise RuntimeAdapterError(
+                        f"Malformed SSE data chunk: {data[:120]!r}",
+                        provider=self.name,
+                        kind=RuntimeAdapterError.KIND_INVALID_RESPONSE,
+                    ) from exc
+                continue
+            if line.startswith("data:"):
+                piece = line[5:].lstrip()
+                buffered += len(piece)
+                if buffered > self._SSE_MAX_BUFFER:
+                    raise RuntimeAdapterError(
+                        "SSE buffer exceeded 10MB",
+                        provider=self.name,
+                        kind=RuntimeAdapterError.KIND_INVALID_RESPONSE,
+                    )
+                data_lines.append(piece)
+
+    async def _read_lines_with_idle_timeout(self, resp):
+        idle = self.stream_idle_timeout_sec
+        while True:
+            try:
+                if idle:
+                    line = await asyncio.wait_for(resp.content.readline(), timeout=idle)
+                else:
+                    line = await resp.content.readline()
+            except TimeoutError as exc:
+                raise RuntimeAdapterError(
+                    f"SSE stream idle for {idle}s",
+                    provider=self.name,
+                    kind=RuntimeAdapterError.KIND_TIMEOUT,
+                ) from exc
+            if not line:
+                return
+            yield line.decode("utf-8", errors="replace")
+
     def _build_chat_request(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         inputs = payload.get("inputs") or {}
         constraints = payload.get("constraints") or {}
@@ -122,22 +251,39 @@ class OpenAICompatRuntime(RuntimeAdapter):
         body: dict[str, Any] = {"messages": messages}
         if self.model:
             body["model"] = self.model
-        for key in ("max_tokens", "temperature", "top_p", "stop", "seed",
-                    "repetition_penalty", "mm_processor_kwargs",
-                    "min_pixels", "max_pixels"):
+        for key in (
+            "max_tokens",
+            "temperature",
+            "top_p",
+            "stop",
+            "seed",
+            "repetition_penalty",
+            "mm_processor_kwargs",
+            "min_pixels",
+            "max_pixels",
+            # Tool use (PR-NA-030): strict JSON-schema tool definitions,
+            # choice and parallel-call control pass straight through.
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            # Structured output / vendor parameters (e.g. Kimi reasoning_effort).
+            "response_format",
+            "reasoning_effort",
+        ):
             if key in inputs:
                 body[key] = inputs[key]
             elif key in constraints:
                 body[key] = constraints[key]
+        # Vendor-specific extra parameters merged verbatim (capability map is
+        # owned by the caller's model profile, not hardcoded here).
+        extra = inputs.get("vendor_parameters") or constraints.get("vendor_parameters")
+        if isinstance(extra, dict):
+            body.update(extra)
         return "/chat/completions", body
 
-    def _build_embeddings_request(
-        self, payload: dict[str, Any]
-    ) -> tuple[str, dict[str, Any]]:
+    def _build_embeddings_request(self, payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         inputs = payload.get("inputs") or {}
-        text_input = (
-            inputs.get("input") or inputs.get("texts") or inputs.get("text") or ""
-        )
+        text_input = inputs.get("input") or inputs.get("texts") or inputs.get("text") or ""
         body: dict[str, Any] = {"input": text_input}
         if self.model:
             body["model"] = self.model
@@ -151,17 +297,22 @@ class OpenAICompatRuntime(RuntimeAdapter):
         if not choices:
             # An empty choices array is an invalid upstream response, never a
             # fabricated empty success (fail closed: invalid_response).
-            raise RuntimeAdapterError(
-                "OpenAI-compatible server returned an empty choices array"
-            )
+            raise RuntimeAdapterError("OpenAI-compatible server returned an empty choices array")
         message = choices[0].get("message") or {}
         content = message.get("content") or ""
         finish_reason = choices[0].get("finish_reason")
+        # Preserve the complete assistant message (including tool_calls and
+        # provider reasoning fields) for protocol continuity in tool loops,
+        # plus a normalized tool_call view. ``id``/request id is kept for
+        # diagnosis and must be redacted before public traces.
         return {
             "result": content,
             "model": raw.get("model", ""),
             "finish_reason": finish_reason,
             "usage": raw.get("usage") or {},
+            "message": message,
+            "tool_calls": message.get("tool_calls") or [],
+            "request_id": raw.get("id"),
         }
 
     @staticmethod
@@ -170,9 +321,7 @@ class OpenAICompatRuntime(RuntimeAdapter):
         vectors = [item.get("embedding") for item in data]
         vectors = [v for v in vectors if v is not None]
         if not vectors:
-            raise RuntimeAdapterError(
-                "OpenAI-compatible server returned no embedding vectors"
-            )
+            raise RuntimeAdapterError("OpenAI-compatible server returned no embedding vectors")
         dimension = len(vectors[0])
         result: Any = vectors[0] if len(vectors) == 1 else vectors
         return {
@@ -201,9 +350,8 @@ class OpenAICompatRuntime(RuntimeAdapter):
                 return await self._post_with_retries(path, body)
             except RuntimeAdapterError as e:
                 last_error = e
-                is_model_not_found = (
-                    e.kind == RuntimeAdapterError.KIND_HTTP_ERROR
-                    and "404" in str(e)
+                is_model_not_found = e.kind == RuntimeAdapterError.KIND_HTTP_ERROR and "404" in str(
+                    e
                 )
                 if mi + 1 < len(model_chain) and is_model_not_found:
                     continue
@@ -213,6 +361,64 @@ class OpenAICompatRuntime(RuntimeAdapter):
             f"OpenAI-compatible invoke failed: {last_error}",
             provider=self.name,
         )
+
+    # ------------------------------------------------------------------
+    # Error classification (picoclaw error_classifier pattern):
+    # type layer → HTTP status → message keywords. Retry only what is
+    # retryable; honor Retry-After (capped); exponential backoff + jitter.
+    # ------------------------------------------------------------------
+    RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+    MAX_RETRY_AFTER_SEC = 30.0
+
+    async def _http_error(self, resp, url: str) -> RuntimeAdapterError:
+        status = resp.status
+        try:
+            preview = await resp.text()
+        except Exception:  # noqa: BLE001
+            preview = ""
+        retry_after = 0.0
+        raw_ra = resp.headers.get("Retry-After") if resp.headers else None
+        if raw_ra:
+            try:
+                retry_after = min(float(raw_ra), self.MAX_RETRY_AFTER_SEC)
+            except ValueError:
+                retry_after = 0.0
+        if status == 429:
+            kind = "rate_limited"
+        elif status == 408:
+            kind = RuntimeAdapterError.KIND_TIMEOUT
+        elif status in (401, 403):
+            kind = "auth_error"
+        elif status >= 500:
+            kind = RuntimeAdapterError.KIND_HTTP_ERROR
+        else:
+            kind = RuntimeAdapterError.KIND_INVALID_RESPONSE
+        error = RuntimeAdapterError(
+            f"HTTP {status} from {url}: {preview[:200]}",
+            provider=self.name,
+            kind=kind,
+        )
+        error.status = status  # type: ignore[attr-defined]
+        error.retry_after = retry_after  # type: ignore[attr-defined]
+        return error
+
+    def _is_retryable(self, error: RuntimeAdapterError) -> bool:
+        status = getattr(error, "status", None)
+        if status is not None:
+            return status in self.RETRYABLE_STATUS
+        return error.kind in (
+            RuntimeAdapterError.KIND_TIMEOUT,
+            RuntimeAdapterError.KIND_UNAVAILABLE,
+            "rate_limited",
+        )
+
+    async def _sleep_before_retry(self, attempt: int, error: RuntimeAdapterError | None) -> None:
+        import random
+
+        retry_after = getattr(error, "retry_after", 0.0) if error else 0.0
+        backoff = min(0.5 * (2**attempt), self.MAX_RETRY_AFTER_SEC)
+        jitter = backoff * 0.25 * random.random()
+        await asyncio.sleep(max(retry_after, backoff + jitter))
 
     async def _post_with_retries(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         import aiohttp
@@ -226,39 +432,32 @@ class OpenAICompatRuntime(RuntimeAdapter):
                     json=body,
                     timeout=aiohttp.ClientTimeout(total=self.timeout_sec),
                 ) as resp:
+                    if resp.status >= 400:
+                        raise await self._http_error(resp, url)
                     try:
-                        resp_body = await resp.json()
+                        return await resp.json()
                     except Exception:  # noqa: BLE001 - classified below
                         try:
                             preview = (await resp.text())[:200]
                         except Exception:  # noqa: BLE001
                             preview = ""
-                        if resp.status >= 400:
-                            raise RuntimeAdapterError(
-                                f"HTTP {resp.status}: {preview}",
-                                provider=self.name,
-                                kind=RuntimeAdapterError.KIND_HTTP_ERROR,
-                            ) from None
                         raise RuntimeAdapterError(
                             f"Non-JSON response from {url}: {preview[:120]}",
                             provider=self.name,
                             kind=RuntimeAdapterError.KIND_INVALID_RESPONSE,
                         ) from None
-                    if resp.status >= 400:
-                        raise RuntimeAdapterError(
-                            f"HTTP {resp.status}: {resp_body}",
-                            provider=self.name,
-                            kind=RuntimeAdapterError.KIND_HTTP_ERROR,
-                        )
-                    return resp_body
             except RuntimeAdapterError as e:
                 last_error = e
+                if not self._is_retryable(e) or attempt >= self.retries:
+                    raise
             except TimeoutError:
                 last_error = RuntimeAdapterError(
                     f"Timeout calling {url} after {self.timeout_sec}s",
                     provider=self.name,
                     kind=RuntimeAdapterError.KIND_TIMEOUT,
                 )
+                if attempt >= self.retries:
+                    raise last_error from None
             except OSError as e:
                 # aiohttp.ClientConnectorError derives from OSError
                 # (via ClientOSError), as does builtin ConnectionError.
@@ -267,13 +466,14 @@ class OpenAICompatRuntime(RuntimeAdapter):
                     provider=self.name,
                     kind=RuntimeAdapterError.KIND_UNAVAILABLE,
                 )
+                if attempt >= self.retries:
+                    raise last_error from None
             except Exception as e:  # noqa: BLE001 - last-resort, unclassified
-                last_error = RuntimeAdapterError(
+                raise RuntimeAdapterError(
                     f"OpenAI-compatible invoke failed: {e}",
                     provider=self.name,
-                )
-            if attempt < self.retries:
-                await asyncio.sleep(0.5 * (attempt + 1))
+                ) from e
+            await self._sleep_before_retry(attempt, last_error)
 
         raise last_error or RuntimeAdapterError(
             "OpenAI-compatible invoke failed",
@@ -298,13 +498,14 @@ class OpenAICompatRuntime(RuntimeAdapter):
         try:
             async with self._session.get(
                 self.health_endpoint,
-                timeout=aiohttp.ClientTimeout(total=min(self.timeout_sec, 10.0)),
+                timeout=aiohttp.ClientTimeout(total=min(self.timeout_sec, 30.0)),
             ) as resp:
                 if resp.status >= 400:
                     return {"reachable": False, "error": f"HTTP {resp.status}"}
                 body = await resp.json()
         except Exception as e:  # noqa: BLE001 - health must not raise
-            return {"reachable": False, "error": str(e)}
+            # str(TimeoutError()) is "" — always emit a diagnosable class.
+            return {"reachable": False, "error": str(e) or type(e).__name__}
 
         served = [m.get("id", "") for m in (body.get("data") or [])]
         detail: dict[str, Any] = {"reachable": True, "served_models": served}
@@ -318,7 +519,6 @@ class OpenAICompatRuntime(RuntimeAdapter):
             detail["expected_model_present"] = any(s in candidates for s in served)
             if not detail["expected_model_present"]:
                 detail["expected_model_present_fuzzy"] = any(
-                    any(c and (c in s or s in c) for c in candidates)
-                    for s in served
+                    any(c and (c in s or s in c) for c in candidates) for s in served
                 )
         return detail
