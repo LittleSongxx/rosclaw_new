@@ -11,5 +11,6 @@
 | [0004](0004-team-fabric-planes-legacy-swarm.md) | Team Fabric 平面分离与 legacy swarm 冻结 | Accepted |
 | [0005](0005-embodied-context-compiler.md) | Embodied Context Compiler | Accepted |
 | [0006](0006-authorization-invariant-operator-broker.md) | 授权不变量与 Operator Broker / MissionGrant | Accepted |
+| [0007](0007-dual-layer-operator-consent.md) | 双层 Operator Consent 集成路径（agentd grants ↔ daemon proposals） | Accepted |
 
 依据文档：《ROSClaw Native Agent、Worker Fabric 与多机器人 Team Fabric 实施总纲 v1.0》（2026-08-01）。

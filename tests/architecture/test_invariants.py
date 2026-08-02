@@ -48,7 +48,13 @@ def _python_files(package: str) -> list[Path]:
     root = SRC / package
     if not root.exists():
         return []
-    return sorted(root.rglob("*.py"))
+    files = sorted(root.rglob("*.py"))
+    if package == "operator":
+        # The daemon-side consent plane (upstream protocol/store/cli) is
+        # trusted code by design — it may sit next to permit material. The
+        # cognitive-plane restriction applies to the agentd-side broker.
+        files = [f for f in files if f.name in ("broker.py", "__init__.py")]
+    return files
 
 
 def _imports_of(path: Path) -> list[str]:

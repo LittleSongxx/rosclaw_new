@@ -350,9 +350,7 @@ class OpenAICompatRuntime(RuntimeAdapter):
                 return await self._post_with_retries(path, body)
             except RuntimeAdapterError as e:
                 last_error = e
-                is_model_not_found = e.kind == RuntimeAdapterError.KIND_HTTP_ERROR and "404" in str(
-                    e
-                )
+                is_model_not_found = getattr(e, "status", None) == 404
                 if mi + 1 < len(model_chain) and is_model_not_found:
                     continue
                 raise
