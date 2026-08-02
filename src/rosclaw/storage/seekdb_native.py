@@ -77,7 +77,49 @@ def _require_pyseekdb():
             "pyseekdb is required for the native SeekDB backend. "
             "Install it with: pip install 'rosclaw[seekdb]' (or pip install pyseekdb)"
         ) from exc
+    _warn_on_unvalidated_pyseekdb(pyseekdb)
     return pyseekdb
+
+
+_warned_pyseekdb_version = False
+
+
+def _warn_on_unvalidated_pyseekdb(pyseekdb: Any) -> None:
+    """One-time startup warning when the SDK is outside the validated matrix.
+
+    pyseekdb 1.4.0 is known-incompatible with the embedded engine (broken
+    SQL generation).  We warn loudly at connect time instead of failing
+    later with opaque engine errors.
+    """
+    global _warned_pyseekdb_version
+    if _warned_pyseekdb_version:
+        return
+    _warned_pyseekdb_version = True
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            installed = version("pyseekdb")
+        except PackageNotFoundError:
+            return
+    except Exception:  # noqa: BLE001
+        return
+    validated = {"1.3.0"}
+    known_incompatible = {"1.4.0"}
+    if installed in known_incompatible:
+        logger.error(
+            "pyseekdb %s is KNOWN-INCOMPATIBLE with the embedded SeekDB engine "
+            "(broken SQL generation: __pk_increment syntax errors, empty "
+            "hybrid results). Downgrade: pip install pyseekdb==1.3.0",
+            installed,
+        )
+    elif installed not in validated:
+        logger.warning(
+            "pyseekdb %s is outside the validated version matrix (%s); "
+            "native SeekDB behaviour may drift silently",
+            installed,
+            "/".join(sorted(validated)),
+        )
 
 
 def _is_collection_not_found(exc: Exception) -> bool:
