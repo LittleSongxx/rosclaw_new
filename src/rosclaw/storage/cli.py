@@ -413,8 +413,10 @@ def _pyseekdb_compat_checks(
     matrix = {
         "validated": ["1.3.0"],
         "known_incompatible": {
-            "1.4.0": "embedded SQL generation broken (__pk_increment syntax "
-            "errors, empty hybrid_search results); use pyseekdb==1.3.0",
+            "1.4.0": "metadata-filtered search legs broken on embedded engine "
+            "(code=1064 __pk_increment, malformed FULL JOIN, code=1059 "
+            "identifier-too-long; unfiltered calls unaffected); "
+            "upstream: oceanbase/pyseekdb#251; use pyseekdb==1.3.0",
         },
     }
     try:
