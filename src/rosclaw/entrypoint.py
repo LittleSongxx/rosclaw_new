@@ -32,9 +32,27 @@ def main() -> int:
     if result is not None:
         return result
 
+    from rosclaw.collective.cli import dispatch_collective_argv
+
+    result = dispatch_collective_argv(sys.argv[1:])
+    if result is not None:
+        return result
+
+    from rosclaw.dream.cli import dispatch_dream_argv
+
+    result = dispatch_dream_argv(sys.argv[1:])
+    if result is not None:
+        return result
+
     from rosclaw.continual.cli import dispatch_continual_argv
 
     result = dispatch_continual_argv(sys.argv[1:])
+    if result is not None:
+        return result
+
+    from rosclaw.simforge.g1_muscle_memory_cli import dispatch_muscle_memory_argv
+
+    result = dispatch_muscle_memory_argv(sys.argv[1:])
     if result is not None:
         return result
 

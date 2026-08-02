@@ -19,15 +19,28 @@ imported from the repo src tree.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-REPO_SRC = "/home/nvidia/workspace/rosclaw/rosclaw_test/rosclaw/src"
+REPO_SRC = str(Path(__file__).resolve().parents[2] / "src")
 sys.path.insert(0, REPO_SRC)
-sys.path.insert(0, "/home/nvidia/workspace/rosclaw_rh56_real/rosclaw-rh56-runtime/src")
-sys.path.insert(0, "/home/nvidia/workspace/rosclaw/rosclaw_test/examples/rh56_rps/src")
+sys.path.insert(
+    0,
+    os.environ.get(
+        "ROSCLAW_RH56_RUNTIME_SRC",
+        "/home/nvidia/workspace/rosclaw_rh56_real/rosclaw-rh56-runtime/src",
+    ),
+)
+sys.path.insert(
+    0,
+    os.environ.get(
+        "ROSCLAW_RH56_RPS_SRC",
+        "/home/nvidia/workspace/rosclaw/rosclaw_test/examples/rh56_rps/src",
+    ),
+)
 
 RIGHT_BY_ID = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BG04LBR0-if00-port0"
 LEFT_BY_ID = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BG04LB62-if00-port0"

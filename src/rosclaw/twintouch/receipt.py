@@ -34,8 +34,20 @@ OUTCOME_STALE_OBSERVATION = "STALE_OBSERVATION"
 OUTCOME_TRANSPORT_FAILURE = "TRANSPORT_FAILURE"
 OUTCOME_RELEASE_FAILED = "RELEASE_FAILED"
 OUTCOME_THERMAL_ABORT = "THERMAL_ABORT"
+# Clearance phase never produced fresh separation evidence inside its
+# cycle budget (stale camera, or the pair never separated).
+OUTCOME_CLEARANCE_UNVERIFIED = "CLEARANCE_UNVERIFIED"
+# Bilateral target force rose but neither visual-near nor motion
+# response corroborated contact inside the candidate cycle budget.
+OUTCOME_UNCORROBORATED_FORCE = "UNCORROBORATED_FORCE"
+# SAFE_RESET found a hand off its declared start pose (or a joint angle
+# unreadable, so the pose cannot be verified).
+OUTCOME_POSTURE_MISMATCH = "POSTURE_MISMATCH"
 OUTCOME_PARTIAL_DISPATCH = "PARTIAL_DISPATCH"
 OUTCOME_ABORTED_BEFORE_DISPATCH = "ABORTED_BEFORE_DISPATCH"
+# Gateway success: both commands delivered inside the barrier window.
+# NOT a contact verdict — contact is the Contact Supervisor's call.
+OUTCOME_DISPATCHED = "DISPATCHED"
 
 
 def _all_outcomes() -> frozenset[str]:

@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
+from rosclaw.core.immutable import freeze
+
 logger = logging.getLogger("rosclaw.core.event_bus")
 
 try:
@@ -101,12 +103,17 @@ _global_bus_lock = threading.Lock()
 
 
 def get_global_event_bus() -> "EventBus":
-    """Return the singleton global EventBus instance."""
+    """Return the singleton global EventBus instance.
+
+    The shared bus runs hardened: subscriber payloads are read-only and a
+    stuck sync subscriber can only block a publish for a bounded time
+    before being timed out (and eventually circuit-broken off the bus).
+    """
     global _global_event_bus
     if _global_event_bus is None:
         with _global_bus_lock:
             if _global_event_bus is None:
-                _global_event_bus = EventBus()
+                _global_event_bus = EventBus(subscriber_timeout=5.0)
     return _global_event_bus
 
 
@@ -131,16 +138,49 @@ class EventBus:
         ))
     """
 
-    def __init__(self, normalize_topics: bool = True):
+    def __init__(
+        self,
+        normalize_topics: bool = True,
+        *,
+        freeze_payloads: bool = True,
+        subscriber_timeout: float | None = None,
+        max_timeouts_per_subscriber: int = 3,
+        priority_history_size: int = 1000,
+    ):
         self._subscribers: dict[str, list[Callable]] = {}
         self._async_subscribers: dict[str, list[Callable]] = {}
         self._max_history = 10000
-        self._event_history: deque[Event] = deque(maxlen=self._max_history)
+        self._event_history: deque[Event] = deque()
+        # High-priority events additionally land in a reserved lane so
+        # E-Stop/BLOCKED evidence survives a flood of low-priority traffic.
+        self._priority_history: deque[Event] = deque(maxlen=priority_history_size)
+        self._dropped_events = 0
         self._lock = threading.Lock()  # protects _subscribers, _async_subscribers, _event_history
         self._async_lock = asyncio.Lock()
         self._running = False
         self._event_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
         self._normalize_topics = normalize_topics
+        # Hardening knobs
+        self._freeze_payloads = freeze_payloads
+        self._subscriber_timeout = subscriber_timeout
+        self._max_timeouts = max_timeouts_per_subscriber
+        self._timeout_streaks: dict[int, int] = {}
+        self._isolation_pool: Any | None = None
+        if subscriber_timeout is not None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            self._isolation_pool = ThreadPoolExecutor(
+                max_workers=4, thread_name_prefix="rosclaw-bus-sub"
+            )
+        self._metrics: dict[str, Any] = {
+            "published": 0,
+            "delivered": 0,
+            "subscriber_errors": 0,
+            "subscriber_timeouts": 0,
+            "circuit_breaks": 0,
+            "dropped_events": 0,
+            "slowest": deque(maxlen=16),  # (latency_ms, callback_name, topic)
+        }
 
     def _norm(self, topic: str) -> str:
         """Normalize topic if normalization is enabled."""
@@ -252,25 +292,36 @@ class EventBus:
             if not event.parent_span_id:
                 event.parent_span_id = trace_context.parent_span_id or ""
 
-        # Store in history
+        # Store in history (manual trim so _max_history stays a live
+        # attribute callers may tune); high-priority events also land in
+        # the reserved lane so safety evidence is never pushed out.
         with self._lock:
             self._event_history.append(event)
             while len(self._event_history) > self._max_history:
                 self._event_history.popleft()
+                self._metrics["dropped_events"] += 1
+                self._dropped_events += 1
+            if event.priority in (EventPriority.CRITICAL, EventPriority.HIGH):
+                self._priority_history.append(event)
 
             # Snapshot subscribers under lock to avoid races during iteration
             subscribers_snapshot = {k: list(v) for k, v in self._subscribers.items()}
             async_subscribers_snapshot = {k: list(v) for k, v in self._async_subscribers.items()}
+
+        # Freeze the payload once: every subscriber sees the same immutable
+        # view, so no subscriber can alter what the others (or history) see.
+        if self._freeze_payloads:
+            event.payload = freeze(event.payload)
+            event.metadata = freeze(event.metadata)
+
+        self._metrics["published"] += 1
 
         # Call sync subscribers (exact + wildcard match)
         for topic_pattern, callbacks in subscribers_snapshot.items():
             if not self._topic_matches(topic_pattern, norm_topic):
                 continue
             for callback in callbacks:
-                try:
-                    callback(event)
-                except Exception as e:
-                    logger.warning(f"Error in sync subscriber for {event.topic}: {e}")
+                self._dispatch_sync(callback, event, norm_topic)
 
         # Schedule async subscribers (exact + wildcard match)
         for topic_pattern, callbacks in async_subscribers_snapshot.items():
@@ -280,7 +331,53 @@ class EventBus:
                 try:
                     asyncio.create_task(self._run_async_callback(callback, event))
                 except Exception as e:
+                    self._metrics["subscriber_errors"] += 1
                     logger.warning(f"Error scheduling async subscriber for {event.topic}: {e}")
+
+    def _dispatch_sync(self, callback: Callable, event: Event, topic: str) -> None:
+        """Run one sync subscriber with error isolation, optional timeout
+        isolation, circuit breaking, and metrics."""
+        name = getattr(callback, "__qualname__", repr(callback))
+        started = time.perf_counter()
+        try:
+            if self._isolation_pool is not None:
+                future = self._isolation_pool.submit(callback, event)
+                future.result(timeout=self._subscriber_timeout)
+            else:
+                callback(event)
+        except TimeoutError:
+            self._metrics["subscriber_timeouts"] += 1
+            logger.error(
+                "Subscriber %s timed out after %.1fs on %s",
+                name, self._subscriber_timeout or 0, topic,
+            )
+            self._circuit_check(callback, topic, name)
+            return
+        except Exception as e:
+            self._metrics["subscriber_errors"] += 1
+            logger.warning(f"Error in sync subscriber for {event.topic}: {e}")
+            return
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        self._metrics["delivered"] += 1
+        with self._lock:
+            self._timeout_streaks.pop(id(callback), None)
+        if elapsed_ms > 50.0:
+            self._metrics["slowest"].append((round(elapsed_ms, 1), name, topic))
+
+    def _circuit_check(self, callback: Callable, topic: str, name: str) -> None:
+        """Unsubscribe a callback that keeps timing out (poison subscriber)."""
+        with self._lock:
+            streak = self._timeout_streaks.get(id(callback), 0) + 1
+            self._timeout_streaks[id(callback)] = streak
+        if streak >= self._max_timeouts:
+            self.unsubscribe(topic, callback)
+            with self._lock:
+                self._timeout_streaks.pop(id(callback), None)
+            self._metrics["circuit_breaks"] += 1
+            logger.error(
+                "Subscriber %s circuit-broken off %s after %d consecutive timeouts",
+                name, topic, streak,
+            )
 
     async def _run_async_callback(
         self, callback: Callable[[Event], Coroutine], event: Event
@@ -288,7 +385,9 @@ class EventBus:
         """Run an async callback with error handling."""
         try:
             await callback(event)
+            self._metrics["delivered"] += 1
         except Exception as e:
+            self._metrics["subscriber_errors"] += 1
             logger.warning(f"Error in async subscriber for {event.topic}: {e}")
 
     async def publish_async(self, event: Event) -> None:
@@ -370,13 +469,25 @@ class EventBus:
                 set(list(self._subscribers.keys()) + list(self._async_subscribers.keys()))
             )
             history_size = len(self._event_history)
+            priority_history_size = len(self._priority_history)
             total_subscribers = sum(
                 len(self._subscribers.get(t, [])) + len(self._async_subscribers.get(t, []))
                 for t in topics
             )
+            slowest = sorted(self._metrics["slowest"], reverse=True)[:5]
         return {
             "topics": topics,
             "total_subscribers": total_subscribers,
             "history_size": history_size,
             "max_history": self._max_history,
+            "priority_history_size": priority_history_size,
+            "metrics": {
+                **{k: v for k, v in self._metrics.items() if k != "slowest"},
+                "slowest": slowest,
+            },
+            "hardening": {
+                "freeze_payloads": self._freeze_payloads,
+                "subscriber_timeout": self._subscriber_timeout,
+                "max_timeouts_per_subscriber": self._max_timeouts,
+            },
         }

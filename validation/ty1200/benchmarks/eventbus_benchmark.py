@@ -139,13 +139,26 @@ def case_slow_subscriber(bus: EventBus) -> dict:
     t = time.perf_counter()
     bus.publish(Event(topic="bench.slow", payload={}, source="bench"))
     blocked_s = time.perf_counter() - t
-    return {
+    result = {
         "status": "PASS",
         "publisher_blocked_s": round(blocked_s, 3),
         "finding": None if blocked_s < 0.01 else
         f"A slow sync subscriber blocks publish() inline ({blocked_s:.3f}s): "
         "head-of-line blocking exists; there is no worker queue or drop policy.",
     }
+
+    # Hardened profile: timeout isolation bounds the block.
+    hard = EventBus(subscriber_timeout=0.02)
+    hard.subscribe("bench.slow", slow)
+    t = time.perf_counter()
+    hard.publish(Event(topic="bench.slow", payload={}, source="bench"))
+    bounded_s = time.perf_counter() - t
+    result["hardened_blocked_s"] = round(bounded_s, 3)
+    if bounded_s < blocked_s / 2:
+        result["hardened_note"] = (
+            f"with subscriber_timeout the same slow subscriber blocks only "
+            f"{bounded_s:.3f}s (circuit-broken after repeat timeouts)")
+    return result
 
 
 def case_payload_mutation(bus: EventBus) -> dict:

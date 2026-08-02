@@ -20,6 +20,7 @@ from rosclaw.continual.services.persistence import (
     DurableEventLog,
     require_external_service_root,
 )
+from rosclaw.feedback.contracts import canonical_hash
 
 
 class ExperienceService:
@@ -38,6 +39,7 @@ class ExperienceService:
         self.store = ContinualExperienceStore(config)
         self._records: dict[str, ExperienceRecord] = {}
         self._boundary: dict[str, tuple[BoundaryReplayRequest, str | None]] = {}
+        self._legacy_completion_quarantine_count = 0
         self._database = sqlite3.connect(self.root / "catalog.sqlite3")
         self._database.execute("PRAGMA journal_mode=WAL")
         self._database.execute("PRAGMA synchronous=FULL")
@@ -91,11 +93,24 @@ class ExperienceService:
             raise ValueError("boundary completion requires a Boundary experience record")
         if not record.trajectory.strict_replay:
             raise ValueError("boundary completion requires strict replay")
+        _validate_boundary_completion(
+            request_hash=request_hash,
+            request=entry[0],
+            record=record,
+        )
         if record.record_hash not in self._records:
             self.append(record)
         event = self.log.append(
             "BOUNDARY_COMPLETED",
-            {"request_hash": request_hash, "record_hash": record.record_hash},
+            {
+                "request_hash": request_hash,
+                "request_commitment": entry[0].request_hash,
+                "record_hash": record.record_hash,
+                "completion_commitment": _boundary_completion_commitment(
+                    request_hash=request_hash,
+                    record_hash=record.record_hash,
+                ),
+            },
         )
         self._apply(event.kind, dict(event.payload))
 
@@ -124,6 +139,7 @@ class ExperienceService:
                 partition.value: count for partition, count in self.store.counts().items()
             },
             "pending_boundary_count": len(self.pending_boundary_requests),
+            "legacy_completion_quarantine_count": self._legacy_completion_quarantine_count,
             "registry_write_count": 0,
             "dds_opened": False,
             "hardware_authorized": False,
@@ -195,6 +211,30 @@ class ExperienceService:
             request, completed = self._boundary[request_hash]
             if completed is not None:
                 raise ValueError("append-only log completes a boundary request more than once")
+            expected_completion = _boundary_completion_commitment(
+                request_hash=request_hash,
+                record_hash=record_hash,
+            )
+            if (
+                payload.get("request_commitment") != request.request_hash
+                or payload.get("completion_commitment") != expected_completion
+            ):
+                # Pre-hardening completions cannot prove which queued request
+                # their record satisfied.  Keep the request pending and repair
+                # only the derived SQLite cache; immutable log truth is retained.
+                with self._database:
+                    self._database.execute(
+                        "UPDATE boundary_requests SET completed_record_hash=NULL "
+                        "WHERE request_hash=?",
+                        (request_hash,),
+                    )
+                self._legacy_completion_quarantine_count += 1
+                return
+            _validate_boundary_completion(
+                request_hash=request_hash,
+                request=request,
+                record=self._records[record_hash],
+            )
             with self._database:
                 self._database.execute(
                     "UPDATE boundary_requests SET completed_record_hash=? WHERE request_hash=?",
@@ -298,6 +338,45 @@ def _boundary_request(value: Mapping[str, Any]) -> BoundaryReplayRequest:
     if value.get("request_hash") != request.request_hash:
         raise ValueError("boundary replay request hash mismatch")
     return request
+
+
+def _validate_boundary_completion(
+    *,
+    request_hash: str,
+    request: BoundaryReplayRequest,
+    record: ExperienceRecord,
+) -> None:
+    if record.boundary_request_hash != request_hash:
+        raise ValueError("boundary completion record does not bind its request commitment")
+    trajectory = record.trajectory
+    first = trajectory.segments[0]
+    if first.episode_id != request.scenario_id:
+        raise ValueError("boundary completion episode does not match its request")
+    if first.regime_hash != request.scenario_commitment:
+        raise ValueError("boundary completion scenario commitment does not match its request")
+    if trajectory.policy.version_hash != request.candidate_policy_hash:
+        raise ValueError("boundary completion must replay the request's candidate policy")
+    cost_names = {
+        "fall": "fall",
+        "joint_limit": "joint_limit",
+        "torque_limit": "torque",
+    }
+    for signal in request.critical_signals:
+        cost_name = cost_names.get(signal)
+        if cost_name is None or not any(
+            getattr(segment.cost, cost_name) > 0.0 for segment in trajectory.segments
+        ):
+            raise ValueError(f"boundary completion does not reproduce critical signal: {signal}")
+
+
+def _boundary_completion_commitment(*, request_hash: str, record_hash: str) -> str:
+    return canonical_hash(
+        {
+            "schema_version": "rosclaw.continual.boundary_completion.v2",
+            "request_hash": request_hash,
+            "record_hash": record_hash,
+        }
+    )
 
 
 __all__ = ["ExperienceService"]

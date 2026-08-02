@@ -32,6 +32,21 @@ from rosclaw.simforge.g1_cerebellar_recovery import (
     G1CerebellarRecoveryReceipt,
     evaluate_g1_cerebellar_recovery_regime,
 )
+from rosclaw.simforge.g1_contextual_recovery import G1ContextualRecoveryArtifact
+from rosclaw.simforge.g1_muscle_memory import (
+    G1_MUSCLE_MEMORY_ACTIONS,
+    G1_MUSCLE_MEMORY_OBSERVATIONS,
+    G1MuscleMemoryArtifact,
+)
+from rosclaw.simforge.g1_neural_torque import (
+    G1TorqueControlFrame,
+    G1TorquePolicy,
+    G1TorquePolicyReceipt,
+)
+from rosclaw.simforge.g1_recovery_state_memory import (
+    G1_RECOVERY_STATE_OBSERVATIONS,
+    G1RecoveryStateArtifact,
+)
 from rosclaw.simforge.tasks.g1_goalforge.concepts import (
     G1_DDS_JOINT_NAMES,
     G1_HARD_TORQUE_LIMITS,
@@ -91,6 +106,7 @@ class GoalForgeEpisode:
     feedback_receipt: FeedbackReceipt | None = None
     feedforward_hash: str | None = None
     recovery_receipt: G1CerebellarRecoveryReceipt | None = None
+    torque_policy_receipt: G1TorquePolicyReceipt | None = None
 
     @property
     def result_hash(self) -> str:
@@ -216,6 +232,10 @@ class G1MuJoCoBackend:
         self,
         scenario: GoalForgeScenario,
         config: G1CerebellarRecoveryConfig | None = None,
+        muscle_memory_artifact: G1MuscleMemoryArtifact | None = None,
+        contextual_recovery_artifact: G1ContextualRecoveryArtifact | None = None,
+        recovery_state_artifact: G1RecoveryStateArtifact | None = None,
+        fallback_config: G1CerebellarRecoveryConfig | None = None,
     ) -> G1CerebellarRecoveryController:
         """Bind the recovery segment to the exact qualified Body and motion."""
 
@@ -240,6 +260,10 @@ class G1MuJoCoBackend:
             regime_reasons=regime_reasons,
             standing_pose=standing_pose,
             config=resolved,
+            muscle_memory_artifact=muscle_memory_artifact,
+            contextual_recovery_artifact=contextual_recovery_artifact,
+            recovery_state_artifact=recovery_state_artifact,
+            fallback_config=fallback_config,
         )
 
     def run(
@@ -250,7 +274,14 @@ class G1MuJoCoBackend:
         feedback_runtime: FeedbackRuntime | None = None,
         feedforward: ILCFeedforward | None = None,
         recovery_controller: G1CerebellarRecoveryController | None = None,
+        torque_policy: G1TorquePolicy | None = None,
     ) -> GoalForgeEpisode:
+        if torque_policy is not None and any(
+            value is not None for value in (feedback_runtime, feedforward, recovery_controller)
+        ):
+            raise ValueError(
+                "direct neural torque policy cannot be combined with target-space adapters"
+            )
         if (
             feedback_runtime is not None
             and feedback_runtime.spec.body_hash != self.qualification.body_hash
@@ -292,6 +323,7 @@ class G1MuJoCoBackend:
             feedback_runtime=feedback_runtime,
             feedforward=feedforward,
             recovery_controller=recovery_controller,
+            torque_policy=torque_policy,
         )
 
     def run_and_record(
@@ -387,6 +419,7 @@ class G1MuJoCoBackend:
         feedback_runtime: FeedbackRuntime | None = None,
         feedforward: ILCFeedforward | None = None,
         recovery_controller: G1CerebellarRecoveryController | None = None,
+        torque_policy: G1TorquePolicy | None = None,
     ) -> GoalForgeEpisode:
         import mujoco
 
@@ -399,6 +432,8 @@ class G1MuJoCoBackend:
             feedback_runtime.reset()
         if recovery_controller is not None:
             recovery_controller.reset()
+        if torque_policy is not None:
+            torque_policy.reset()
         _configure_scene(model, scenario)
         state = state_type(29)
         output = output_type(29)
@@ -502,8 +537,21 @@ class G1MuJoCoBackend:
                     "recovery_settling_fraction": [],
                     "recovery_smoothing_active": [],
                     "recovery_smoothing_residual_rms_rad": [],
+                    "recovery_proprioception": [],
+                    "recovery_policy_frame": [],
+                    "recovery_observation_updated": [],
+                    "recovery_state_observation": [],
                 }
             )
+            if recovery_controller.muscle_memory is not None:
+                trace.update(
+                    {
+                        "muscle_memory_active": [],
+                        "muscle_memory_out_of_distribution": [],
+                        "muscle_memory_residual_rms_rad": [],
+                        "muscle_memory_synergy_actions": [],
+                    }
+                )
         kick_support_anchor: np.ndarray | None = None
         peak_support_slip = 0.0
         com_margin_min = math.inf
@@ -555,14 +603,38 @@ class G1MuJoCoBackend:
         latest_support_slip = 0.0
         latest_left_support = False
         latest_right_support = False
+        latest_left_ground_force = 0.0
+        latest_right_ground_force = 0.0
         moving_ball_launched = scenario.ball_launch_delay_sec <= 0.0
         recovery_active = False
         recovery_blend_fraction = 0.0
         recovery_settling_fraction = 0.0
         recovery_smoothing_active = False
         recovery_smoothing_residual_rms_rad = 0.0
+        recovery_proprioception: np.ndarray = np.zeros(
+            len(G1_MUSCLE_MEMORY_OBSERVATIONS),
+            dtype=np.float64,
+        )
+        recovery_state_observation: np.ndarray = np.zeros(
+            len(G1_RECOVERY_STATE_OBSERVATIONS),
+            dtype=np.float64,
+        )
+        recovery_policy_frame = 0
+        recovery_observation_updated = False
+        muscle_memory_active = False
+        muscle_memory_out_of_distribution = False
+        muscle_memory_residual_rms_rad = 0.0
+        muscle_memory_synergy_actions: np.ndarray = np.zeros(
+            len(G1_MUSCLE_MEMORY_ACTIONS),
+            dtype=np.float64,
+        )
+        joint_limited = model.jnt_limited[1:30].astype(bool)
+        joint_ranges = np.asarray(model.jnt_range[1:30], dtype=np.float64)
+        joint_lower_limits = np.where(joint_limited, joint_ranges[:, 0], -1.0e6)
+        joint_upper_limits = np.where(joint_limited, joint_ranges[:, 1], 1.0e6)
 
         for frame in range(total_control_frames):
+            recovery_observation_updated = False
             if feedforward is not None:
                 feedforward_residual = feedforward.value_at(frame)
             _fill_state(state, model, data, ids)
@@ -612,6 +684,55 @@ class G1MuJoCoBackend:
                         policy_frame=policy_frame,
                     )
                     if recovery_controller is not None:
+                        current_phase = min(
+                            1.0,
+                            policy_frame / max(1, int(motion["joint_pos"].shape[0]) - 1),
+                        )
+                        proprioceptive_observation = _muscle_memory_observation(
+                            data=data,
+                            ids=ids,
+                            policy_phase=current_phase,
+                            contact_time=contact_time,
+                            contact_impulse=contact_impulse,
+                            left_support=latest_left_support,
+                            right_support=latest_right_support,
+                            left_ground_force=latest_left_ground_force,
+                            right_ground_force=latest_right_ground_force,
+                        )
+                        recovery_proprioception = np.asarray(
+                            [
+                                proprioceptive_observation[name]
+                                for name in G1_MUSCLE_MEMORY_OBSERVATIONS
+                            ],
+                            dtype=np.float64,
+                        )
+                        state_observation = {
+                            **proprioceptive_observation,
+                            "ball_relative_position_x_m": float(
+                                data.xpos[ids.ball][0] - data.qpos[0]
+                            ),
+                            "ball_relative_position_y_m": float(
+                                data.xpos[ids.ball][1] - data.qpos[1]
+                            ),
+                            "ball_relative_position_z_m": float(
+                                data.xpos[ids.ball][2] - data.qpos[2]
+                            ),
+                            "ball_relative_velocity_x_m_s": float(
+                                data.qvel[ids.ball_qvel] - data.qvel[0]
+                            ),
+                            "ball_relative_velocity_y_m_s": float(
+                                data.qvel[ids.ball_qvel + 1] - data.qvel[1]
+                            ),
+                            "ball_relative_velocity_z_m_s": float(
+                                data.qvel[ids.ball_qvel + 2] - data.qvel[2]
+                            ),
+                        }
+                        recovery_state_observation = np.asarray(
+                            [state_observation[name] for name in G1_RECOVERY_STATE_OBSERVATIONS],
+                            dtype=np.float64,
+                        )
+                        recovery_policy_frame = policy_frame
+                        recovery_observation_updated = True
                         recovery_effect = recovery_controller.adapt_target(
                             target=target,
                             policy_frame=policy_frame,
@@ -619,8 +740,30 @@ class G1MuJoCoBackend:
                             ball_contact_detected=contact_observed,
                             left_support=latest_left_support,
                             right_support=latest_right_support,
+                            muscle_memory_observation=(
+                                state_observation
+                                if recovery_controller.recovery_state is not None
+                                else (
+                                    proprioceptive_observation
+                                    if (
+                                        recovery_controller.muscle_memory is not None
+                                        or recovery_controller.contextual_recovery is not None
+                                    )
+                                    else None
+                                )
+                            ),
                         )
                         target = recovery_effect.target
+                        terminal_group = recovery_effect.terminal_damping_joint_group
+                        terminal_slice = {
+                            "whole_body": slice(None),
+                            "legs": slice(0, 12),
+                            "upper_body": slice(12, None),
+                        }[terminal_group]
+                        kp = kp.copy()
+                        kd = kd.copy()
+                        kp[terminal_slice] *= recovery_effect.terminal_kp_scale
+                        kd[terminal_slice] *= recovery_effect.terminal_kd_scale
                         recovery_active = recovery_effect.active
                         recovery_blend_fraction = recovery_effect.blend_fraction
                         recovery_settling_fraction = recovery_effect.settling_fraction
@@ -628,6 +771,17 @@ class G1MuJoCoBackend:
                         recovery_smoothing_residual_rms_rad = (
                             recovery_effect.smoothing_residual_rms_rad
                         )
+                        muscle_memory_active = recovery_effect.muscle_memory_active
+                        muscle_memory_out_of_distribution = (
+                            recovery_effect.muscle_memory_out_of_distribution
+                        )
+                        muscle_memory_residual_rms_rad = (
+                            recovery_effect.muscle_memory_residual_rms_rad
+                        )
+                        if recovery_effect.muscle_memory_synergy_actions.size:
+                            muscle_memory_synergy_actions = (
+                                recovery_effect.muscle_memory_synergy_actions
+                            )
                 else:
                     target = last_target.copy()
                     kp = np.asarray(policy.kps, dtype=np.float64)
@@ -691,6 +845,38 @@ class G1MuJoCoBackend:
                 raw_scale = float(np.max(np.abs(raw_torque) / hard_limits))
                 peak_torque_scale = max(peak_torque_scale, min(raw_scale, self.torque_guard_scale))
                 frame_torque = np.clip(raw_torque, -guarded_limits, guarded_limits)
+                if torque_policy is not None:
+                    parent_torque = frame_torque.copy()
+                    frame_torque = _apply_direct_torque_policy(
+                        policy=torque_policy,
+                        frame=G1TorqueControlFrame(
+                            joint_position=np.asarray(data.qpos[7:36], dtype=np.float64),
+                            joint_velocity=np.asarray(data.qvel[6:35], dtype=np.float64),
+                            joint_lower_limits=joint_lower_limits,
+                            joint_upper_limits=joint_upper_limits,
+                            torso_quaternion_wxyz=np.asarray(
+                                data.xquat[ids.torso], dtype=np.float64
+                            ),
+                            pelvis_position=np.asarray(data.qpos[:3], dtype=np.float64),
+                            ball_position=np.asarray(
+                                data.qpos[ids.ball_qpos : ids.ball_qpos + 3],
+                                dtype=np.float64,
+                            ),
+                            ball_velocity=np.asarray(
+                                data.qvel[ids.ball_qvel : ids.ball_qvel + 3],
+                                dtype=np.float64,
+                            ),
+                            target_y_m=scenario.target_y_m,
+                            target_z_m=scenario.target_z_m,
+                            policy_phase=policy_phase,
+                            left_contact=latest_left_support,
+                            right_contact=latest_right_support,
+                        ),
+                        parent_torque=parent_torque,
+                        guarded_limits=guarded_limits,
+                    )
+                    raw_scale = float(np.max(np.abs(frame_torque) / hard_limits))
+                    peak_torque_scale = max(peak_torque_scale, raw_scale)
                 torque_violation = torque_violation or bool(
                     np.any(np.abs(frame_torque) > hard_limits)
                 )
@@ -741,6 +927,8 @@ class G1MuJoCoBackend:
             latest_support_slip = support_slip
             latest_left_support = left_contact
             latest_right_support = right_contact
+            latest_left_ground_force = left_ground_force
+            latest_right_ground_force = right_ground_force
             com = data.subtree_com[ids.pelvis].copy()
             support_y = float(data.xpos[ids.left_ankle][1])
             com_margin = 0.11 - abs(float(com[1]) - support_y)
@@ -801,6 +989,14 @@ class G1MuJoCoBackend:
                     recovery_settling_fraction=recovery_settling_fraction,
                     recovery_smoothing_active=recovery_smoothing_active,
                     recovery_smoothing_residual_rms_rad=(recovery_smoothing_residual_rms_rad),
+                    recovery_proprioception=recovery_proprioception,
+                    recovery_policy_frame=recovery_policy_frame,
+                    recovery_observation_updated=recovery_observation_updated,
+                    recovery_state_observation=recovery_state_observation,
+                    muscle_memory_active=muscle_memory_active,
+                    muscle_memory_out_of_distribution=muscle_memory_out_of_distribution,
+                    muscle_memory_residual_rms_rad=muscle_memory_residual_rms_rad,
+                    muscle_memory_synergy_actions=muscle_memory_synergy_actions,
                 )
             if not finite:
                 break
@@ -837,6 +1033,14 @@ class G1MuJoCoBackend:
                 recovery_settling_fraction=recovery_settling_fraction,
                 recovery_smoothing_active=recovery_smoothing_active,
                 recovery_smoothing_residual_rms_rad=recovery_smoothing_residual_rms_rad,
+                recovery_proprioception=recovery_proprioception,
+                recovery_policy_frame=recovery_policy_frame,
+                recovery_observation_updated=recovery_observation_updated,
+                recovery_state_observation=recovery_state_observation,
+                muscle_memory_active=muscle_memory_active,
+                muscle_memory_out_of_distribution=muscle_memory_out_of_distribution,
+                muscle_memory_residual_rms_rad=muscle_memory_residual_rms_rad,
+                muscle_memory_synergy_actions=muscle_memory_synergy_actions,
             )
         target_error = (
             math.hypot(crossing_y - scenario.target_y_m, crossing_z - scenario.target_z_m)
@@ -915,6 +1119,12 @@ class G1MuJoCoBackend:
             if recovery_controller is not None
             else None
         )
+        receipt_builder = getattr(torque_policy, "build_receipt", None)
+        torque_policy_receipt = receipt_builder() if callable(receipt_builder) else None
+        if torque_policy_receipt is not None and not isinstance(
+            torque_policy_receipt, G1TorquePolicyReceipt
+        ):
+            raise ValueError("direct torque policy returned an invalid receipt")
         return GoalForgeEpisode(
             scenario=scenario,
             parameters=parameters,
@@ -925,6 +1135,7 @@ class G1MuJoCoBackend:
             feedback_receipt=feedback_receipt,
             feedforward_hash=feedforward.trajectory_hash if feedforward is not None else None,
             recovery_receipt=recovery_receipt,
+            torque_policy_receipt=torque_policy_receipt,
         )
 
 
@@ -977,6 +1188,26 @@ class _Contacts:
 class _FeedbackEffect:
     joint_residual: np.ndarray
     kick_phase_rate: float
+
+
+def _apply_direct_torque_policy(
+    *,
+    policy: G1TorquePolicy,
+    frame: G1TorqueControlFrame,
+    parent_torque: np.ndarray,
+    guarded_limits: np.ndarray,
+) -> np.ndarray:
+    """Apply a SIM-only torque callback behind the backend's final hard guard."""
+
+    try:
+        proposed = np.asarray(policy.command(frame, parent_torque), dtype=np.float64)
+        if proposed.shape != (29,) or not np.all(np.isfinite(proposed)):
+            raise ValueError("direct torque callback returned an invalid 29-vector")
+    except (ValueError, FloatingPointError):
+        proposed = parent_torque
+    applied = np.clip(proposed, -guarded_limits, guarded_limits)
+    policy.note_applied(applied)
+    return applied
 
 
 def _load_robonaldo(root: Path) -> tuple[Any, Any, Any, np.ndarray]:
@@ -1200,6 +1431,14 @@ def _append_trace(
     recovery_settling_fraction: float = 0.0,
     recovery_smoothing_active: bool = False,
     recovery_smoothing_residual_rms_rad: float = 0.0,
+    recovery_proprioception: np.ndarray | None = None,
+    recovery_policy_frame: int = 0,
+    recovery_observation_updated: bool = False,
+    recovery_state_observation: np.ndarray | None = None,
+    muscle_memory_active: bool = False,
+    muscle_memory_out_of_distribution: bool = False,
+    muscle_memory_residual_rms_rad: float = 0.0,
+    muscle_memory_synergy_actions: np.ndarray | None = None,
 ) -> None:
     trace["time"].append(time_sec)
     trace["joint_position"].append(data.qpos[7:36].copy())
@@ -1238,11 +1477,59 @@ def _append_trace(
         trace["combined_residual"].append(combined_residual.copy())
         trace["combined_residual_saturation"].append(combined_residual_saturation)
     if "recovery_active" in trace:
+        assert recovery_proprioception is not None
         trace["recovery_active"].append(recovery_active)
         trace["recovery_blend_fraction"].append(recovery_blend_fraction)
         trace["recovery_settling_fraction"].append(recovery_settling_fraction)
         trace["recovery_smoothing_active"].append(recovery_smoothing_active)
         trace["recovery_smoothing_residual_rms_rad"].append(recovery_smoothing_residual_rms_rad)
+        trace["recovery_proprioception"].append(recovery_proprioception.copy())
+        trace["recovery_policy_frame"].append(recovery_policy_frame)
+        trace["recovery_observation_updated"].append(recovery_observation_updated)
+        assert recovery_state_observation is not None
+        trace["recovery_state_observation"].append(recovery_state_observation.copy())
+    if "muscle_memory_active" in trace:
+        assert muscle_memory_synergy_actions is not None
+        trace["muscle_memory_active"].append(muscle_memory_active)
+        trace["muscle_memory_out_of_distribution"].append(muscle_memory_out_of_distribution)
+        trace["muscle_memory_residual_rms_rad"].append(muscle_memory_residual_rms_rad)
+        trace["muscle_memory_synergy_actions"].append(muscle_memory_synergy_actions.copy())
+
+
+def _muscle_memory_observation(
+    *,
+    data: Any,
+    ids: _ModelIds,
+    policy_phase: float,
+    contact_time: float | None,
+    contact_impulse: float,
+    left_support: bool,
+    right_support: bool,
+    left_ground_force: float,
+    right_ground_force: float,
+) -> dict[str, float]:
+    roll, pitch = _roll_pitch(data.xquat[ids.torso])
+    com = data.subtree_com[ids.pelvis]
+    return {
+        "post_contact_time_sec": (
+            max(0.0, float(data.time) - contact_time) if contact_time is not None else 0.0
+        ),
+        "policy_phase": policy_phase,
+        "pelvis_velocity_x_m_s": float(data.qvel[0]),
+        "pelvis_velocity_y_m_s": float(data.qvel[1]),
+        "pelvis_velocity_z_m_s": float(data.qvel[2]),
+        "torso_roll_rad": roll,
+        "torso_pitch_rad": pitch,
+        "torso_angular_velocity_x_rad_s": float(data.cvel[ids.torso][0]),
+        "torso_angular_velocity_y_rad_s": float(data.cvel[ids.torso][1]),
+        "torso_angular_velocity_z_rad_s": float(data.cvel[ids.torso][2]),
+        "com_y_relative_m": float(com[1]) - float(data.xpos[ids.left_ankle][1]),
+        "left_support": float(left_support),
+        "right_support": float(right_support),
+        "left_ground_force_scale": left_ground_force / 500.0,
+        "right_ground_force_scale": right_ground_force / 500.0,
+        "contact_impulse_ns": contact_impulse,
+    }
 
 
 def _feedback_effect(

@@ -37,8 +37,16 @@ def trajectory(
     *,
     episode: str = "episode-1",
     critical: bool = False,
+    regime_hash: str | None = None,
 ) -> VersionedTrajectory:
-    first = segment(value, episode=episode, start=0, end=1, phase=SkillPhase.PREPARE)
+    first = segment(
+        value,
+        episode=episode,
+        start=0,
+        end=1,
+        phase=SkillPhase.PREPARE,
+        regime_hash=regime_hash,
+    )
     final = segment(
         value,
         episode=episode,
@@ -47,6 +55,7 @@ def trajectory(
         phase=SkillPhase.RECOVERY,
         terminal=True,
         critical=critical,
+        regime_hash=regime_hash,
     )
     return VersionedTrajectory((first, final), strict_replay=True)
 
@@ -60,6 +69,7 @@ def segment(
     phase: SkillPhase,
     terminal: bool = False,
     critical: bool = False,
+    regime_hash: str | None = None,
 ) -> ControlSegment:
     return ControlSegment(
         segment_id=f"{episode}:{start}",
@@ -71,7 +81,7 @@ def segment(
         policy=value,
         controller_snapshot_hash=value.controller_snapshot_hash,
         body_hash=value.body_hash,
-        regime_hash=digest("regime"),
+        regime_hash=regime_hash or digest("regime"),
         self_state_hash=digest("self-state"),
         observation={"roll": 0.1, "pitch": -0.1},
         residual_action={"pelvis_roll": -0.01},

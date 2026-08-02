@@ -63,9 +63,12 @@ class AutoSubscriber:
 
     def _extract_payload(self, event: Any) -> dict:
         if isinstance(event, dict):
-            payload = event
+            payload = dict(event)
         elif hasattr(event, "payload"):
-            payload = event.payload if isinstance(event.payload, dict) else {}
+            # Copy before enriching: bus payloads are immutable views for
+            # subscribers (EventBus hardening), so enrichment must never
+            # write into the delivered object.
+            payload = dict(event.payload) if isinstance(event.payload, dict) else {}
         else:
             payload = {}
         for key in [

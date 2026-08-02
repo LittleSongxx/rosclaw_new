@@ -107,6 +107,7 @@ class LearnerService:
         self.log = DurableEventLog(self.root / "journal", service="learner")
         self._parent: PolicyVersion | None = None
         self._completed: dict[str, LearnerServiceReceipt] = {}
+        self._candidates: dict[str, PolicyVersion] = {}
         self._pending: dict[str, str] = {}
         self._quarantined: set[str] = set()
         for event in self.log.events:
@@ -206,6 +207,19 @@ class LearnerService:
 
     def checkpoint_bytes(self, checkpoint_hash: str) -> bytes:
         return self._read_blob(checkpoint_hash, suffix="checkpoint")
+
+    def artifact_bytes(self, artifact_hash: str) -> bytes:
+        """Return a checksum-verified completed inference artifact."""
+        if artifact_hash not in {receipt.artifact_hash for receipt in self._completed.values()}:
+            raise KeyError("artifact hash is not a completed learner product")
+        return self._read_blob(artifact_hash, suffix="artifact")
+
+    def candidate_for_batch(self, batch_hash: str) -> PolicyVersion:
+        """Return the recovered candidate bound to one completed batch."""
+        try:
+            return self._candidates[batch_hash]
+        except KeyError as exc:
+            raise KeyError("batch has no completed learner candidate") from exc
 
     def advance_parent(self, policy: PolicyVersion) -> None:
         known = {receipt.candidate_policy_hash for receipt in self._completed.values()}
@@ -323,6 +337,7 @@ class LearnerService:
                 event_hash=event_hash,
             )
             self._completed[batch_hash] = receipt
+            self._candidates[batch_hash] = candidate
             self._pending.pop(job_id, None)
         elif kind == "JOB_QUARANTINED":
             job_id = str(payload["job_id"])

@@ -123,6 +123,14 @@ class GoalForgeHatTrick:
             and rescue.naturalness_comparison["passed"]
             and rescue.recovery_receipt is not None
             and rescue.recovery_receipt["peak_settling_fraction"] == 1.0
+            and rescue.momentum_evolution.get("recovery_controller_hash")
+            == rescue.recovery_receipt.get("controller_hash")
+            and rescue.momentum_evolution.get("recovery_config_hash")
+            == rescue.recovery_receipt.get("config_hash")
+            and rescue.momentum_route_receipt.get("recovery_controller_hash")
+            == rescue.recovery_receipt.get("controller_hash")
+            and rescue.momentum_route_receipt.get("recovery_config_hash")
+            == rescue.recovery_receipt.get("config_hash")
             and all(
                 shot.recovery_receipt is not None
                 and shot.recovery_receipt["strict_replay"]
@@ -185,8 +193,7 @@ class GoalForgeHatTrick:
                 ),
                 "backward_and_lateral_reversal_reduced": bool(
                     self.shots[2].naturalness_comparison
-                    and self.shots[2].naturalness_comparison["backward_reversal_reduction"]
-                    >= 0.10
+                    and self.shots[2].naturalness_comparison["backward_reversal_reduction"] >= 0.10
                     and self.shots[2].naturalness_comparison["lateral_peak_return_reduction"]
                     >= 0.15
                 ),
@@ -579,9 +586,17 @@ def _run_momentum_evolution(
         parent_strict_replay=parent_strict,
         candidate_strict_replay=candidate_pair.candidate_strict_replay,
     )
+    candidate_controller_hash = str(candidate_pair.recovery_receipt["controller_hash"])
+    candidate_config_hash = str(candidate_pair.recovery_receipt["config_hash"])
+    if candidate_controller_hash != parent_recovery.controller_hash:
+        raise RuntimeError("momentum evolution recovery controller hash mismatch")
+    if candidate_config_hash != parent_recovery.config_hash:
+        raise RuntimeError("momentum evolution recovery config hash mismatch")
     evolution = G1MomentumUnloadingEvolution.evaluate(
         body_hash=backend.qualification.body_hash,
         kick_prior_hash=backend.qualification.kick_prior_hash,
+        recovery_controller_hash=candidate_controller_hash,
+        recovery_config_hash=candidate_config_hash,
         regime_commitment=scenario.scenario_commitment,
         parent=parent_parameters,
         candidate=candidate_parameters,
