@@ -13,7 +13,9 @@ from rosclaw.kernel import ActionEnvelope, ExecutionMode
 from rosclaw.mcp.adapters.runtime_client import RuntimeClient
 from rosclaw.mcp.tools import (
     cancel_action,
+    cancel_approval,
     get_action_status,
+    get_approval_status,
     get_runtime_status,
     request_action,
     set_client,
@@ -53,6 +55,19 @@ class _FakeDaemon:
 
     def get_action_status(self, action_id: str) -> dict[str, Any]:
         return {"action_id": action_id, "state": "FINISHED", "receipt": None}
+
+    def get_operator_proposal(self, request_id: str) -> dict[str, Any]:
+        return {
+            "proposal": {"request_id": request_id, "state": "CREATED"},
+            "permit_exposed": False,
+        }
+
+    def cancel_operator_proposal(self, request_id: str) -> dict[str, Any]:
+        return {
+            "proposal": {"request_id": request_id, "state": "CANCELLED"},
+            "command_dispatched": False,
+            "permit_exposed": False,
+        }
 
     def cancel_action(self, action_id: str) -> dict[str, Any]:
         return {
@@ -133,3 +148,13 @@ async def test_action_status_and_cancel_are_bounded_daemon_calls() -> None:
 
     assert status["state"] == "FINISHED"
     assert cancelled["cancelled"] is False
+
+
+async def test_approval_status_and_cancel_never_expose_operator_material() -> None:
+    status = _payload(await get_approval_status(request_id="proposal-tool-test"))
+    cancelled = _payload(await cancel_approval(request_id="proposal-tool-test"))
+
+    assert status["proposal"]["state"] == "CREATED"
+    assert cancelled["proposal"]["state"] == "CANCELLED"
+    assert cancelled["command_dispatched"] is False
+    assert cancelled["permit_exposed"] is False
