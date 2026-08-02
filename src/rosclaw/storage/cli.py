@@ -396,6 +396,76 @@ def _versioned_dimension_faults(dimensions: dict[str, Any]) -> dict[str, tuple[A
     return faults
 
 
+def _pyseekdb_compat_checks(
+    checks: list[tuple[str, str, bool]],
+    issues: list[str],
+    result: dict[str, Any],
+) -> None:
+    """Version-compat matrix for the native SeekDB SDK.
+
+    Compatibility is validated against the embedded engine (pylibseekdb /
+    seekdb-lib).  The matrix is intentionally explicit: silent SQL
+    generation drift between SDK and engine was observed in the wild
+    (pyseekdb 1.4.0 producing `__pk_increment` syntax errors and empty
+    hybrid results on the embedded engine).
+    """
+    # (status, note) per SDK version range; keep in sync with pyproject pin.
+    matrix = {
+        "validated": ["1.3.0"],
+        "known_incompatible": {
+            "1.4.0": "metadata-filtered search legs broken on embedded engine "
+            "(code=1064 __pk_increment, malformed FULL JOIN, code=1059 "
+            "identifier-too-long; unfiltered calls unaffected); "
+            "upstream: oceanbase/pyseekdb#251; use pyseekdb==1.3.0",
+        },
+    }
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            installed = version("pyseekdb")
+        except PackageNotFoundError:
+            installed = None
+    except Exception:  # noqa: BLE001
+        installed = None
+
+    if installed is None:
+        checks.append(("pyseekdb compat", "pyseekdb not installed", False))
+        issues.append("pyseekdb is not installed; native SeekDB backend unavailable.")
+        status = "missing"
+    elif installed in matrix["validated"]:
+        checks.append(("pyseekdb compat", f"{installed} (validated)", True))
+        status = "validated"
+    elif installed in matrix["known_incompatible"]:
+        checks.append(
+            ("pyseekdb compat",
+             f"{installed} INCOMPATIBLE: {matrix['known_incompatible'][installed]}",
+             False)
+        )
+        issues.append(
+            f"pyseekdb {installed} is known-incompatible with the embedded engine: "
+            f"{matrix['known_incompatible'][installed]}. Downgrade with "
+            "`pip install pyseekdb==1.3.0`."
+        )
+        status = "incompatible"
+    else:
+        checks.append(
+            ("pyseekdb compat", f"{installed} (untested — validated is 1.3.0)", True)
+        )
+        issues.append(
+            f"pyseekdb {installed} is outside the validated matrix (validated: "
+            f"{', '.join(matrix['validated'])}; known-incompatible: "
+            f"{', '.join(matrix['known_incompatible'])}). Proceed with caution."
+        )
+        status = "untested"
+    result["seekdb"]["pyseekdb_compat"] = {
+        "installed": installed,
+        "status": status,
+        "validated": matrix["validated"],
+        "known_incompatible": matrix["known_incompatible"],
+    }
+
+
 def _native_seekdb_checks(
     client: Any,
     backend: str,
@@ -414,6 +484,7 @@ def _native_seekdb_checks(
 
     deployment = client.deployment_info()
     result["seekdb"] = {"backend": backend, "deployment": deployment}
+    _pyseekdb_compat_checks(checks, issues, result)
 
     # 1. Engine readiness: the store's connect() already probes with a 30 s
     # deadline; time a live catalog round-trip as the observable probe.
