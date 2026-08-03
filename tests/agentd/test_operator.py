@@ -284,7 +284,7 @@ class TestApprovalLoop:
             assert r1.state.value == "WAIT_APPROVAL"
             pending = service.pending_approvals(mission.mission_id)
             assert len(pending) == 1
-            grant = service.decide_approval(
+            grant = await service.decide_approval(
                 pending[0].request_id, principal="user:local:1000", approve=True
             )
             assert grant is not None

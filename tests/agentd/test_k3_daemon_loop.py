@@ -21,7 +21,6 @@ from rosclaw.agentd.service import AgentService
 from rosclaw.contracts.agent.model_turn import ModelTurnResultV1
 from rosclaw.core.runtime import Runtime, RuntimeConfig
 from rosclaw.daemon.client import DaemonClient
-from rosclaw.daemon.permits import PermitAuthority
 from rosclaw.daemon.server import RosclawDaemon
 from rosclaw.daemon.service import DaemonControlPlane
 from rosclaw.kernel.contracts import (
@@ -46,6 +45,8 @@ def _sim_executor(action) -> ActionExecutionResult:
 
 @pytest.fixture
 def daemon(tmp_path: Path):
+    from rosclaw.daemon.ledger import DaemonLedger
+
     runtime = Runtime(
         RuntimeConfig(
             robot_id="sim-ur5e",
@@ -65,16 +66,19 @@ def daemon(tmp_path: Path):
     runtime.action_gateway.register_executor(
         SIM_CAPABILITY, ExecutionMode.SIMULATION, _sim_executor
     )
-    service = DaemonControlPlane(runtime=runtime, permits=PermitAuthority())
-    socket_path = tmp_path / "run" / "rosclawd.sock"
-    daemon = RosclawDaemon(service=service, socket_path=socket_path)
-    daemon.start()
-    client = DaemonClient(socket_path=socket_path, timeout_sec=5.0)
-    client.arm_runtime("k3 test preflight")
-    try:
-        yield client, socket_path
-    finally:
-        daemon.stop()
+    with DaemonLedger(
+        tmp_path / "state" / "ledger.sqlite3", key_path=tmp_path / "state" / "ledger.key"
+    ) as ledger:
+        service = DaemonControlPlane(runtime=runtime, ledger=ledger)
+        socket_path = tmp_path / "run" / "rosclawd.sock"
+        daemon = RosclawDaemon(service=service, socket_path=socket_path)
+        daemon.start()
+        client = DaemonClient(socket_path=socket_path, timeout_sec=5.0)
+        client.arm_runtime("k3 test preflight")
+        try:
+            yield client, socket_path
+        finally:
+            daemon.stop()
 
 
 def _approval_decision(request) -> ModelTurnResultV1:
@@ -158,7 +162,7 @@ class TestK3SimActionLoop:
             r1 = await service.send_turn(mission.mission_id, "请求授权")
             assert r1.state.value == "WAIT_APPROVAL"
             pending = service.pending_approvals(mission.mission_id)
-            grant = service.decide_approval(
+            grant = await service.decide_approval(
                 pending[0].request_id, principal="user:local:1000", approve=True
             )
             _action_decision.grant_id = grant.grant_id
@@ -179,7 +183,7 @@ class TestK3SimActionLoop:
             mission = service.create_mission("daemon 不在线")
             await service.send_turn(mission.mission_id, "请求授权")
             pending = service.pending_approvals(mission.mission_id)
-            grant = service.decide_approval(
+            grant = await service.decide_approval(
                 pending[0].request_id, principal="user:local:1000", approve=True
             )
             _action_decision.grant_id = grant.grant_id

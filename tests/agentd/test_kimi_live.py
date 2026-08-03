@@ -298,7 +298,7 @@ async def test_k5_operator_consent_loop(tmp_path: Path) -> None:
         card = pending[0].action_display
         assert card.title and card.risk_tier in ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 
-        grant = service.decide_approval(
+        grant = await service.decide_approval(
             pending[0].request_id, principal="user:local:1000", approve=True
         )
         assert grant is not None
