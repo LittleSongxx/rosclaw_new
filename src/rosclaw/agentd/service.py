@@ -172,8 +172,13 @@ class AgentService:
         if gateway is not None:
             self._gateway: ModelGateway = gateway
         else:
+            from rosclaw.agentd.models.failover import FailoverGateway
+
             policy = config.to_policy()
-            self._gateway = OpenAICompatGateway(policy.default)
+            chain = policy.fallback_chain()
+            candidates = [(p, OpenAICompatGateway(p)) for p in chain]
+            # 单 profile 也走 FailoverGateway：统一的 cooldown/RPM 语义。
+            self._gateway = FailoverGateway(candidates)
         self._prompt = load_prompt("native_agent_v1.md")
         self._loops: dict[str, AgentLoop] = {}
         self._lock = asyncio.Lock()
