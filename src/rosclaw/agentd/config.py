@@ -25,10 +25,18 @@ class AgentConfig:
     max_tool_rounds: int = 12
     max_input_tokens: int = 120_000
     dynamic_tool_limit: int = 12
+    physical_action_count: int = 0
     language: str = "zh-CN"
+    body_id: str | None = None
     sim_body_id: str = "sim/ur5e"
     profiles: list[ModelProfile] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def active_body_id(self) -> str:
+        """Return the configured body, preserving the legacy SIM default."""
+
+        return self.body_id or self.sim_body_id
 
     def to_policy(self) -> ModelPolicy:
         if not self.profiles:
@@ -68,6 +76,7 @@ def load_agent_config(path: Path | None = None) -> AgentConfig:
         _profile_from_dict(name, p or {}) for name, p in (models.get("profiles", {}) or {}).items()
     ]
     context = agent.get("context", {}) or {}
+    budgets = agent.get("budgets", {}) or {}
     return AgentConfig(
         enabled=bool(agent.get("enabled", True)),
         default_profile=str(agent.get("default_profile", "embodied_default")),
@@ -75,7 +84,9 @@ def load_agent_config(path: Path | None = None) -> AgentConfig:
         max_tool_rounds=int(agent.get("max_tool_rounds", 12)),
         max_input_tokens=int(context.get("max_input_tokens", 120_000)),
         dynamic_tool_limit=int(context.get("dynamic_tool_limit", 12)),
+        physical_action_count=int(budgets.get("physical_action_count", 0)),
         language=str(agent.get("language", "zh-CN")),
+        body_id=(str(agent["body_id"]) if agent.get("body_id") else None),
         sim_body_id=str(agent.get("sim_body_id", "sim/ur5e")),
         profiles=profiles,
         raw={
@@ -112,6 +123,7 @@ def write_agent_config(
         }
     )
     existing["agent"]["status"] = "CONFIGURED"
+    existing["agent"].setdefault("budgets", {"physical_action_count": 0})
     existing.setdefault(
         "team",
         {
