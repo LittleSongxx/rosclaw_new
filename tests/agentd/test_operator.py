@@ -297,7 +297,9 @@ class TestApprovalLoop:
             r2 = await service.send_turn(mission.mission_id, "我已批准，继续执行")
             assert "授权已验证" in r2.reply
             assert "已消费" in r2.reply
-            assert r2.state.value == "IDLE"
+            # §5.6 新语义：本服务没有 daemon consent/action channel，
+            # 无 verified terminal receipt → 诚实停留 MONITOR（提交≠完成）。
+            assert r2.state.value == "MONITOR"
             # EXACT_ACTION consumed: a third attempt must fail closed.
             from rosclaw.operator import GrantDeniedError
 
@@ -355,7 +357,7 @@ class TestApprovalLoop:
 
         try:
             reply = await service._handlers.request_approval(decision)
-            assert "5 分钟有效" in reply
+            assert "5 分钟有效" in reply.text
             assert fake.called["ttl_sec"] == 300.0
             assert fake.called["capability_id"] == "limo.play_tone"
             assert fake.called["arguments"]["frequency_hz"] == 660
@@ -388,7 +390,7 @@ class TestApprovalLoop:
 
         try:
             reply = await service._handlers.request_approval(decision)
-            assert "缺少 capability_id 或 arguments" in reply
+            assert "缺少 capability_id 或 arguments" in reply.text
             assert service.pending_approvals("mis_real") == []
         finally:
             await service.close()
