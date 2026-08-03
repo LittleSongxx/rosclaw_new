@@ -21,6 +21,7 @@ from rosclaw.agentd.service import AgentService
 from rosclaw.contracts.agent.model_turn import ModelTurnResultV1
 from rosclaw.core.runtime import Runtime, RuntimeConfig
 from rosclaw.daemon.client import DaemonClient
+from rosclaw.daemon.ledger import DaemonLedger
 from rosclaw.daemon.server import RosclawDaemon
 from rosclaw.daemon.service import DaemonControlPlane
 from rosclaw.kernel.contracts import (
@@ -45,8 +46,6 @@ def _sim_executor(action) -> ActionExecutionResult:
 
 @pytest.fixture
 def daemon(tmp_path: Path):
-    from rosclaw.daemon.ledger import DaemonLedger
-
     runtime = Runtime(
         RuntimeConfig(
             robot_id="sim-ur5e",
@@ -63,9 +62,7 @@ def daemon(tmp_path: Path):
             enable_tracing=False,
         )
     )
-    runtime.action_gateway.register_executor(
-        SIM_CAPABILITY, ExecutionMode.SIMULATION, _sim_executor
-    )
+    runtime.action_gateway.register_executor(SIM_CAPABILITY, ExecutionMode.SHADOW, _sim_executor)
     with DaemonLedger(
         tmp_path / "state" / "ledger.sqlite3", key_path=tmp_path / "state" / "ledger.key"
     ) as ledger:
@@ -152,6 +149,26 @@ def _action_decision(request) -> ModelTurnResultV1:
 
 
 class TestK3SimActionLoop:
+    async def test_shadow_action_returns_verified_nonreal_receipt(self, daemon) -> None:
+        client, _socket_path = daemon
+        channel = DaemonActionChannel(
+            client,
+            actor_id="agent:rosclaw-native:sim_ur5e",
+            body_id="sim-ur5e",
+            body_hash="sha256:sim-body",
+        )
+
+        outcome = await channel.request_nonreal_action(
+            capability_id=SIM_CAPABILITY,
+            arguments={"joints": [0.0] * 6},
+            grant_id="grant_shadow",
+            execution_mode="SHADOW",
+        )
+
+        assert outcome.verified is True
+        assert outcome.trust_level == "VERIFIED"
+        assert outcome.receipt["receipt"]["evidence_domain"] == "SHADOW"
+
     async def test_full_loop_with_receipt(self, daemon, tmp_path: Path) -> None:
         client, socket_path = daemon
         config = load_agent_config(tmp_path / "config.yaml")
@@ -221,6 +238,36 @@ class TestReceiptVerification:
                 {"trust_level": "SYNTHETIC", "action": {"action_id": "act_1"}},
                 None,  # type: ignore[arg-type]
             )
+
+
+class TestRealProposalChannel:
+    async def test_real_request_creates_pending_proposal_without_dispatch(self, daemon) -> None:
+        client, _socket_path = daemon
+        channel = DaemonActionChannel(
+            client,
+            actor_id="agent:rosclaw-native:limo",
+            body_id="limo",
+            body_hash="sha256:body",
+        )
+        proposal = await channel.request_real_proposal(
+            capability_id="limo.play_tone",
+            arguments={"frequency_hz": 660, "duration_sec": 0.6},
+            grant_id="grant_public_only",
+            grant_public_hash="grantpub_hash",
+            principal_id="user:local:1000",
+            risk_tier="MEDIUM",
+            display={"title": "Play bounded tone", "risk_tier": "MEDIUM"},
+        )
+        status = client.get_runtime_status()
+        public = client.get_operator_proposal(proposal.request_id)
+
+        assert proposal.state == "CREATED"
+        assert public["proposal"]["state"] == "CREATED"
+        assert "challenge_nonce" not in public["proposal"]
+        assert "permit_id" not in str(public).lower()
+        assert public["permit_exposed"] is False
+        assert status["operator_proposals"]["created"] == 1
+        assert status["queue"]["FINISHED"] == 0
 
     def test_mismatched_receipt_action_rejected(self, tmp_path: Path) -> None:
         channel = DaemonActionChannel(
