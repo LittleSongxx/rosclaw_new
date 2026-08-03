@@ -16,6 +16,7 @@ import yaml
 
 from rosclaw.agentd.cli import main as agentd_main
 from rosclaw.agentd.config import load_agent_config
+from rosclaw.agentd.context.sources import BodyFacts
 from rosclaw.agentd.models.gateway import MockModelGateway
 from rosclaw.agentd.models.profiles import mock_profile
 from rosclaw.agentd.onboarding import configure_model, doctor
@@ -74,6 +75,51 @@ class TestService:
         probe = await service.probe()
         assert probe.reachable and probe.tool_call_ok
 
+    async def test_real_mission_binds_verified_live_body_and_daemon(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class LiveBodySource:
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            def get_body(self, body_id: str) -> BodyFacts | None:
+                if body_id != "limo":
+                    return None
+                return BodyFacts(
+                    body_id="limo",
+                    effective_body_hash="body_live_hash",
+                    summary="verified live LIMO",
+                    calibrated=True,
+                )
+
+        class LiveDaemon:
+            def get_runtime_status(self) -> dict:
+                return {
+                    "running": True,
+                    "runtime_state": "RUNNING",
+                    "robot_id": "limo",
+                    "robot_pack": {"loaded": True, "signature_status": "valid"},
+                    "registered_executors": ["limo.play_tone:REAL"],
+                }
+
+        monkeypatch.setattr("rosclaw.agentd.service.ResolverBodySource", LiveBodySource)
+        config = load_agent_config(tmp_path / "missing.yaml")
+        config.body_id = "limo"
+        config.default_mode = "REAL"
+        config.physical_action_count = 3
+        gateway = MockModelGateway(mock_profile(), [_answer_turn])
+        live = AgentService(config, tmp_path, gateway=gateway)
+        live._daemon_client = LiveDaemon()
+
+        try:
+            mission = live.create_mission("播放巡检提示音", mode="REAL")
+
+            assert mission.body_binding.body_id == "limo"
+            assert mission.body_binding.effective_body_hash == "body_live_hash"
+            assert mission.mode.value == "REAL"
+        finally:
+            await live.close()
+
 
 class TestHttpApi:
     @pytest.fixture
@@ -97,7 +143,7 @@ class TestHttpApi:
     def test_real_mode_422_with_gaps(self, client) -> None:
         r = client.post("/missions", json={"goal": "搬箱子", "mode": "REAL"})
         assert r.status_code == 422
-        assert "MissionGrant" in r.json()["detail"]
+        assert "configured body is simulated" in r.json()["detail"]
 
     def test_console_served(self, client) -> None:
         r = client.get("/console")
@@ -106,6 +152,21 @@ class TestHttpApi:
 
 
 class TestOnboarding:
+    def test_loads_real_body_id_without_overwriting_legacy_sim_default(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "config.yaml"
+        path.write_text(
+            "agent:\n  body_id: limo\n  default_mode: REAL\n"
+            "  budgets:\n    physical_action_count: 3\n",
+            encoding="utf-8",
+        )
+        config = load_agent_config(path)
+
+        assert config.active_body_id == "limo"
+        assert config.sim_body_id == "sim/ur5e"
+        assert config.physical_action_count == 3
+
     def test_configure_writes_key_ref_only(self, tmp_path: Path) -> None:
         summary = configure_model(tmp_path, "kimi-code")
         assert summary["configured"]

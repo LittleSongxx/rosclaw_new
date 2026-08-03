@@ -9,6 +9,8 @@ closed on any resolver error).
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 from rosclaw.agentd.context.sources import (
     BodyFacts,
@@ -50,21 +52,26 @@ class SimBodySource:
 class ResolverBodySource:
     """Real body via rosclaw.body.BodyResolver. Fail closed on errors."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, workspace: Path | None = None, body_id: str | None = None) -> None:
         self._resolver = None
+        self._body_id = body_id
         try:
             from rosclaw.body.resolver import BodyResolver
 
-            self._resolver = BodyResolver()
+            self._resolver = BodyResolver(workspace=workspace, body_id=body_id)
         except Exception:  # noqa: BLE001 - absence means "no real body"
             self._resolver = None
 
     def get_body(self, body_id: str) -> BodyFacts | None:
         if self._resolver is None:
             return None
+        if self._body_id is not None and body_id != self._body_id:
+            return None
         try:
             effective = self._resolver.get_effective_body()
             body_hash = effective.compute_hash()
+            if effective.effective_body_hash and effective.effective_body_hash != body_hash:
+                return None
             summary = f"EffectiveBody {body_id} (hash {body_hash[:18]}…)"
             return BodyFacts(
                 body_id=body_id,
@@ -74,6 +81,52 @@ class ResolverBodySource:
             )
         except Exception:  # noqa: BLE001 - resolver failure must fail closed
             return None
+
+
+class DaemonSelfSource:
+    """Fresh control-plane Self facts for a real body.
+
+    This adapter deliberately reports only daemon-observed runtime health. It
+    does not fabricate pose, sensor, or task evidence when those observations
+    are unavailable.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+        self._sequence = 0
+
+    def get_self(self, body_id: str) -> SelfFacts | None:
+        try:
+            status = self._client.get_runtime_status()
+        except Exception:  # noqa: BLE001 - daemon loss fails context compilation closed
+            return None
+        self._sequence += 1
+        running = bool(status.get("running")) and status.get("runtime_state") == "RUNNING"
+        recovery = bool((status.get("recovery") or {}).get("required"))
+        estop = bool(status.get("emergency_stop_latched"))
+        health = "OK" if running and not recovery and not estop else "DEGRADED"
+        public = {
+            "body_id": body_id,
+            "daemon_instance_id": status.get("daemon_instance_id"),
+            "runtime_state": status.get("runtime_state"),
+            "supervision_state": status.get("supervision_state"),
+            "emergency_stop_latched": estop,
+            "recovery_required": recovery,
+            "robot_pack": (status.get("robot_pack") or {}).get("pack_ref"),
+            "registered_executors": status.get("registered_executors") or [],
+            "sequence": self._sequence,
+        }
+        return SelfFacts(
+            self_snapshot_hash=content_hash("selfsnap", public),
+            sequence=self._sequence,
+            observed_at=datetime.now(UTC),
+            health=health,
+            summary=(
+                f"rosclawd runtime={public['runtime_state']} "
+                f"supervision={public['supervision_state']} health={health}; "
+                "pose and sensor evidence not asserted by this source"
+            ),
+        )
 
 
 class SimSelfSource:

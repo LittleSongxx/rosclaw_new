@@ -28,7 +28,9 @@ from rosclaw.agentd.models.gateway import (
 )
 from rosclaw.agentd.runtime_sources import (
     ConfigConsentSource,
+    DaemonSelfSource,
     EmptyMemorySource,
+    ResolverBodySource,
     SimBodySource,
     SimSelfSource,
     StaticCapabilitySource,
@@ -37,6 +39,7 @@ from rosclaw.agentd.tools import SIM_BODY_TOOL, SIM_STATE_TOOL, BuiltinToolRegis
 from rosclaw.agentd.usage import UsageRecorder
 from rosclaw.contracts.agent.mission import (
     BodyBinding,
+    Budgets,
     ExecutionMode,
     Goal,
     MissionSessionV1,
@@ -113,14 +116,35 @@ class AgentService:
         from rosclaw.agentd.handlers import ServiceIntentHandlers
         from rosclaw.agentd.workers import NativeWorkerAdapter, WorkerManager, WorkerRegistry
 
+        self._body_id = config.active_body_id
+        self._daemon_client = None
+        daemon_socket = os.environ.get("ROSCLAW_DAEMON_SOCKET") or str(
+            rosclaw_home / "run" / "rosclawd.sock"
+        )
+        if Path(daemon_socket).exists():
+            from rosclaw.daemon.client import DaemonClient
+
+            self._daemon_client = DaemonClient(socket_path=daemon_socket)
         self._registry = WorkerRegistry(self._store.connection)
         self._registry.register_builtins(actor_id=self.actor_id)
-        self._body_source = SimBodySource(config.sim_body_id)
+        self._simulation_body = self._body_id.startswith("sim/")
+        if self._simulation_body:
+            self._body_source = SimBodySource(self._body_id)
+            self_source = SimSelfSource()
+        else:
+            self._body_source = ResolverBodySource(
+                workspace=rosclaw_home,
+                body_id=self._body_id,
+            )
+            self_source = DaemonSelfSource(self._daemon_client)
+        body = self._body_source.get_body(self._body_id)
         self._tools = BuiltinToolRegistry(
-            body_id=config.sim_body_id,
-            body_summary=self._body_source.get_body(config.sim_body_id).summary,  # type: ignore[union-attr]
+            body_id=self._body_id,
+            body_summary=body.summary if body else "configured body is unavailable",
         )
-        tool_names = [SIM_STATE_TOOL, SIM_BODY_TOOL]
+        tool_names = [SIM_BODY_TOOL]
+        if self._simulation_body:
+            tool_names.insert(0, SIM_STATE_TOOL)
         consent_source = ConfigConsentSource()
         from rosclaw.operator import OperatorBroker
 
@@ -131,12 +155,16 @@ class AgentService:
             SourceBundle(
                 constitution_text=load_prompt("native_agent_v1.md").text,
                 body=self._body_source,
-                self_source=SimSelfSource(),
+                self_source=self_source,
                 capabilities=StaticCapabilitySource(tool_names),
                 memory=EmptyMemorySource(),
                 organization=RegistryOrgSource(self._registry),
                 consent=BrokerConsentSource(consent_source, self._store.connection),
-                runtime_status_summary="agentd local; rosclawd not required in SIMULATION",
+                runtime_status_summary=(
+                    "agentd local; simulated body; rosclawd optional"
+                    if self._simulation_body
+                    else "agentd bound to a real body through rosclawd; physical evidence is daemon-owned"
+                ),
             ),
             max_input_tokens=config.max_input_tokens,
             dynamic_tool_limit=config.dynamic_tool_limit,
@@ -155,29 +183,25 @@ class AgentService:
             adapters={"native_inproc": NativeWorkerAdapter(self._gateway)},
             actor_id=self.actor_id,
         )
-        body = self._body_source.get_body(config.sim_body_id)
         self._handlers = ServiceIntentHandlers(
             registry=self._registry,
             manager=self._worker_manager,
             actor_id=self.actor_id,
             broker=self._broker,
+            body_id=self._body_id,
             body_hash=body.effective_body_hash if body else "",
             mode=config.default_mode,
         )
         # Daemon action channel (K3): only if a rosclawd socket is actually
         # reachable — otherwise request_action degrades honestly.
         self._action_channel = None
-        daemon_socket = os.environ.get("ROSCLAW_DAEMON_SOCKET") or str(
-            rosclaw_home / "run" / "rosclawd.sock"
-        )
-        if Path(daemon_socket).exists():
+        if self._daemon_client is not None:
             from rosclaw.agentd.action_channel import DaemonActionChannel
-            from rosclaw.daemon.client import DaemonClient
 
             self._action_channel = DaemonActionChannel(
-                DaemonClient(socket_path=daemon_socket),
+                self._daemon_client,
                 actor_id=self.actor_id,
-                body_id=config.sim_body_id,
+                body_id=self._body_id,
                 body_hash=body.effective_body_hash if body else "",
             )
             self._handlers._action_channel = self._action_channel
@@ -204,7 +228,7 @@ class AgentService:
 
     @property
     def actor_id(self) -> str:
-        safe = self._config.sim_body_id.replace("/", "_")
+        safe = self._body_id.replace("/", "_")
         return f"agent:rosclaw-native:{safe}"
 
     def _loop_for(self, mission_id: str) -> AgentLoop:
@@ -233,20 +257,45 @@ class AgentService:
         owner_principal: str = "user:local:1000",
     ) -> MissionSessionV1:
         requested_mode = ExecutionMode(mode or self._config.default_mode)
-        if requested_mode is not ExecutionMode.SIMULATION:
-            # --mode REAL is a *request*; enumerate the missing prerequisites
-            # instead of silently downgrading or upgrading (总纲 §8.2).
-            gaps = [
-                "no MissionGrant issued (Operator Broker not enabled)",
-                "no real body linked and verified (RobotPack + calibration)",
-                "rosclawd REAL executor not configured",
-            ]
+        body = self._body_source.get_body(self._body_id)
+        if body is None:
             raise ValidationError(
-                f"mode {requested_mode.value} requested but prerequisites are missing: "
-                + "; ".join(gaps)
+                f"body {self._body_id!r} is not linked, hash-valid, and available"
             )
-        body = self._body_source.get_body(self._config.sim_body_id)
-        assert body is not None
+        if requested_mode is not ExecutionMode.SIMULATION:
+            gaps: list[str] = []
+            if requested_mode is ExecutionMode.REAL and self._config.physical_action_count <= 0:
+                gaps.append("agent.budgets.physical_action_count must be greater than zero")
+            if self._simulation_body:
+                gaps.append("configured body is simulated, not a live BodyResolver body")
+            if self._daemon_client is None:
+                gaps.append("rosclawd socket is unavailable")
+            else:
+                try:
+                    status = self._daemon_client.get_runtime_status()
+                except Exception as exc:  # noqa: BLE001 - report an honest prerequisite gap
+                    gaps.append(f"rosclawd status unavailable: {exc}")
+                else:
+                    if not status.get("running"):
+                        gaps.append("rosclawd is not running")
+                    if status.get("robot_id") != self._body_id:
+                        gaps.append(
+                            f"rosclawd robot_id {status.get('robot_id')!r} != {self._body_id!r}"
+                        )
+                    pack = status.get("robot_pack") or {}
+                    if not pack.get("loaded") or pack.get("signature_status") != "valid":
+                        gaps.append("verified Robot Pack is not loaded")
+                    suffix = f":{requested_mode.value}"
+                    if not any(
+                        str(item).endswith(suffix)
+                        for item in status.get("registered_executors") or []
+                    ):
+                        gaps.append(f"no {requested_mode.value} executor is registered")
+            if gaps:
+                raise ValidationError(
+                    f"mode {requested_mode.value} requested but prerequisites are missing: "
+                    + "; ".join(gaps)
+                )
         return self._store.create_mission(
             owner_principal=owner_principal,
             goal=Goal(text=goal_text, language=self._config.language),
@@ -254,6 +303,7 @@ class AgentService:
                 body_id=body.body_id, effective_body_hash=body.effective_body_hash
             ),
             mode=requested_mode,
+            budgets=Budgets(physical_action_count=self._config.physical_action_count),
             actor_id=self.actor_id,
         )
 
@@ -268,6 +318,9 @@ class AgentService:
         if mission is None:
             raise ValidationError(f"unknown mission {mission_id!r}")
         async with self._lock:
+            if self._handlers is not None:
+                self._handlers._mode = mission.mode.value
+                self._handlers._principal = mission.owner_principal
             loop = self._loop_for(mission_id)
             return await loop.run_user_turn(
                 mission, text, now=datetime.now(UTC), on_text_delta=on_text_delta
@@ -335,6 +388,8 @@ class AgentService:
         return {
             "agent_enabled": self._config.enabled,
             "default_mode": self._config.default_mode,
+            "body_id": self._body_id,
+            "daemon_connected": self._daemon_client is not None,
             "profile": profile.name,
             "provider": profile.provider,
             "model": profile.model,

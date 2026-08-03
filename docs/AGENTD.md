@@ -25,8 +25,29 @@ rosclaw agentd start --port 8765
 #   /health /status /probe /missions /missions/{id}/turns
 ```
 
-`--mode REAL` 只是请求：缺 MissionGrant、真实身体、daemon REAL executor 时
-必须拒绝并列出缺口（fail closed）。
+`--mode REAL` 只是请求：创建 Mission 前必须存在 hash-valid 的真实身体、
+已加载并验签的 Robot Pack、在线 rosclawd 与对应 REAL executor；任一缺失都
+必须拒绝并列出缺口（fail closed）。MissionGrant 在具体动作提出后由用户批准，
+不会被错误地要求在 Mission 创建前预先存在。
+
+### 绑定真实身体（例如 LIMO）
+
+模型初始化后，在同一个 `~/.rosclaw/config.yaml` 的 `agent` 段绑定 Body：
+
+```yaml
+agent:
+  enabled: true
+  body_id: limo
+  default_mode: REAL
+  budgets:
+    physical_action_count: 3
+```
+
+`body_id` 由 Body Registry 解析；旧配置的 `sim_body_id` 仍用于 SIMULATION，
+但不会被当作真实 Body。真实身体上下文读取 EffectiveBody 的重算哈希，并从
+rosclawd 获取新鲜的控制面 Self 状态；daemon 断开、Body hash 漂移或 Robot
+Pack/执行器缺失时均停止推进。REAL Mission 还要求显式的
+`physical_action_count > 0`；默认值为 0，不会隐式获得真机动作预算。
 
 ## 架构落点
 
@@ -95,6 +116,14 @@ broker 侧，永不进入模型上下文）→ Agent REQUEST_ACTION 引用 grant
 Broker.verify 独立核验（principal/body hash/mode/risk/action_intent）→
 EXACT_ACTION 单次消费，重放即拒
 ```
+
+REAL 模式还有独立的物理边界确认：AgentD 校验 MissionGrant 后只调用
+`operator.proposal.create`。rosclawd 返回 public proposal（无 challenge、无
+permit、未派发），再由受信 Operator 进程审阅精确 ActionEnvelope 并决定。
+AgentD 不调用 proposal decision RPC，也不会因为拿到 MissionGrant 而自批。
+最终链路为：MissionGrant verify → daemon proposal → Operator decision → daemon
+Permit → executor → terminal Receipt。SHADOW/SIMULATION 仍直接返回各自证据域的
+回执，不能冒充 REAL 物理证据。
 
 攻击回归（全部拒绝并给出 reason_code）：unknown/revoked/expired/
 principal_mismatch/body_hash_changed/mode_mismatch/risk_above_ceiling/

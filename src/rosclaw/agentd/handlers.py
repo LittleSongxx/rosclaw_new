@@ -38,6 +38,7 @@ class ServiceIntentHandlers:
         manager: WorkerManager,
         actor_id: str,
         broker: OperatorBroker | None = None,
+        body_id: str = "sim/ur5e",
         body_hash: str = "",
         principal: str = "user:local:1000",
         mode: str = "SIMULATION",
@@ -46,6 +47,7 @@ class ServiceIntentHandlers:
         self._manager = manager
         self._actor_id = actor_id
         self._broker = broker
+        self._body_id = body_id
         self._body_hash = body_hash
         self._principal = principal
         self._mode = mode
@@ -121,7 +123,7 @@ class ServiceIntentHandlers:
             mission_id=decision.mission_id,
             task_id=payload.get("task_id"),
             principal=self._principal,
-            body_id=payload.get("body_id", "sim/ur5e"),
+            body_id=payload.get("body_id", self._body_id),
             effective_body_hash=self._body_hash,
             mode=self._mode,
             action_display=display,
@@ -180,10 +182,37 @@ class ServiceIntentHandlers:
         from rosclaw.agentd.action_channel import ActionChannelError
 
         try:
-            outcome = await channel.request_sim_action(
+            if self._mode == "REAL":
+                proposal = await channel.request_real_proposal(
+                    capability_id=capability,
+                    arguments=arguments,
+                    grant_id=grant.grant_id,
+                    grant_public_hash=grant.public_hash,
+                    principal_id=grant.principal,
+                    risk_tier=str(payload.get("risk_tier", "LOW")),
+                    display={
+                        "title": str(payload.get("title") or decision.summary or "真实动作请求"),
+                        "summary": str(payload.get("summary") or decision.summary or ""),
+                        "risk_tier": str(payload.get("risk_tier", "LOW")),
+                        "parameters": {
+                            "capability_id": capability,
+                            "arguments": arguments,
+                        },
+                        "mission_grant_public_hash": grant.public_hash,
+                    },
+                )
+                return (
+                    "REAL 动作已提交到 rosclawd Operator Broker，尚未执行："
+                    f"request_id={proposal.request_id[:24]}…, "
+                    f"action_id={proposal.action_id[:24]}…, state={proposal.state}。"
+                    "需要由受信 Operator 进程独立审阅并确认；Agent 未获得 permit，"
+                    "也没有自行授权。"
+                )
+            outcome = await channel.request_nonreal_action(
                 capability_id=capability,
                 arguments=arguments,
                 grant_id=grant.grant_id,
+                execution_mode=self._mode,
             )
         except ActionChannelError as exc:
             return f"动作派发/回执校验失败（fail closed）：{exc}"
@@ -193,8 +222,9 @@ class ServiceIntentHandlers:
                 f"trust={outcome.trust_level}）。提交不等于完成——不报告为成功。"
             )
         return (
-            f"动作已在 SIMULATION 完成并经回执验证：action_id={outcome.action_id[:20]}…, "
-            f"trust_level=SIMULATED（仿真证据，不可用于 REAL）。grant 已消费。"
+            f"动作已在 {self._mode} 完成并经回执验证："
+            f"action_id={outcome.action_id[:20]}…, trust_level={outcome.trust_level}。"
+            "非 REAL 证据不可用于证明真实物理执行；grant 已消费。"
         )
 
     async def team_coordinate(self, decision: DecisionV1) -> str:
