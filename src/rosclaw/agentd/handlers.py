@@ -134,6 +134,46 @@ class ServiceIntentHandlers:
             expires_at=(datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
         )
         self._broker.create_request(request)
+        # ADR-0007：daemon consent plane 只接受显式 REAL 动作的 proposal
+        # （PROPOSAL_REAL_ACTION_REQUIRED）。SIMULATION 走认知层 grant +
+        # action_channel；REAL 才需要 daemon proposal/permit。
+        consent = getattr(self, "_consent_channel", None)
+        proposal_note = ""
+        if consent is not None and self._mode == "REAL":
+            from rosclaw.agentd.consent_channel import ConsentChannelError
+
+            try:
+                proposal = await consent.create_proposal(
+                    capability_id=str(payload.get("capability_id", "sim.hold_position")),
+                    arguments=payload.get("arguments") or {},
+                    display=display.model_dump(mode="json"),
+                    execution_mode=self._mode,
+                    ttl_sec=600.0,
+                )
+                proposal_id = proposal.get("request_id")
+                action_id = proposal.get("action_id")
+                # Persist the linkage on the stored approval request.
+                self._broker._conn.execute(
+                    "UPDATE operator_requests SET request_json = ? WHERE request_id = ?",
+                    (
+                        request.model_copy(
+                            update={
+                                "daemon_proposal_id": proposal_id,
+                                "daemon_action_id": action_id,
+                            }
+                        ).model_dump_json(),
+                        request.request_id,
+                    ),
+                )
+                proposal_note = (
+                    f"\n物理层 daemon proposal {proposal_id} 已创建（nonce/permit "
+                    "仅在 operator 侧；批准即由 rosclawd 独立签发 permit 并提交）。"
+                )
+            except ConsentChannelError as exc:
+                proposal_note = (
+                    f"\n注意：daemon consent plane 不可用（{exc}），"
+                    "物理层未创建 proposal；动作将不会被派发。"
+                )
         return (
             f"已创建授权请求 {request.request_id}（EXACT_ACTION，10 分钟有效）：\n"
             f"【{display.title}】{display.summary}\n"
@@ -141,6 +181,7 @@ class ServiceIntentHandlers:
             f"失败处理：{display.failure_handling or '—'}\n"
             f"请确认：chat 中输入 /approve {request.request_id} 或 /deny {request.request_id}，"
             "或在 Console 的 Approvals 页操作。在你确认前我不会推进该动作。"
+            f"{proposal_note}"
         )
 
     # ------------------------------------------------------------------
@@ -170,6 +211,60 @@ class ServiceIntentHandlers:
             )
         except GrantDeniedError as exc:
             return f"授权校验失败（{exc.reason_code}）：{exc}。动作未提交。"
+        consent = getattr(self, "_consent_channel", None)
+        # ADR-0007 完整路径只在"该授权确实关联了 daemon proposal"时生效
+        # （REAL 模式）；否则回落到 SIM action_channel 或诚实无通道。
+        proposal_id = None
+        action_id = None
+        if consent is not None:
+            grant_row = self._broker._conn.execute(
+                "SELECT request_id FROM mission_grants WHERE grant_id = ?",
+                (grant.grant_id,),
+            ).fetchone()
+            approval_req = self._broker.get_request(grant_row["request_id"]) if grant_row else None
+            if approval_req is not None:
+                extras = approval_req.model_dump(mode="json")
+                proposal_id = getattr(approval_req, "daemon_proposal_id", None) or extras.get(
+                    "daemon_proposal_id"
+                )
+                action_id = getattr(approval_req, "daemon_action_id", None) or extras.get(
+                    "daemon_action_id"
+                )
+        if consent is not None and proposal_id:
+            from rosclaw.agentd.consent_channel import ConsentChannelError
+
+            try:
+                proposal = await consent.proposal(proposal_id)
+            except ConsentChannelError as exc:
+                return f"读取 daemon proposal 失败（fail closed）：{exc}"
+            state = proposal.get("state")
+            if state != "TERMINAL":
+                return (
+                    f"daemon proposal 尚未到终态（state={state}）。"
+                    "若批准时 operator 已裁决，receipt 应在数秒内可用；否则该 proposal "
+                    "可能已过期/失效。不报告为完成。"
+                )
+            if not action_id:
+                return "proposal 已终态但无 action_id，无法回读 receipt（fail closed）。"
+            try:
+                receipt = await consent.action_receipt(action_id)
+            except ConsentChannelError as exc:
+                return f"回执读取失败（fail closed）：{exc}"
+            inner = receipt.get("receipt") if isinstance(receipt.get("receipt"), dict) else receipt
+            trust = inner.get("trust_level", "UNKNOWN")
+            final_state = inner.get("final_state", "UNKNOWN")
+            provenance = (inner.get("authorization_decision") or {}).get("provenance") or {}
+            if trust == "SYNTHETIC":
+                return "回执为 FIXTURE/SYNTHETIC 证据——拒绝当作完成（fail closed）。"
+            if inner.get("action_id") not in (None, action_id):
+                return "回执 action 与请求不匹配——不报告为我们的动作（fail closed）。"
+            return (
+                f"动作已由 rosclawd consent plane 完成：state={final_state}, "
+                f"trust_level={trust}（SIMULATED 证据，不可用于 REAL）。"
+                f"授权来源：proposal {proposal_id[:20]}…, "
+                f"operator={provenance.get('operator_principal')}, "
+                f"channel={provenance.get('decision_channel')}。grant 已消费。"
+            )
         channel = getattr(self, "_action_channel", None)
         if channel is None:
             return (

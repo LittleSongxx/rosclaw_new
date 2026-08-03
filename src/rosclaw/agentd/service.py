@@ -192,11 +192,14 @@ class AgentService:
             body_hash=body.effective_body_hash if body else "",
             mode=config.default_mode,
         )
-        # Daemon action channel (K3): only if a rosclawd socket is actually
-        # reachable — otherwise request_action degrades honestly.
+        # Daemon action channel (K3) + consent channel (ADR-0007): only when
+        # a rosclawd client is actually available — otherwise both degrade
+        # honestly.
         self._action_channel = None
+        self._consent_channel = None
         if self._daemon_client is not None:
             from rosclaw.agentd.action_channel import DaemonActionChannel
+            from rosclaw.agentd.consent_channel import DaemonConsentChannel
 
             self._action_channel = DaemonActionChannel(
                 self._daemon_client,
@@ -205,6 +208,13 @@ class AgentService:
                 body_hash=body.effective_body_hash if body else "",
             )
             self._handlers._action_channel = self._action_channel
+            self._consent_channel = DaemonConsentChannel(
+                self._daemon_client,
+                actor_id=self.actor_id,
+                body_id=self._body_id,
+                body_hash=body.effective_body_hash if body else "",
+            )
+            self._handlers._consent_channel = self._consent_channel
         # Team Fabric: enabled via config `team.enabled`. Local coordinator
         # in P0 (local_sim); ROS 2/Zenoh transports are later PRs.
         team_cfg = (config.raw.get("team") or {}) if config.raw else {}
@@ -343,8 +353,35 @@ class AgentService:
     def pending_approvals(self, mission_id: str | None = None):
         return self._broker.pending_requests(mission_id)
 
-    def decide_approval(self, request_id: str, *, principal: str, approve: bool):
-        return self._broker.decide(request_id, principal=principal, approve=approve)
+    async def decide_approval(self, request_id: str, *, principal: str, approve: bool):
+        """认知层裁决 +（有 consent channel 时）daemon proposal 物理层裁决。
+
+        ACCEPT 时 daemon 独立签发 permit、提交动作并监督到终态 receipt——
+        agentd 只是发起方与见证方，不持有 permit。
+        """
+        grant = self._broker.decide(request_id, principal=principal, approve=approve)
+        if self._consent_channel is not None:
+            request = self._broker.get_request(request_id)
+            proposal_id = getattr(request, "daemon_proposal_id", None) or (
+                request.model_dump(mode="json").get("daemon_proposal_id") if request else None
+            )
+            if proposal_id:
+                from rosclaw.agentd.consent_channel import ConsentChannelError
+
+                try:
+                    await self._consent_channel.decide(
+                        proposal_id,
+                        principal_id=principal,
+                        accept=approve,
+                        channel="rosclaw_console",
+                        reason="operator approved via rosclaw console",
+                    )
+                except ConsentChannelError as exc:
+                    # 认知层已裁决但物理层失败：如实报告，不伪造派发。
+                    raise ValidationError(
+                        f"agentd 授权已记录，但 daemon proposal 裁决失败（未派发）：{exc}"
+                    ) from exc
+        return grant
 
     def list_grants(self):
         rows = self._store.connection.execute(
@@ -546,7 +583,7 @@ def create_app(service: AgentService):
     @app.post("/approvals/{request_id}/decide")
     async def approvals_decide(request_id: str, payload: DecisionCreate) -> dict:
         try:
-            grant = service.decide_approval(
+            grant = await service.decide_approval(
                 request_id, principal=payload.principal, approve=payload.approve
             )
         except Exception as exc:  # noqa: BLE001

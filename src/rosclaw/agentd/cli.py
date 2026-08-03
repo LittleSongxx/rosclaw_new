@@ -363,7 +363,7 @@ async def _chat_repl(service: AgentService, args: argparse.Namespace) -> int:
                 approve = text.startswith("/approve ")
                 request_id = text.split(maxsplit=1)[1].strip()
                 try:
-                    grant = service.decide_approval(
+                    grant = await service.decide_approval(
                         request_id, principal="user:local:1000", approve=approve
                     )
                 except Exception as exc:  # noqa: BLE001
