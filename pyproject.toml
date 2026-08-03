@@ -31,6 +31,10 @@ dependencies = [
     # CI still support Python 3.11 and run mypy with python_version=3.11.
     "numpy>=1.24.0,<2.5",
     "mujoco>=3.0.0",
+    # OpenAI-compatible provider runtime + agentd model gateway use aiohttp
+    # for chat completions / SSE streaming (previously optional; required
+    # since the Native Agent model path became a first-class feature).
+    "aiohttp>=3.9.0",
     "mcp>=1.0.0,<2.0.0",
     "pyyaml>=6.0",
     "fastapi>=0.100.0",
