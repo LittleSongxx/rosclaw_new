@@ -188,7 +188,8 @@ class CatalogCapabilitySource:
         "limo_validate_navigation_goal": 90,
         "limo_get_action_status": 85,
         "limo_get_execution_receipt": 85,
-        "limo_get_camera_state": 80,
+        "limo_capture_camera_frame": 82,
+        "limo_get_camera_state": 81,
         "limo_get_audio_state": 80,
         "limo_measure_microphone": 80,
     }

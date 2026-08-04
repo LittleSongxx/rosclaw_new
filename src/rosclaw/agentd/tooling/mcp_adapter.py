@@ -25,10 +25,13 @@ from __future__ import annotations
 
 import os
 import re
+from base64 import b64decode, b64encode
+from binascii import Error as Base64Error
 from dataclasses import dataclass, field
 from typing import Any
 
 from rosclaw.agentd.tooling.catalog import ToolCatalog
+from rosclaw.agentd.tooling.result import ToolExecutionResult, ToolImage
 from rosclaw.contracts.agent.tool import (
     ExecutionClass,
     ToolDescriptorV2,
@@ -44,6 +47,81 @@ _ACTION_VERBS = re.compile(
     r"command|control|reset|calibrate|dock|charge)($|[._-])",
     re.IGNORECASE,
 )
+
+_IMAGE_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
+_MAX_IMAGE_BYTES = 2 * 1024 * 1024
+_MAX_IMAGES_PER_RESULT = 4
+
+
+def _matches_image_magic(mime_type: str, data: bytes) -> bool:
+    if mime_type == "image/png":
+        return data.startswith(b"\x89PNG\r\n\x1a\n")
+    if mime_type == "image/jpeg":
+        return data.startswith(b"\xff\xd8\xff")
+    if mime_type == "image/webp":
+        return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+    return False
+
+
+def _normalize_result(tool_name: str, source: str, result: Any) -> str | ToolExecutionResult:
+    """Preserve bounded MCP image blocks while keeping a textual tool receipt."""
+    import json as _json
+
+    parts: list[str] = []
+    images: list[ToolImage] = []
+    dropped: list[str] = []
+    for block in result.content:
+        block_type = getattr(block, "type", "")
+        if block_type == "text":
+            parts.append(getattr(block, "text", ""))
+            continue
+        if block_type != "image":
+            dropped.append(f"unsupported:{block_type or 'unknown'}")
+            continue
+        mime_type = str(getattr(block, "mimeType", ""))
+        if mime_type not in _IMAGE_MIME_TYPES:
+            dropped.append(f"unsupported_mime:{mime_type or 'missing'}")
+            continue
+        if len(images) >= _MAX_IMAGES_PER_RESULT:
+            dropped.append("image_count_limit")
+            continue
+        raw_data = getattr(block, "data", "")
+        if isinstance(raw_data, bytes):
+            decoded = raw_data
+            encoded = b64encode(raw_data).decode("ascii")
+        else:
+            encoded = str(raw_data)
+            if len(encoded) > ((_MAX_IMAGE_BYTES + 2) // 3) * 4:
+                dropped.append("image_size_limit")
+                continue
+            try:
+                decoded = b64decode(encoded, validate=True)
+            except (Base64Error, ValueError):
+                dropped.append("invalid_base64")
+                continue
+        if not decoded or len(decoded) > _MAX_IMAGE_BYTES:
+            dropped.append("image_size_limit")
+            continue
+        if not _matches_image_magic(mime_type, decoded):
+            dropped.append("image_signature_mismatch")
+            continue
+        images.append(ToolImage(mime_type=mime_type, data_base64=encoded))
+    payload: dict[str, Any] = {
+        "tool": tool_name,
+        "source": source,
+        "content": parts,
+    }
+    if images:
+        payload["image_blocks"] = [
+            {"mime_type": image.mime_type, "bytes": len(b64decode(image.data_base64))}
+            for image in images
+        ]
+    if dropped:
+        payload["dropped_blocks"] = dropped
+    text = _json.dumps(payload, ensure_ascii=False)
+    if not images:
+        return text
+    return ToolExecutionResult(text=text, images=tuple(images))
 
 
 @dataclass(frozen=True)
@@ -186,11 +264,13 @@ class McpCapabilityAdapter:
     # -- execution ---------------------------------------------------------------
 
     def _make_executor(self, tool_name: str):
-        async def _exec(arguments: dict[str, Any]) -> str:
+        async def _exec(arguments: dict[str, Any]) -> str | ToolExecutionResult:
             import json as _json
 
             if self._client is not None:
                 raw = await self._client.call_tool(tool_name, arguments)
+                if isinstance(raw, ToolExecutionResult):
+                    return raw
                 return _json.dumps(
                     {"tool": tool_name, "source": self.source, "content": [raw]},
                     ensure_ascii=False,
@@ -213,10 +293,6 @@ class McpCapabilityAdapter:
                     getattr(block, "text", "") for block in result.content
                 ).strip()
                 raise ValidationError(f"mcp tool {tool_name!r} error: {text or 'unknown'}")
-            parts = [getattr(block, "text", "") for block in result.content]
-            return _json.dumps(
-                {"tool": tool_name, "source": self.source, "content": parts},
-                ensure_ascii=False,
-            )
+            return _normalize_result(tool_name, self.source, result)
 
         return _exec

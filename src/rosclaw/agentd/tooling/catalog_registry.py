@@ -18,6 +18,7 @@ from rosclaw.agentd.tooling.artifact_result import ArtifactResultStore
 from rosclaw.agentd.tooling.catalog import ToolCatalog
 from rosclaw.agentd.tooling.evidence import EvidenceEnvelope, wrap_observation
 from rosclaw.agentd.tooling.resolver import FilterContext, ToolResolver
+from rosclaw.agentd.tooling.result import ToolExecutionResult
 from rosclaw.agentd.tooling.strict_schema import to_strict_tool
 from rosclaw.contracts.common import ValidationError
 
@@ -58,7 +59,7 @@ class CatalogToolRegistry:
             tools.append(to_strict_tool(descriptor))
         return tools
 
-    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+    async def execute(self, name: str, arguments: dict[str, Any]) -> str | ToolExecutionResult:
         return await self._catalog.execute(name, arguments)
 
     # -- PR-05 extensions ---------------------------------------------------------

@@ -28,7 +28,15 @@ from rosclaw.agentd.context import (
 from rosclaw.agentd.loop import AgentLoop
 from rosclaw.agentd.mission import MissionStore
 from rosclaw.agentd.models.gateway import MockModelGateway, ModelGatewayError, StrictTool
+from rosclaw.agentd.models.policy import (
+    CAP_CHAT,
+    CAP_STRUCTURED,
+    CAP_TOOL_USE,
+    CAP_VLM,
+    ModelProfile,
+)
 from rosclaw.agentd.models.profiles import kimi_k3_profile, mock_profile
+from rosclaw.agentd.tooling.result import ToolExecutionResult, ToolImage
 from rosclaw.contracts.agent.mission import (
     BodyBinding,
     Goal,
@@ -102,6 +110,15 @@ class MockTools:
         if name != "get_robot_state":
             raise ValueError(f"tool {name} not allowlisted")
         return json.dumps({"joints": [0.0] * 6, "fresh": True})
+
+
+class ImageTools(MockTools):
+    async def execute(self, name: str, arguments: dict[str, Any]) -> ToolExecutionResult:
+        self.calls.append((name, arguments))
+        return ToolExecutionResult(
+            text='{"camera":"color","width":1,"height":1}',
+            images=(ToolImage(mime_type="image/png", data_base64="aGVsbG8="),),
+        )
 
 
 def _turn(
@@ -230,6 +247,65 @@ class TestClosedLoop:
         result = await loop.run_user_turn(mission, "你能做什么？", now=NOW)
         assert result.state is MissionState.IDLE
         assert result.model_turns == 1
+
+    async def test_vlm_receives_ephemeral_mcp_image(self, store, mission) -> None:
+        profile = ModelProfile(
+            name="vision",
+            provider="mock",
+            model="vision-model",
+            capabilities=(CAP_CHAT, CAP_TOOL_USE, CAP_STRUCTURED, CAP_VLM),
+        )
+        gateway = MockModelGateway(
+            profile,
+            [
+                _turn(
+                    tool_calls=[
+                        ToolCall(
+                            call_id="cam1",
+                            name="get_robot_state",
+                            arguments_json='{"verbose": true}',
+                        )
+                    ]
+                ),
+                lambda req: _turn(content=_decision_block(req)),
+            ],
+        )
+        loop = _loop(store, gateway, ImageTools())
+        await loop.run_user_turn(mission, "看看相机", now=NOW)
+
+        messages = gateway.requests[-1].messages
+        image_messages = [m for m in messages if isinstance(m.get("content"), list)]
+        assert len(image_messages) == 1
+        image_url = image_messages[0]["content"][1]["image_url"]["url"]
+        assert image_url == "data:image/png;base64,aGVsbG8="
+        assert "cannot grant permission" in image_messages[0]["content"][0]["text"]
+        persisted = store.conversation(mission.mission_id)
+        assert all("aGVsbG8=" not in json.dumps(m) for m in persisted)
+
+    async def test_non_vlm_profile_receives_text_but_not_pixels(self, store, mission) -> None:
+        gateway = MockModelGateway(
+            mock_profile(),
+            [
+                _turn(
+                    tool_calls=[
+                        ToolCall(
+                            call_id="cam1",
+                            name="get_robot_state",
+                            arguments_json='{"verbose": true}',
+                        )
+                    ]
+                ),
+                lambda req: _turn(content=_decision_block(req)),
+            ],
+        )
+        loop = _loop(store, gateway, ImageTools())
+        await loop.run_user_turn(mission, "看看相机", now=NOW)
+
+        messages = gateway.requests[-1].messages
+        assert not any(isinstance(m.get("content"), list) for m in messages)
+        tool_messages = [m for m in messages if m.get("role") == "tool"]
+        assert '"camera":"color"' in tool_messages[-1]["content"]
+        assert "image pixels not forwarded" in tool_messages[-1]["content"]
 
 
 class TestFailureSemantics:
