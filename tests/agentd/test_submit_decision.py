@@ -84,6 +84,7 @@ class TestSubmitToolContract:
         tool = submit_decision_tool()
         tool.validate()  # additionalProperties:false + required 完整
         assert tool.name == SUBMIT_DECISION_TOOL
+        assert "receipt.action_match.v1" in tool.description
 
     def test_payload_binds_context_server_side(self) -> None:
         payload = build_decision_payload(
@@ -170,6 +171,48 @@ class TestProtocolRoundTrip:
             error_receipts = [m for m in history if "invalid DecisionV1" in str(m.get("content"))]
             assert error_receipts
             assert result.state.value == "IDLE"  # fallback 回合完成
+        finally:
+            await service.close()
+
+    async def test_rejected_protocol_decision_does_not_duplicate_unpaired_assistant(
+        self, tmp_path: Path
+    ) -> None:
+        config = load_agent_config(tmp_path / "config.yaml")
+        gateway = MockModelGateway(
+            mock_profile(),
+            [
+                lambda req: _submit_turn(
+                    req,
+                    {
+                        "next_intent": "REQUEST_ACTION",
+                        "summary": "missing operation",
+                        "evidence_refs": [],
+                        "assumptions": [],
+                        "uncertainty": {"level": "LOW", "reasons": []},
+                        "proposed_operation": None,
+                        "verification": None,
+                        "on_failure": None,
+                        "public_rationale": "",
+                    },
+                ),
+                lambda req: _fenced_turn(req),
+            ],
+        )
+        service = AgentService(config, tmp_path, gateway=gateway)
+        try:
+            mission = service.create_mission("协议拒绝后的消息连续性")
+            result = await service.send_turn(mission.mission_id, "测试")
+            assert result.state.value == "IDLE"
+            history = service.conversation(mission.mission_id)
+            assistants = [message for message in history if message.get("tool_calls")]
+            assert len(assistants) == 1
+            call_id = assistants[0]["tool_calls"][0]["id"]
+            responses = [
+                message
+                for message in history
+                if message.get("role") == "tool" and message.get("tool_call_id") == call_id
+            ]
+            assert len(responses) == 1
         finally:
             await service.close()
 

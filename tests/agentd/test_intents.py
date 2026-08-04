@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from rosclaw.agentd.config import load_agent_config
+from rosclaw.agentd.handlers import _verification_summary
 from rosclaw.agentd.models.gateway import MockModelGateway
 from rosclaw.agentd.models.profiles import mock_profile
 from rosclaw.agentd.service import AgentService
@@ -23,6 +24,30 @@ from rosclaw.contracts.agent.agent_event import AgentEventType
 from rosclaw.contracts.agent.mission import MissionState
 from rosclaw.contracts.agent.model_turn import ModelTurnResultV1
 from tests.agentd.conftest import LOCAL_PRINCIPAL
+
+
+def test_terminal_receipt_summary_uses_capability_specific_metrics() -> None:
+    speech = _verification_summary(
+        {
+            "success": True,
+            "observer": "onboard_usb_microphone",
+            "rms_gain_db": 19.67,
+            "observed_rms_dbfs": -31.91,
+            "content_recognition_performed": False,
+            "human_hearing_confirmed": False,
+        }
+    )
+    assert "rms_gain_db=19.67" in speech
+    assert "observed_rms_dbfs=-31.91" in speech
+    assert "content_recognition_performed=False" in speech
+    assert "target_gain_db" not in speech
+
+    tone = _verification_summary(
+        {"success": True, "target_gain_db": 54.08, "target_prominence_db": 35.33}
+    )
+    assert "target_gain_db=54.08" in tone
+    assert "target_prominence_db=35.33" in tone
+    assert "rms_gain_db" not in tone
 
 
 def _decision_turn(request, decision: dict) -> ModelTurnResultV1:

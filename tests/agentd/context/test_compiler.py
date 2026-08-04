@@ -247,6 +247,29 @@ class TestMemoryAndCapabilities:
         assert "tool.x" not in tools
         assert "tool.y" in tools
 
+    def test_operator_only_contract_is_visible_but_prioritized(self) -> None:
+        caps = [
+            CapabilityInfo(name="tool.observe", permission="granted"),
+            CapabilityInfo(
+                name="limo.play_tone",
+                kind="physical_action",
+                summary="exact signed action schema",
+                permission="operator_only",
+            ),
+        ]
+        bundle = _compile(_sources(capabilities=FakeCaps(caps)), dynamic_tool_limit=1)
+        tools = bundle.layers.capabilities.candidate_tools or []
+        assert tools == ["limo.play_tone"]
+        assert "exact signed action schema" in bundle.layers.capabilities.inline_summary
+
+    def test_explicit_context_priority_is_deterministic(self) -> None:
+        caps = [
+            CapabilityInfo(name="tool.alphabetical", priority=0),
+            CapabilityInfo(name="tool.core_meta", priority=90),
+        ]
+        bundle = _compile(_sources(capabilities=FakeCaps(caps)), dynamic_tool_limit=1)
+        assert bundle.layers.capabilities.candidate_tools == ["tool.core_meta"]
+
     def test_dynamic_tool_limit(self) -> None:
         caps = [CapabilityInfo(name=f"tool.{i:02d}") for i in range(30)]
         bundle = _compile(_sources(capabilities=FakeCaps(caps)), dynamic_tool_limit=12)

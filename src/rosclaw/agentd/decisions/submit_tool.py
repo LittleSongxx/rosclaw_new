@@ -109,7 +109,9 @@ def submit_decision_tool() -> StrictTool:
             "its arguments in proposed_operation.payload. For ANSWER, OBSERVE, "
             "WAIT, PAUSE, FAIL_SAFE, VERIFY proposed_operation may be null. "
             "verification.verifiers is required for REQUEST_APPROVAL and "
-            "REQUEST_ACTION (e.g. ['deterministic:bounds'])."
+            "REQUEST_ACTION. Registered verifier ids are exactly "
+            "deterministic.schema.v1, localization.pose_bounds.v1, "
+            "receipt.action_match.v1, and human.attested.v1; never invent one."
         ),
         parameters=DECISION_SUBMIT_SCHEMA,
     )

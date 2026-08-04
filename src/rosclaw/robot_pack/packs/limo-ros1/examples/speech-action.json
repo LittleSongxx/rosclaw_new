@@ -5,17 +5,19 @@
   "session_id": "replace-me",
   "body_id": "limo",
   "body_snapshot_hash": "replace-with-effective-body-hash",
-  "capability_id": "limo.play_tone",
+  "capability_id": "limo.speak_text",
   "arguments": {
-    "schema_version": "limo.tone.v1",
-    "frequency_hz": 660,
-    "duration_sec": 0.6,
+    "schema_version": "limo.speech.v1",
+    "text": "你好，我是 ROSClaw LIMO 巡检机器人。",
+    "language": "cmn",
     "volume_percent": 18,
+    "rate_wpm": 160,
     "expected_effect": {
-      "kind": "speaker_tone",
+      "kind": "speaker_speech",
       "playback_required": true,
       "mixer_restore_required": true,
-      "microphone_loopback_required": true
+      "microphone_loopback_required": true,
+      "content_recognition_required": false
     }
   },
   "execution_mode": "REAL",

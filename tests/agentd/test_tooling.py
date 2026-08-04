@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from rosclaw.agentd.runtime_sources import CatalogCapabilitySource
 from rosclaw.agentd.tooling.artifact_result import ArtifactResultStore
 from rosclaw.agentd.tooling.catalog import (
     ToolCatalog,
@@ -290,6 +292,85 @@ class TestMcpClassification:
         adapter = self._adapter()
         ann = ToolAnnotations(readOnlyHint=True, destructiveHint=True)
         assert adapter.classify("x.y", ann) is ExecutionClass.PHYSICAL_ACTION
+
+
+class TestSignedRobotPackCapabilityContext:
+    def test_core_tool_after_catalog_prefilter_window_is_retained(self) -> None:
+        catalog = ToolCatalog()
+        for index in range(30):
+            catalog.register(_obs(f"limo_alpha_{index:02d}"))
+        catalog.register(_obs("limo_validate_navigation_goal"))
+
+        source = CatalogCapabilitySource(catalog)
+        infos = source.list_capabilities("navigate", 12)
+        by_name = {info.name: info for info in infos}
+
+        assert by_name["limo_validate_navigation_goal"].priority == 90
+
+    def test_exact_pack_schema_replaces_mcp_action_alias(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pack_root = tmp_path / "pack"
+        capability_path = pack_root / "capabilities" / "tone.yaml"
+        capability_path.parent.mkdir(parents=True)
+        capability_path.write_text(
+            """schema_version: rosclaw.capability.v1
+id: limo.play_tone
+title: Tone
+input:
+  type: object
+  additionalProperties: false
+  properties:
+    schema_version: {const: limo.tone.v1}
+    volume_percent: {type: integer}
+  required: [schema_version, volume_percent]
+""",
+            encoding="utf-8",
+        )
+        instance = SimpleNamespace(pack=SimpleNamespace(ref="pack-ref"))
+        record = SimpleNamespace(path=str(pack_root))
+        manifest = SimpleNamespace(
+            components=[
+                SimpleNamespace(
+                    kind="capability",
+                    path="capabilities/tone.yaml",
+                    ref="rosclaw://capability/limo.play_tone@3",
+                )
+            ],
+            capabilities=[
+                SimpleNamespace(
+                    id="limo.play_tone",
+                    title="Play bounded tone",
+                    adapter_tools_any_of=["limo_request_tone"],
+                )
+            ],
+        )
+        from rosclaw.robot_pack import instance as instance_module
+        from rosclaw.robot_pack import store as store_module
+
+        monkeypatch.setattr(
+            instance_module,
+            "load_robot_instance",
+            lambda body_id, home: (instance, tmp_path / "limo.yaml"),
+        )
+        monkeypatch.setattr(
+            store_module.RobotPackStore,
+            "resolve_installed",
+            lambda self, ref: (record, manifest),
+        )
+
+        catalog = ToolCatalog()
+        catalog.register(physical_action_descriptor("limo_request_tone", source="mcp:limo"))
+        catalog.register(_obs("limo_get_audio_state", description="read audio"))
+        source = CatalogCapabilitySource(catalog, home=tmp_path, body_id="limo")
+
+        infos = source.list_capabilities("tone", 12)
+        by_name = {info.name: info for info in infos}
+        assert "limo.play_tone" in by_name
+        assert "limo_request_tone" not in by_name
+        assert by_name["limo.play_tone"].permission == "operator_only"
+        assert "volume_percent" in by_name["limo.play_tone"].summary
+        assert "MUST NOT be placed inside arguments" in by_name["limo.play_tone"].summary
 
 
 class TestMcpDiscovery:

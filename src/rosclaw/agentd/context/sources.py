@@ -58,7 +58,8 @@ class CapabilityInfo:
     kind: str = "tool"  # tool | skill | provider
     summary: str = ""
     schema_ref: str | None = None
-    permission: str = "granted"  # granted | denied | unknown
+    permission: str = "granted"  # granted | operator_only | denied | unknown
+    priority: int = 0  # deterministic context-selection priority, never a permission bypass
 
 
 @dataclass(frozen=True)
