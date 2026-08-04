@@ -28,8 +28,13 @@ from rosclaw.agentd.tooling.catalog import (
 from rosclaw.agentd.tooling.catalog_registry import CatalogToolRegistry
 from rosclaw.agentd.tooling.descriptor import physical_action_descriptor
 from rosclaw.agentd.tooling.evidence import ARTIFACT_SPILL_BYTES, wrap_observation
-from rosclaw.agentd.tooling.mcp_adapter import McpCapabilityAdapter, McpServerConfig
+from rosclaw.agentd.tooling.mcp_adapter import (
+    McpCapabilityAdapter,
+    McpServerConfig,
+    _normalize_result,
+)
 from rosclaw.agentd.tooling.resolver import FilterContext, ToolResolver
+from rosclaw.agentd.tooling.result import ToolExecutionResult
 from rosclaw.agentd.tooling.strict_schema import to_strict_tool
 from rosclaw.contracts.agent.tool import (
     ExecutionClass,
@@ -293,6 +298,42 @@ class TestMcpClassification:
         ann = ToolAnnotations(readOnlyHint=True, destructiveHint=True)
         assert adapter.classify("x.y", ann) is ExecutionClass.PHYSICAL_ACTION
 
+    def test_image_content_is_preserved_with_bounded_metadata(self) -> None:
+        from mcp.types import CallToolResult, ImageContent, TextContent
+
+        result = CallToolResult(
+            content=[
+                TextContent(type="text", text='{"camera":"color"}'),
+                ImageContent(type="image", data="iVBORw0KGgo=", mimeType="image/png"),
+            ]
+        )
+        normalized = _normalize_result("limo_capture_camera_frame", "mcp:limo", result)
+        assert isinstance(normalized, ToolExecutionResult)
+        assert normalized.images[0].mime_type == "image/png"
+        assert normalized.images[0].data_base64 == "iVBORw0KGgo="
+        assert '"bytes": 8' in normalized.text
+        assert "iVBORw0KGgo=" not in normalized.text
+
+    def test_invalid_or_oversized_image_is_not_forwarded(self) -> None:
+        from mcp.types import CallToolResult, ImageContent
+
+        result = CallToolResult(
+            content=[ImageContent(type="image", data="not-base64", mimeType="image/png")]
+        )
+        normalized = _normalize_result("camera", "mcp:limo", result)
+        assert isinstance(normalized, str)
+        assert "invalid_base64" in normalized
+
+    def test_mislabeled_image_payload_is_not_forwarded(self) -> None:
+        from mcp.types import CallToolResult, ImageContent
+
+        result = CallToolResult(
+            content=[ImageContent(type="image", data="aGVsbG8=", mimeType="image/png")]
+        )
+        normalized = _normalize_result("camera", "mcp:limo", result)
+        assert isinstance(normalized, str)
+        assert "image_signature_mismatch" in normalized
+
 
 class TestSignedRobotPackCapabilityContext:
     def test_core_tool_after_catalog_prefilter_window_is_retained(self) -> None:
@@ -306,6 +347,18 @@ class TestSignedRobotPackCapabilityContext:
         by_name = {info.name: info for info in infos}
 
         assert by_name["limo_validate_navigation_goal"].priority == 90
+
+    def test_camera_frame_is_prioritized_for_bounded_multimodal_context(self) -> None:
+        catalog = ToolCatalog()
+        catalog.register(_obs("limo_capture_camera_frame"))
+        catalog.register(_obs("limo_get_camera_state"))
+        for index in range(30):
+            catalog.register(_obs(f"limo_misc_{index:02d}"))
+
+        infos = CatalogCapabilitySource(catalog).list_capabilities("camera", 12)
+        by_name = {info.name: info for info in infos}
+        assert by_name["limo_capture_camera_frame"].priority == 82
+        assert by_name["limo_get_camera_state"].priority == 81
 
     def test_exact_pack_schema_replaces_mcp_action_alias(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

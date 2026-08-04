@@ -12,12 +12,15 @@ from rosclaw.agentd.tooling.resolver import (
     FilterContext,
     ToolResolver,
 )
+from rosclaw.agentd.tooling.result import ToolExecutionResult, ToolImage
 
 __all__ = [
     "EvidenceEnvelope",
     "FilterContext",
     "MAX_INJECTED_TOOLS",
     "ToolCatalog",
+    "ToolExecutionResult",
+    "ToolImage",
     "ToolResolver",
     "wrap_observation",
 ]

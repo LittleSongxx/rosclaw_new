@@ -12,10 +12,12 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from rosclaw.agentd.tooling.result import ToolExecutionResult
 from rosclaw.contracts.agent.tool import ExecutionClass, ToolDescriptorV2
 from rosclaw.contracts.common import ValidationError
 
-ToolExecutor = Callable[[dict[str, Any]], Awaitable[str]]
+ToolOutput = str | ToolExecutionResult
+ToolExecutor = Callable[[dict[str, Any]], Awaitable[ToolOutput]]
 
 
 class ToolNotCallableError(ValidationError):
@@ -98,7 +100,7 @@ class ToolCatalog:
             return candidate
         return tool_id
 
-    async def execute(self, tool_id: str, arguments: dict[str, Any]) -> str:
+    async def execute(self, tool_id: str, arguments: dict[str, Any]) -> ToolOutput:
         descriptor = self._descriptors.get(self._canonical(tool_id))
         if descriptor is None:
             raise ValidationError(f"tool {tool_id!r} not in catalog")
