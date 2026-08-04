@@ -41,6 +41,23 @@ class HandlerOutcome:
     evidence_ref: str | None = None
 
 
+def _verification_summary(verification: dict) -> str:
+    """Render only evidence metrics actually present in a terminal receipt."""
+
+    fields = [
+        ("success", "success"),
+        ("observer", "observer"),
+        ("target_gain_db", "target_gain_db"),
+        ("target_prominence_db", "target_prominence_db"),
+        ("rms_gain_db", "rms_gain_db"),
+        ("observed_rms_dbfs", "observed_rms_dbfs"),
+        ("content_recognition_performed", "content_recognition_performed"),
+        ("human_hearing_confirmed", "human_hearing_confirmed"),
+    ]
+    rendered = [f"{label}={verification[key]}" for key, label in fields if key in verification]
+    return ", ".join(rendered) if rendered else "no structured verification metrics"
+
+
 class ServiceIntentHandlers:
     def __init__(
         self,
@@ -403,10 +420,7 @@ class ServiceIntentHandlers:
                     f"trust_level={trust}, evidence_domain={evidence_domain}, "
                     f"evidence_level={evidence_level}, "
                     f"usable_for_real_execution={str(usable_for_real).lower()}。"
-                    f"验证：success={verification.get('success')}, "
-                    f"observer={verification.get('observer')}, "
-                    f"target_gain_db={verification.get('target_gain_db')}, "
-                    f"target_prominence_db={verification.get('target_prominence_db')}。"
+                    f"验证：{_verification_summary(verification)}。"
                     f"授权来源：proposal {proposal_id[:20]}…, "
                     f"operator={provenance.get('operator_principal')}, "
                     f"channel={provenance.get('decision_channel')}。grant 已消费。"

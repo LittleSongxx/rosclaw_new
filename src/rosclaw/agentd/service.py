@@ -229,7 +229,11 @@ class AgentService:
                 constitution_text=load_prompt("native_agent_v1.md").text,
                 body=self._body_source,
                 self_source=self_source,
-                capabilities=CatalogCapabilitySource(self._tool_catalog),
+                capabilities=CatalogCapabilitySource(
+                    self._tool_catalog,
+                    home=rosclaw_home,
+                    body_id=self._body_id,
+                ),
                 memory=EmptyMemorySource(),
                 organization=RegistryOrgSource(self._registry),
                 consent=BrokerConsentSource(consent_source, self._store.connection),
@@ -330,6 +334,7 @@ class AgentService:
                 body_id=self._body_id,
                 body_hash=body.effective_body_hash if body else "",
             )
+            self._handlers._consent_channel = self._consent_channel
         # PR-12：SIM 物理权威（无 daemon 时）。mcp_servers[] 带
         # sim_executor: true 的 server 同时提供 SIM actuation。
         sim_server = next(
@@ -354,7 +359,6 @@ class AgentService:
             for adapter in self._mcp_adapters:
                 if adapter.source == f"mcp:{sim_server.get('name')}":
                     adapter._client = shared_client
-            self._handlers._consent_channel = self._consent_channel
         # Team Fabric: enabled via config `team.enabled`. Local coordinator
         # in P0 (local_sim); ROS 2/Zenoh transports are later PRs.
         team_cfg = (config.raw.get("team") or {}) if config.raw else {}

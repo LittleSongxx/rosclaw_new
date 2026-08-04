@@ -120,6 +120,38 @@ class TestService:
         finally:
             await live.close()
 
+    async def test_daemon_consent_channel_is_wired_into_intent_handlers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class LiveBodySource:
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            def get_body(self, body_id: str) -> BodyFacts | None:
+                return BodyFacts(
+                    body_id=body_id,
+                    effective_body_hash="body_live_hash",
+                    summary="verified live body",
+                    calibrated=True,
+                )
+
+        monkeypatch.setattr("rosclaw.agentd.service.ResolverBodySource", LiveBodySource)
+        socket_path = tmp_path / "run" / "rosclawd.sock"
+        socket_path.parent.mkdir(parents=True)
+        socket_path.touch()
+        config = load_agent_config(tmp_path / "missing.yaml")
+        config.body_id = "limo"
+        live = AgentService(
+            config,
+            tmp_path,
+            gateway=MockModelGateway(mock_profile(), [_answer_turn]),
+        )
+        try:
+            assert live._consent_channel is not None
+            assert live._handlers._consent_channel is live._consent_channel
+        finally:
+            await live.close()
+
 
 class TestHttpApi:
     @pytest.fixture

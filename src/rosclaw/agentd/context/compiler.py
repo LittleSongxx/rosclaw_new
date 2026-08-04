@@ -63,7 +63,7 @@ UNTRUSTED_CLOSE = "\n</untrusted_input>"
 _MEMORY_ADMITTED = frozenset(
     {EvidenceClass.MEASURED, EvidenceClass.VERIFIED_RECEIPT, EvidenceClass.CURATED}
 )
-_PERMISSION_RANK = {"granted": 2, "unknown": 1, "denied": 0}
+_PERMISSION_RANK = {"granted": 3, "operator_only": 2, "unknown": 1, "denied": 0}
 
 
 class CompilationError(Exception):
@@ -308,9 +308,16 @@ class ContextCompiler:
                 continue
             if _PERMISSION_RANK[cap.permission] < _PERMISSION_RANK[existing.permission]:
                 by_name[cap.name] = cap
-        granted = [c for c in by_name.values() if c.permission == "granted"]
-        granted.sort(key=lambda c: c.name)
-        return granted[: self._dynamic_tool_limit]
+        admitted = [
+            c for c in by_name.values() if c.permission in {"granted", "operator_only"}
+        ]
+        # Context-only physical contracts are never model-callable, but must be
+        # visible so REQUEST_APPROVAL/REQUEST_ACTION can use exact Pack schemas.
+        # Reserve the front of the bounded layer for those contracts.
+        admitted.sort(
+            key=lambda c: (-c.priority, c.permission != "operator_only", c.name)
+        )
+        return admitted[: self._dynamic_tool_limit]
 
     def _mission_summary(self, mission: MissionSessionV1, graph: TaskGraphV1) -> str:
         lines = [

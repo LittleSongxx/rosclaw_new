@@ -542,7 +542,12 @@ class AgentLoop:
                     )
                     if repairs_left > 0:
                         repairs_left -= 1
-                        self._conversation.append(dict(turn.assistant_message))
+                        # Tool-call turns were already appended together with their
+                        # protocol response above. Appending the assistant message a
+                        # second time creates an unpaired tool_call_id and makes the
+                        # next OpenAI-compatible request invalid.
+                        if not turn.tool_calls:
+                            self._conversation.append(dict(turn.assistant_message))
                         self._conversation.append(
                             {
                                 "role": "user",
@@ -749,7 +754,11 @@ class AgentLoop:
             "contract, in addition to the human-readable title/summary/risk fields. Never "
             "request approval for guessed or incomplete action arguments. After approval, read "
             "the Active mission grant in SAFETY & CONSENT and reference its exact public grant_id "
-            "in REQUEST_ACTION."
+            "in REQUEST_ACTION. Registered deterministic verifier ids are EXACTLY: "
+            "deterministic.schema.v1, localization.pose_bounds.v1, "
+            "receipt.action_match.v1, human.attested.v1. Never invent a verifier id. "
+            "For receipt.action_match.v1, proposed_operation.payload.context must contain "
+            "action_id and the canonical receipt object."
         )
         return "\n".join(parts)
 

@@ -28,6 +28,8 @@ from rosclaw.robot_pack.runtime_loader import (
     LimoInitialPoseShadowExecutor,
     LimoNavigationExecutor,
     LimoNavigationShadowExecutor,
+    LimoSpeechExecutor,
+    LimoSpeechShadowExecutor,
     LimoToneExecutor,
     LimoToneShadowExecutor,
     RealSenseCaptureExecutor,
@@ -106,6 +108,7 @@ def _limo_instance(tmp_path: Path):
     for name in (
         "limo_initial_pose_worker.py",
         "limo_navigation_worker.py",
+        "limo_speech_worker.py",
         "limo_tone_worker.py",
     ):
         (workers / name).write_text("# fixed worker fixture\n", encoding="utf-8")
@@ -233,6 +236,45 @@ def _limo_tone_action(instance, **argument_overrides) -> ActionEnvelope:
     )
 
 
+def _limo_speech_action(instance, **argument_overrides) -> ActionEnvelope:
+    arguments = {
+        "schema_version": "limo.speech.v1",
+        "text": "你好，我是 ROSClaw LIMO 巡检机器人。",
+        "language": "cmn",
+        "volume_percent": 18,
+        "rate_wpm": 160,
+        "expected_effect": {
+            "kind": "speaker_speech",
+            "playback_required": True,
+            "mixer_restore_required": True,
+            "microphone_loopback_required": True,
+            "content_recognition_required": False,
+        },
+        **argument_overrides,
+    }
+    return ActionEnvelope(
+        action_id="action-limo-speech",
+        actor_id="test-agent",
+        agent_framework="pytest",
+        session_id="session-limo-speech",
+        body_id=instance.instance_id,
+        body_snapshot_hash=instance.body_snapshot_hash,
+        capability_id="limo.speak_text",
+        arguments=arguments,
+        execution_mode=ExecutionMode.REAL,
+        authorization=AuthorizationContext(
+            principal_id="operator",
+            approved=True,
+            approval_id="permit-speech",
+            scopes=["limo.speak_text"],
+        ),
+        verification_policy=VerificationPolicy(
+            required_evidence=EvidenceLevel.TASK_VERIFIED,
+            timeout_sec=15.0,
+        ),
+    )
+
+
 def _limo_tone_loopback_payload() -> dict[str, object]:
     return {
         "detected": True,
@@ -250,6 +292,25 @@ def _limo_tone_loopback_payload() -> dict[str, object]:
             "target_dbfs": -30.0,
             "target_prominence_db": 18.0,
         },
+        "audio_retained": False,
+        "audio_content_returned": False,
+    }
+
+
+def _limo_speech_loopback_payload() -> dict[str, object]:
+    return {
+        "detected": True,
+        "sensor": "onboard_usb_microphone",
+        "capture_device": "plughw:2,0",
+        "rms_gain_db": 18.5,
+        "thresholds": {"minimum_rms_dbfs": -45.0, "minimum_gain_db": 8.0},
+        "baseline": {"sample_count": 1600, "rms_dbfs": -55.0, "peak_dbfs": -44.0},
+        "during_playback": {
+            "sample_count": 16000,
+            "rms_dbfs": -36.5,
+            "peak_dbfs": -20.0,
+        },
+        "content_recognition_performed": False,
         "audio_retained": False,
         "audio_content_returned": False,
     }
@@ -559,6 +620,52 @@ def test_limo_tone_executor_fails_without_microphone_loopback(tmp_path, monkeypa
     assert "did not observe" in result.errors[0]["message"]
 
 
+def test_limo_speech_executor_returns_energy_verified_receipt(tmp_path, monkeypatch) -> None:
+    instance, source = _limo_instance(tmp_path)
+    action = _limo_speech_action(instance)
+    text = action.arguments["text"]
+    payload = {
+        "protocol": "rosclaw.limo.worker.v1",
+        "ok": True,
+        "accepted": True,
+        "action_id": action.action_id,
+        "operation": "SPEAK_TEXT",
+        "device": "pulse:alsa_output.usb-0c76_USB_PnP_Audio_Device-00.analog-stereo",
+        "playback_backend": "pulseaudio",
+        "language": "cmn",
+        "rate_wpm": 160,
+        "volume_percent": 18,
+        "sample_rate_hz": 22050,
+        "frame_count": 24000,
+        "text_character_count": len(text),
+        "text_sha256": "sha256:" + __import__("hashlib").sha256(text.encode()).hexdigest(),
+        "volume_mapping": "normalized_pcm_linear_percent",
+        "digital_peak_scale": 0.162,
+        "reference_output_gain_percent": 100,
+        "original_output_state": {"backend": "pulseaudio", "unmuted": True},
+        "started_wall_time": 10.0,
+        "completed_wall_time": 11.4,
+        "mixer_restored": True,
+        "acoustic_loopback": _limo_speech_loopback_payload(),
+        "acoustic_loopback_detected": True,
+    }
+    monkeypatch.setattr(
+        "rosclaw.robot_pack.runtime_loader.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=__import__("json").dumps(payload), stderr=""
+        ),
+    )
+
+    result = LimoSpeechExecutor(instance, adapter_source=source)(action)
+
+    assert result.final_state is ActionState.COMPLETED
+    assert result.evidence_level is EvidenceLevel.TASK_VERIFIED
+    assert result.driver_ack["text_sha256"] == payload["text_sha256"]
+    assert result.verification_result["acoustic_output_independently_observed"] is True
+    assert result.verification_result["content_recognition_performed"] is False
+    assert result.verification_result["rms_gain_db"] == 18.5
+
+
 @pytest.mark.parametrize(
     ("executor_type", "action_factory", "override", "code"),
     [
@@ -573,6 +680,12 @@ def test_limo_tone_executor_fails_without_microphone_loopback(tmp_path, monkeypa
             _limo_tone_action,
             {"volume_percent": 80},
             "LIMO_TONE_CONTRACT_INVALID",
+        ),
+        (
+            LimoSpeechExecutor,
+            _limo_speech_action,
+            {"volume_percent": 80},
+            "LIMO_SPEECH_CONTRACT_INVALID",
         ),
     ],
 )
@@ -599,6 +712,7 @@ def test_limo_fixed_workers_reject_contract_drift_before_dispatch(
     [
         (LimoNavigationShadowExecutor, _limo_navigation_action),
         (LimoToneShadowExecutor, _limo_tone_action),
+        (LimoSpeechShadowExecutor, _limo_speech_action),
     ],
 )
 def test_limo_fixed_worker_shadows_never_dispatch(
@@ -631,7 +745,7 @@ def test_daemon_loader_registers_limo_initial_pose_executor(tmp_path) -> None:
             installed_at="2026-07-30T00:00:00Z",
             artifact_type="test",
             server_dir=str(home / "mcp"),
-            extra={"repo_commit": "c9b4a061e86d9ece34582733a7b1fbb9556ff69a"},
+            extra={"repo_commit": "3e1068b244af636b247125eca32030d72e780477"},
         )
     )
     configure_robot_instance(
@@ -649,7 +763,7 @@ def test_daemon_loader_registers_limo_initial_pose_executor(tmp_path) -> None:
     status = load_daemon_robot_pack(runtime, robot_id="limo", home=home)
 
     assert status is not None
-    assert status["pack_ref"].endswith("limo-ros1@0.1.10")
+    assert status["pack_ref"].endswith("limo-ros1@0.1.25")
     assert status["registered_executors"] == [
         "limo.set_initial_pose:SHADOW",
         "limo.set_initial_pose:REAL",
@@ -657,6 +771,8 @@ def test_daemon_loader_registers_limo_initial_pose_executor(tmp_path) -> None:
         "limo.navigate_to_pose:REAL",
         "limo.play_tone:SHADOW",
         "limo.play_tone:REAL",
+        "limo.speak_text:SHADOW",
+        "limo.speak_text:REAL",
     ]
     assert isinstance(runtime.action_gateway.registrations[0][2], LimoInitialPoseShadowExecutor)
     assert isinstance(runtime.action_gateway.registrations[1][2], LimoInitialPoseExecutor)
@@ -664,6 +780,8 @@ def test_daemon_loader_registers_limo_initial_pose_executor(tmp_path) -> None:
     assert isinstance(runtime.action_gateway.registrations[3][2], LimoNavigationExecutor)
     assert isinstance(runtime.action_gateway.registrations[4][2], LimoToneShadowExecutor)
     assert isinstance(runtime.action_gateway.registrations[5][2], LimoToneExecutor)
+    assert isinstance(runtime.action_gateway.registrations[6][2], LimoSpeechShadowExecutor)
+    assert isinstance(runtime.action_gateway.registrations[7][2], LimoSpeechExecutor)
 
 
 def test_signed_limo_pack_runs_tone_through_daemon_permit_and_receipt(
@@ -677,6 +795,7 @@ def test_signed_limo_pack_runs_tone_through_daemon_permit_and_receipt(
     for name in (
         "limo_initial_pose_worker.py",
         "limo_navigation_worker.py",
+        "limo_speech_worker.py",
         "limo_tone_worker.py",
     ):
         (workers / name).write_text("# fixed worker fixture\n", encoding="utf-8")
@@ -689,7 +808,7 @@ def test_signed_limo_pack_runs_tone_through_daemon_permit_and_receipt(
             installed_at="2026-07-31T00:00:00Z",
             artifact_type="test",
             server_dir=str(adapter_source),
-            extra={"repo_commit": "c9b4a061e86d9ece34582733a7b1fbb9556ff69a"},
+            extra={"repo_commit": "3e1068b244af636b247125eca32030d72e780477"},
         )
     )
     instance = configure_robot_instance(
