@@ -29,6 +29,14 @@ jobs:
       - name: Run ruff check
         run: ruff check src tests
 
+  cross-uid-operator-e2e:
+    name: Cross-UID Operator E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - name: Build and run four-UID operator e2e
+        run: bash scripts/e2e/operator_cross_uid/run.sh
+
   type-check:
     name: Type Check
     runs-on: ubuntu-latest
@@ -276,7 +284,9 @@ jobs:
   deployment-test:
     name: ROS Docker Deployment Test
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 冷缓存构建 ROS 2 Humble 镜像 + smoke 可能超过 15 分钟（环境性，
+    # 与代码无关）；此前暖缓存 2m18s 通过掩盖了这一点。
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.0
 
