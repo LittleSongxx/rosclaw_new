@@ -1,8 +1,9 @@
 # Know / How v2 implementation report
 
 Date: 2026-08-06
-Target release: 1.2.0
-Source plan: `know_how_优化v1.md`
+Baseline releases: rosclaw-know 1.2.1, rosclaw-how 1.2.0
+Published hardening releases: rosclaw-know 1.2.2, rosclaw-how 1.2.1
+Source plan: `know_how_优化v2.md`
 
 ## Result
 
@@ -25,13 +26,25 @@ create an `ActionEnvelope` or bypass Core policy, safety, daemon or driver
 boundaries. Memory remains a separately labelled robot-experience input and
 is not used as Know's corpus or store.
 
-The implementation is present as uncommitted working-tree changes based on:
+The v1 foundation was merged and released before this hardening pass:
 
-| Repository | Base commit | Package version |
+| Repository | Merged baseline | Package version / state |
 | --- | --- | --- |
-| `rosclaw-know` | `55ce4981f46ca469ff1cc6ca9582f82d6e2d8c92` | 1.2.0 |
-| `rosclaw-how` | `4639cd68bbe294ce61eb01d63c9a96999e3f969f` | 1.2.0 |
-| `rosclaw` | `fbf9a692bbf759fdc8f8e304d205c3d592ca4dc9` | 1.2.0 |
+| `rosclaw-know` | `3e81b4c` | 1.2.1 published |
+| `rosclaw-how` | `d2dea03` | 1.2.0 published |
+| `rosclaw` | `44d83d1e` | merged; no Core PyPI release requested |
+
+The usefulness hardening packages are merged and published from their merged
+default branches:
+
+| Repository | Pull request | Merge commit | Final state |
+| --- | --- | --- | --- |
+| `rosclaw-know` | `ros-claw/rosclaw-know#5` | `ac4c2dd` | 1.2.2 tagged and published |
+| `rosclaw-how` | `ros-claw/rosclaw-how#3` | `d52ecfd` | 1.2.1 tagged and published |
+
+The Core evidence and contract-copy update remains on branch
+`agent/know-how-usefulness-v2` until this report's own pull request is merged;
+no Core PyPI release is requested or produced.
 
 ## Architecture and contracts
 
@@ -119,6 +132,17 @@ license fields and a signer Protocol. The included HMAC signer is for local
 offline integrity; deployment can provide a stronger signer. Offline imports
 remain explicitly marked as offline and freshness-limited.
 
+### Feedback governance hardening
+
+Every accepted `KnowledgeUsageFeedbackV1` now creates a durable,
+deterministic `FeedbackGovernanceRecordV1`. The mapping is conservative:
+useful and irrelevant verdicts record signals only; stale enters source-refresh
+review; incompatible enters compatibility review; misleading enters downweight
+review; unknown enters manual review. Every record fixes
+`automatic_mutation_allowed=false`. The API returns the governance result and
+exposes a bounded/filterable queue. Idempotent feedback IDs stay idempotent and
+conflicting reuse is rejected.
+
 ## rosclaw-how
 
 How accesses Know only through the versioned Reference Pack/feedback client;
@@ -133,11 +157,17 @@ and unknown context are surfaced explicitly. Know evidence and Memory evidence
 are separately labelled in diagnosis output.
 
 The v2 API now includes the four explicit mode endpoints, generic advice,
-bounded process-local advice lookup, feedback, health and capabilities.
+durable bounded advice lookup, feedback, health and capabilities.
 Capabilities explicitly state that How owns neither a retrieval index nor
 action authority. Advice and feedback endpoints enforce the existing optional
 How API-key allowlist. The legacy `/wiki/v1` path can be rolled through the v2
 engine behind a feature flag.
+
+Advice records live in a bounded SQLite store with creation/expiry and
+feedback status, so lookup survives process restart. Service-mode Reference
+Packs use a separate bounded SQLite cache. Fresh, cached and stale states are
+strict contract fields propagated into How advice. An upstream stale label is
+preserved; missing or over-age cache causes abstention.
 
 ## Core rosclaw
 
@@ -181,38 +211,62 @@ Exact revisions and non-adoptions are recorded in
 `KNOW_HOW_REFERENCE_STUDY.md`. The supplied RepoMaster repository URL was not
 available and no substitute was silently selected.
 
+## Usefulness evidence
+
+The reproducible campaign under
+`docs/reports/validation_runs/know-how-usefulness-v2/fixture-20260806/`
+uses three controlled fixtures aligned with the requested G1 football,
+RealSense ARM and LIMO ROS1 lines. Each corpus contains an exact lexical match
+that is incompatible with the runtime and a pinned compatible route.
+
+| Metric (3 tasks) | keyword-only control | Know→Pack→How |
+| --- | ---: | ---: |
+| wrong initial routes | 3 | 0 |
+| compatibility errors | 3 | 0 |
+| references read before first compatible route | 6 | 3 |
+| pinned evidence presented | 0 | 3 |
+| oracle-compatible route passes | 0 | 3 |
+
+A paired vLLM run used `deepseekv4`, temperature 0.0 and the same three
+tasks/runtime contexts. The treatment changed only by adding the Reference
+Pack and How advice. The control found 0/3 exact fixture files and 0/3 expected
+routes; treatment found 3/3 and 3/3. Raw outputs are retained, including the
+control arm's guessed paths and unverified command suggestions. The prompt
+leakage found during the first audit was removed and that invalid artifact was
+discarded before the recorded run.
+
+This proves value level 3: cited/context-filtered knowledge changes the next
+engineering action and avoids a known incompatible route. It does not prove
+physical value level 4 or cross-task accumulated value level 5.
+
 ## Verification performed
 
-All tests used fixtures, mocks, temporary directories or embedded stores. No
-real ROS graph, robot, actuator or hardware service was contacted.
+All tests used fixtures, mocks, temporary directories, SHADOW paths or
+embedded stores. No real ROS graph, robot, actuator or hardware service was
+contacted.
 
 | Check | Result |
 | --- | --- |
-| `rosclaw-know` full pytest | 682 passed, 7 skipped |
-| `rosclaw-how` full pytest | 357 passed |
-| Core knowledge + E2E + MCP + CLI focused regression | 100 passed |
-| Real installed-package in-process Know→Pack→How→feedback loop | passed |
-| v2 Ruff scopes and all three `git diff --check` checks | passed |
-| Three 1.2.0 wheel builds | passed |
-| Wheel schema/migration/module inspection | passed |
-| Python 3.13 clean full-dependency wheel install | passed |
-| Clean uninstall and `--no-index --no-deps` local-wheel reinstall | passed |
-| `rosclaw[knowledge]==1.2.0` dependency resolution | passed |
-| `rosclaw[all]==1.2.0` dependency resolution | passed |
-| Installed entrypoint disabled/degradation check | passed |
-| Core full pytest | 6375 passed, 74 skipped, 39 deselected, 6 environment failures |
+| `rosclaw-know` full pytest | 689 passed, 7 skipped |
+| `rosclaw-how` full pytest | 361 passed |
+| Core `tests/knowledge` | 24 passed |
+| contract/schema/governance focused regression | 47 passed |
+| cache expiry, restart and upstream-stale boundary tests | passed |
+| deterministic three-task usefulness A/B assertions | passed |
+| paired vLLM A/B (six requests) | passed; exact file and route 0/3 → 3/3 |
+| 1.2.2 / 1.2.1 wheel builds and Twine metadata checks | passed |
+| official PyPI JSON/Simple Index and exact-version install smoke | passed for both packages |
+| clean Python 3.13 no-deps wheel install + v2 SQLite smoke | passed |
+| changed-scope Ruff and all three `git diff --check` checks | passed |
+| Core full pytest | 6371 passed, 74 skipped, 39 deselected, 11 environment failures |
 
-The clean wheel environment reported all three installed versions as 1.2.0,
-found the packaged JSON Schema, found all 12 migration files and opened an
-isolated SeekDB embedded database.
+The 11 Core failures are outside the changed knowledge surfaces: one offline
+release installer lacks its cached `aiohttp` dependency; two tests assume
+the host `codex` binary is absent; four LeRobot tests select an interpreter
+that cannot import LeRobot; and four firstboot tests expect console scripts in
+PATH. The changed Core knowledge suite passes 24/24.
 
-The six Core full-suite failures are outside the changed Know/How areas. Two
-external-worker tests assume the `codex` binary is absent, while this host has
-an incompatible/untrusted-directory Codex CLI. Four LeRobot integration tests
-are selected by their availability probe but the configured worker interpreter
-cannot import LeRobot. Focused reruns of all changed Core surfaces pass.
-
-## Known limits and release follow-ups
+## Known limits and deployment follow-ups
 
 - SeekDB server-mode construction, SQL migrations and feature negotiation are
   implemented, and Core server-parameter wiring is unit tested, but no live
@@ -222,15 +276,12 @@ cannot import LeRobot. Focused reruns of all changed Core surfaces pass.
   were intentionally not run. Default CI remains deterministic and offline.
 - Native multi-vector is not available in the probed collection API; the
   implementation uses coordinated vector collections/fields and RRF.
-- Advice lookup is a bounded process-local cache, not a durable How database.
-  Reference Packs themselves remain durable in Know.
-- The HTTP clients do not yet serve a previously cached Reference Pack after
-  Know becomes unavailable; callers receive explicit degraded/unavailable
-  state instead of a stale pseudo-fresh answer.
+- How persistence is local bounded SQLite. Multi-replica deployments must use
+  a shared/replicated store or accept per-replica advice/cache visibility.
 - HMAC is the included local bundle signer. A managed deployment should inject
   an asymmetric signer and key-management policy through `BundleSigner`.
-- Knowledge feedback is stored and available to refresh/ranking governance,
-  but automatic source refresh scheduling is not enabled by feedback alone.
+- Feedback creates refresh/review candidates but intentionally does not run a
+  refresh worker or mutate ranking/knowledge without a separate review action.
 - The Know v2 API implements the operational closed loop, but the plan's
   separate discover/ingest, project-compare and admin endpoints are not all
   split into independent public routes yet.
@@ -240,4 +291,39 @@ cannot import LeRobot. Focused reruns of all changed Core surfaces pass.
 These limits should prevent declaring every checkbox in the source plan's
 Definition of Done complete. The implemented default path and the tested
 closed loop are usable; server/live-source and deployment-signing validation
-remain release gates for environments that require them.
+remain deployment gates for environments that require them.
+
+## Validation intentionally left blank
+
+| Requested real-world check | Result |
+| --- | --- |
+| live SeekDB server, SQL rollback, AI_RERANK |  |
+| live GitHub/arXiv/official-doc sources |  |
+| ten real-project wiki audit |  |
+| real G1 football implementation |  |
+| real RealSense ARM integration |  |
+| real LIMO ROS1 integration |  |
+| physical before/after success metrics |  |
+
+These cells are blank rather than converted into fixture claims.
+
+## v2 review answers
+
+1. Key sources in the recorded campaign are pinned fixture snapshots listed in
+   `source_manifest.json`; no live source is claimed.
+2. The Reference Pack changed all three first routes from incompatible lexical
+   matches to context-compatible routes.
+3. Compatibility filtering avoided ROS1/ROS2, robot and architecture/version
+   mismatch candidates in the controlled corpus.
+4. Every treatment opened one exact file backed by an evidence ID, snapshot ID
+   and content hash.
+5. The code changes are durable AdviceStore, explicit cache degradation and
+   non-mutating feedback governance.
+6. Package, contract, API, failure-boundary and Core knowledge tests pass.
+7. Advice/cache reuse is proven across SQLite reopen; cross-task real-project
+   reuse is not claimed.
+8. Incremental source refresh was not run against a live repository.
+9. Feedback enters auditable signal/refresh/review queues and cannot
+   automatically mutate knowledge.
+10. In the controlled A/B, first-compatible reads fall 6→3 and wrong first
+    routes fall 3→0; no real elapsed-time or physical rework claim is made.

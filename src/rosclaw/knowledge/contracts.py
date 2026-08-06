@@ -150,6 +150,9 @@ class ReferencePackV2(StrictWireModel):
     truncated: bool = False
     continuation_cursor: str | None = None
     warnings: list[str] = Field(default_factory=list)
+    cached: bool = False
+    stale: bool = False
+    cache_age_seconds: int = Field(default=0, ge=0)
 
     _generated_aware = field_validator("generated_at")(_aware)
 
@@ -157,6 +160,10 @@ class ReferencePackV2(StrictWireModel):
     def _cursor_when_truncated(self):
         if self.truncated and not self.continuation_cursor:
             raise ValueError("truncated packs require a continuation_cursor")
+        if self.stale and not self.cached:
+            raise ValueError("stale Reference Packs must also be marked cached")
+        if (self.cached or self.stale) and not self.warnings:
+            raise ValueError("cached Reference Packs must explain degradation in warnings")
         return self
 
 
@@ -177,6 +184,9 @@ class HowAdviceBundleV2(StrictWireModel):
     mode: Literal["discover", "consult", "diagnose", "catalyze"]
     context_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     reference_pack_id: str | None = None
+    reference_pack_cached: bool = False
+    reference_pack_stale: bool = False
+    reference_pack_age_seconds: int = Field(default=0, ge=0)
     summary: str = Field(min_length=1)
     diagnosis: str | None = None
     recommendations: list[AdviceRecommendationV2] = Field(default_factory=list)
@@ -192,6 +202,8 @@ class HowAdviceBundleV2(StrictWireModel):
     def _abstention_explained(self):
         if self.abstained and not self.abstention_reason:
             raise ValueError("abstained advice requires abstention_reason")
+        if self.reference_pack_stale and not self.reference_pack_cached:
+            raise ValueError("stale advice must identify a cached Reference Pack")
         return self
 
 
