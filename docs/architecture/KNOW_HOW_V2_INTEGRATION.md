@@ -1,6 +1,7 @@
 # Know / How v2 core integration
 
-Status: implemented in the 1.2.0 working tree.
+Status: baseline merged; 2026-08-06 usefulness hardening implemented, with
+rosclaw-know 1.2.2 and rosclaw-how 1.2.1 published.
 
 ## Ownership boundary
 
@@ -42,6 +43,10 @@ Environment controls:
 - `ROSCLAW_KNOW_URL`, `ROSCLAW_HOW_V2_URL`, API-key variables and `ROSCLAW_KNOWLEDGE_TIMEOUT` for service mode.
 - `ROSCLAW_KNOW_STORE_MODE` and `ROSCLAW_KNOW_SEEKDB_PATH` for in-process Know.
 
+How service advice/cache persistence additionally uses the
+ROSCLAW_HOW_ADVICE_* and ROSCLAW_HOW_REFERENCE_PACK_* controls documented by
+rosclaw-how.
+
 ## Agent and MCP surface
 
 The registered tools are intentionally small:
@@ -58,3 +63,18 @@ Every tool is S0/read-only. `rosclaw_how_advice` is additionally marked advisory
 Only allowlisted lifecycle events containing identifiers, counts, versions and statuses cross the EventBus adapter. Feedback records whether a unit was presented, opened or useful; a receipt or Practice reference is only a reference. Feedback cannot claim that a physical action succeeded and cannot carry raw Memory content.
 
 Dashboard status includes v2 mode and component health. A How or Know failure therefore remains observable without changing estop, safety policy, daemon or driver behavior.
+
+Feedback verdicts now create explicit, non-mutating Know governance records:
+useful/irrelevant feedback records signals; stale feedback enters source
+refresh review; incompatible feedback enters compatibility review; misleading
+feedback enters ranking review. No verdict permits automatic deletion,
+rewriting, promotion or constraint override.
+
+How keeps advice in a durable bounded store and service-mode Reference Packs
+in a separate bounded cache. Fresh, cached and stale states are explicit
+contract fields. A missing or over-age cached pack causes abstention.
+
+The reproducible fixture campaign and raw paired-model output are under
+docs/reports/validation_runs/know-how-usefulness-v2/. It proves that the
+mechanism changes the next engineering action (value level 3); it does not
+claim real-hardware effectiveness.
