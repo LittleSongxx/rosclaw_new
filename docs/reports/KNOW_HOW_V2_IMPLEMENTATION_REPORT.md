@@ -39,9 +39,9 @@ were published only for Know and How, as requested:
 
 | Repository | Pull request | Merge commit | Final state |
 | --- | --- | --- | --- |
-| `rosclaw-know` | `ros-claw/rosclaw-know#5` | `ac4c2dd` | 1.2.2 tagged and published |
-| `rosclaw-how` | `ros-claw/rosclaw-how#3` | `d52ecfd` | 1.2.1 tagged and published |
-| `rosclaw` | `ros-claw/rosclaw#252` | `b8cec725` | merged; no Core PyPI release |
+| `rosclaw-know` | [#5](https://github.com/ros-claw/rosclaw-know/pull/5) | `ac4c2dd` | [1.2.2 tagged and published](https://pypi.org/project/rosclaw-know/1.2.2/) |
+| `rosclaw-how` | [#3](https://github.com/ros-claw/rosclaw-how/pull/3) | `d52ecfd` | [1.2.1 tagged and published](https://pypi.org/project/rosclaw-how/1.2.1/) |
+| `rosclaw` | [#252](https://github.com/ros-claw/rosclaw/pull/252) | `b8cec725` | merged; no Core PyPI release |
 
 Core pull-request CI completed all 18 checks successfully. Its conditional
 `Release to PyPI` job was skipped; no Core package was produced or published.
