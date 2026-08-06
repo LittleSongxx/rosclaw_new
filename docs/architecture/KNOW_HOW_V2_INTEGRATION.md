@@ -1,7 +1,8 @@
 # Know / How v2 core integration
 
 Status: baseline merged; 2026-08-06 usefulness hardening implemented, with
-rosclaw-know 1.2.2 and rosclaw-how 1.2.1 published.
+Core pull request #252 merged, and rosclaw-know 1.2.2 plus rosclaw-how 1.2.1
+published.
 
 ## Ownership boundary
 

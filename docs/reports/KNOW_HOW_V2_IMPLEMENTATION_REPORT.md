@@ -34,17 +34,17 @@ The v1 foundation was merged and released before this hardening pass:
 | `rosclaw-how` | `d2dea03` | 1.2.0 published |
 | `rosclaw` | `44d83d1e` | merged; no Core PyPI release requested |
 
-The usefulness hardening packages are merged and published from their merged
-default branches:
+The usefulness hardening is merged across all three repositories. Packages
+were published only for Know and How, as requested:
 
 | Repository | Pull request | Merge commit | Final state |
 | --- | --- | --- | --- |
 | `rosclaw-know` | `ros-claw/rosclaw-know#5` | `ac4c2dd` | 1.2.2 tagged and published |
 | `rosclaw-how` | `ros-claw/rosclaw-how#3` | `d52ecfd` | 1.2.1 tagged and published |
+| `rosclaw` | `ros-claw/rosclaw#252` | `b8cec725` | merged; no Core PyPI release |
 
-The Core evidence and contract-copy update is proposed in
-`ros-claw/rosclaw#252` from branch `agent/know-how-usefulness-v2`; no Core
-PyPI release is requested or produced.
+Core pull-request CI completed all 18 checks successfully. Its conditional
+`Release to PyPI` job was skipped; no Core package was produced or published.
 
 ## Architecture and contracts
 
