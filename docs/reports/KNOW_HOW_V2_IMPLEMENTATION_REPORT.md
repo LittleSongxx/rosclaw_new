@@ -42,9 +42,9 @@ default branches:
 | `rosclaw-know` | `ros-claw/rosclaw-know#5` | `ac4c2dd` | 1.2.2 tagged and published |
 | `rosclaw-how` | `ros-claw/rosclaw-how#3` | `d52ecfd` | 1.2.1 tagged and published |
 
-The Core evidence and contract-copy update remains on branch
-`agent/know-how-usefulness-v2` until this report's own pull request is merged;
-no Core PyPI release is requested or produced.
+The Core evidence and contract-copy update is proposed in
+`ros-claw/rosclaw#252` from branch `agent/know-how-usefulness-v2`; no Core
+PyPI release is requested or produced.
 
 ## Architecture and contracts
 
