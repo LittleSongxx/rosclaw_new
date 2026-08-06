@@ -173,12 +173,21 @@ class DaemonClient:
         lease = self._action_leases.get(action_id)
         if lease is not None and time.monotonic() >= lease[1]:
             session_id, _next_renewal, interval_sec = lease
-            self.renew_action_lease(action_id, session_id)
-            self._action_leases[action_id] = (
-                session_id,
-                time.monotonic() + interval_sec,
-                interval_sec,
-            )
+            try:
+                self.renew_action_lease(action_id, session_id)
+            except DaemonRequestError as exc:
+                if exc.code != "ACTION_NOT_ACTIVE":
+                    raise
+                # The action may have reached a terminal state between the previous
+                # status poll and this renewal.  Drop the stale local lease and read
+                # the canonical terminal status below.
+                self._action_leases.pop(action_id, None)
+            else:
+                self._action_leases[action_id] = (
+                    session_id,
+                    time.monotonic() + interval_sec,
+                    interval_sec,
+                )
         status = self.call("action.status", {"action_id": action_id})
         if status.get("state") in {"FINISHED", "CANCELLED"}:
             self._action_leases.pop(action_id, None)
