@@ -36,7 +36,11 @@ from rosclaw.contracts.operator.decision import (
     canonical_json,
 )
 from rosclaw.operatord.enrollment import OperatorIdentity, load_identity
-from rosclaw.operatord.human import confirm_on_tty, render_card, requester_is_foreground
+from rosclaw.operatord.human import (
+    confirm_on_requester_tty,
+    render_card,
+    requester_is_foreground,
+)
 
 
 def default_operatord_socket(home: Path | None = None) -> Path:
@@ -269,7 +273,7 @@ class OperatorDaemon:
                 challenge_nonce=challenge.challenge_nonce,
                 expires_at=challenge.expires_at,
             )
-            answer = await asyncio.to_thread(confirm_on_tty, prompt)
+            answer = await asyncio.to_thread(confirm_on_requester_tty, peer_pid, prompt)
             if answer.decision is None:
                 return {"ok": False, "error": f"human confirmation failed: {answer.detail}"}
             decision = ACCEPT if answer.decision else DECLINE
