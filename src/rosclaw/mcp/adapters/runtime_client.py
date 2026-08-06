@@ -809,11 +809,22 @@ class RuntimeClient:
                 self._daemon_client.track_action_lease, action.action_id
             )
             if wait_timeout_sec > 0:
-                result = await asyncio.to_thread(
-                    self._daemon_client.wait_for_action,
-                    action.action_id,
-                    timeout_sec=wait_timeout_sec,
-                )
+                try:
+                    result = await asyncio.to_thread(
+                        self._daemon_client.wait_for_action,
+                        action.action_id,
+                        timeout_sec=wait_timeout_sec,
+                    )
+                except Exception as exc:  # noqa: BLE001 - preserve accepted long action
+                    if str(getattr(exc, "code", "")) != "ACTION_WAIT_TIMEOUT":
+                        raise
+                    # A bounded MCP wait is not an execution failure.  The broker already
+                    # submitted the action and this DaemonClient owns its renewal schedule;
+                    # return the live ticket so later status polls can keep renewing it.
+                    result = await asyncio.to_thread(
+                        self._daemon_client.get_action_status,
+                        action.action_id,
+                    )
             after = await asyncio.to_thread(self._daemon_client.get_runtime_status)
             armed_by_confirmation = (
                 str(before.get("supervision_state")) != "ARMED"

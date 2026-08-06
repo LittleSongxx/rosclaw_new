@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from rosclaw.daemon.client import DaemonClientError
 from rosclaw.kernel import ActionEnvelope
 from rosclaw.mcp.adapters.runtime_client import RuntimeClient
 from rosclaw.mcp.schemas.common import MCPError
@@ -25,6 +26,7 @@ class _FakeDaemonClient:
         self.proposals: dict[str, ActionEnvelope] = {}
         self.cancelled_proposals: list[str] = []
         self.tracked_action_leases: list[str] = []
+        self.wait_error: Exception | None = None
 
     def get_runtime_status(self) -> dict[str, Any]:
         return {
@@ -143,6 +145,8 @@ class _FakeDaemonClient:
         return {"session_id": session_id, "state": "CLOSED"}
 
     def wait_for_action(self, action_id: str, *, timeout_sec: float) -> dict[str, Any]:
+        if self.wait_error is not None:
+            raise self.wait_error
         return {
             "action_id": action_id,
             "state": "FINISHED",
@@ -336,6 +340,39 @@ async def test_interactive_confirmation_closes_terminal_action_session(
     assert result["operator_confirmation"]["session_closed"] is True
     assert result["operator_confirmation"]["session_cleanup_error"] is None
     assert daemon.closed_sessions == [("action-terminal", "confirmed_action_finished")]
+
+
+async def test_interactive_confirmation_returns_live_ticket_on_bounded_wait_timeout(
+    client: tuple[RuntimeClient, _FakeDaemonClient],
+) -> None:
+    runtime_client, daemon = client
+    daemon.wait_error = DaemonClientError(
+        "ACTION_WAIT_TIMEOUT",
+        "The accepted speech action is still running.",
+    )
+    prepared = runtime_client.prepare_operator_action(
+        capability_id="limo.speak_text",
+        arguments={"text": "Inspection still running"},
+        body_snapshot_hash="sha256:body",
+        action_id="action-long-speech",
+        deadline_at="2030-01-02T03:04:05Z",
+    )
+
+    result = await runtime_client.confirm_operator_action(
+        prepared,
+        principal_id="operator-1",
+        confirmation={
+            "accepted": True,
+            "action_intent_hash": prepared.approval_request["action_intent_hash"],
+        },
+        wait_timeout_sec=0.1,
+    )
+
+    assert result["state"] == "QUEUED"
+    assert result["operator_confirmation"]["session_closed"] is False
+    assert daemon.tracked_action_leases == ["action-long-speech"]
+    assert daemon.cancelled_proposals == []
+    assert daemon.closed_sessions == []
 
 
 async def test_interactive_confirmation_does_not_rearm_armed_generation(
