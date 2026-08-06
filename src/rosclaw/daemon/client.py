@@ -21,6 +21,7 @@ from rosclaw.firstboot.workspace import get_rosclaw_home
 from rosclaw.kernel import ActionEnvelope
 
 DEFAULT_DAEMON_TIMEOUT_SEC = 5.0
+SYSTEM_DAEMON_SOCKET_PATH = Path("/run/rosclaw/rosclawd.sock")
 
 
 class DaemonClientError(RuntimeError):
@@ -51,6 +52,11 @@ def get_daemon_socket_path(path: str | Path | None = None) -> Path:
     configured = path or os.environ.get("ROSCLAW_DAEMON_SOCKET")
     if configured:
         return Path(configured).expanduser()
+    # A packaged system daemon uses the shared runtime path.  Prefer it only for the
+    # default workspace: an explicit ROSCLAW_HOME remains an isolation boundary for
+    # tests, development instances, and multi-runtime deployments.
+    if not os.environ.get("ROSCLAW_HOME") and SYSTEM_DAEMON_SOCKET_PATH.exists():
+        return SYSTEM_DAEMON_SOCKET_PATH
     return get_rosclaw_home() / "run" / "rosclawd.sock"
 
 
