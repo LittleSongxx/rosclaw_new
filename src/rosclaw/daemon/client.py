@@ -164,7 +164,30 @@ class DaemonClient:
                 )
 
     def get_action_status(self, action_id: str) -> dict[str, Any]:
-        return self.call("action.status", {"action_id": action_id})
+        lease = self._action_leases.get(action_id)
+        if lease is not None and time.monotonic() >= lease[1]:
+            session_id, _next_renewal, interval_sec = lease
+            self.renew_action_lease(action_id, session_id)
+            self._action_leases[action_id] = (
+                session_id,
+                time.monotonic() + interval_sec,
+                interval_sec,
+            )
+        status = self.call("action.status", {"action_id": action_id})
+        if status.get("state") in {"FINISHED", "CANCELLED"}:
+            self._action_leases.pop(action_id, None)
+        return status
+
+    def track_action_lease(self, action_id: str) -> dict[str, Any]:
+        """Adopt renewal responsibility for an action submitted by a trusted broker.
+
+        The status read is owner-checked by rosclawd before its lease metadata is remembered,
+        so a different Unix peer cannot adopt or renew another Agent's action.
+        """
+
+        status = self.get_action_status(action_id)
+        self._remember_action_lease(status)
+        return status
 
     def get_execution_receipt(self, action_id: str) -> dict[str, Any]:
         return self.call("action.receipt", {"action_id": action_id})
@@ -318,15 +341,6 @@ class DaemonClient:
             if status.get("state") in {"FINISHED", "CANCELLED"}:
                 self._action_leases.pop(action_id, None)
                 return status
-            lease = self._action_leases.get(action_id)
-            if lease is not None and time.monotonic() >= lease[1]:
-                session_id, _next_renewal, interval_sec = lease
-                self.renew_action_lease(action_id, session_id)
-                self._action_leases[action_id] = (
-                    session_id,
-                    time.monotonic() + interval_sec,
-                    interval_sec,
-                )
             if time.monotonic() >= deadline:
                 raise DaemonRequestError(
                     "ACTION_WAIT_TIMEOUT",
