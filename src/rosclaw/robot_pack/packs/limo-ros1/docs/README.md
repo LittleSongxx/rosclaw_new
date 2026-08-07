@@ -2,7 +2,7 @@
 
 This Pack binds the `limo` e-URDF Body to the independently versioned
 `ros-claw/limo-ros-mcp` adapter at commit
-`821a0439a0e153ae784fba1cbe46f626447529bd` (MCP 0.10.2).
+`0c7cf9a92510dc8867faf404a946d8131ba956ff` (MCP 0.10.3).
 
 The first REAL capability is `limo.set_initial_pose`. The Agent submits a
 validated map-frame estimate to `rosclawd`; the daemon validates an exact
@@ -151,6 +151,12 @@ adapter source. The launcher bootstraps the source tree and starts the MCP
 server with the selected Python interpreter, so ROSClaw's isolated source
 installer can execute the signed checkout without first mutating its managed
 Python environment to install a console-script shim.
+
+Revision 0.1.32 makes read-only audio inspection and bounded microphone-level
+measurement use the exact allowlisted PulseAudio bridge. This lets the isolated
+MCP account observe the USB speaker/microphone without direct ALSA control-device
+access; captured PCM stays in memory, is truncated to the requested interval,
+and is discarded immediately after level analysis.
 
 H1 means only that the signed contract and executor tests pass. H4 requires a
 real LIMO, an AMCL subscriber, a post-navigation map-frame pose from AMCL or the
