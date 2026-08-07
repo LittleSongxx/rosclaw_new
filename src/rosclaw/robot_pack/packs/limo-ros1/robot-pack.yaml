@@ -3,7 +3,7 @@ schema_version: rosclaw.robot_pack.v1
 pack:
   namespace: ros-claw
   name: limo-ros1
-  version: 0.1.31
+  version: 0.1.32
   title: AgileX LIMO ROS 1 Guarded Patrol Pack
   summary: Permit-gated localization, navigation, tones, and bounded speech for AgileX LIMO on ROS Melodic.
   vendor: AgileX Robotics
@@ -24,7 +24,7 @@ components:
   - kind: hardware_adapter
     id: limo-ros-mcp
     ref: https://github.com/ros-claw/limo-ros-mcp
-    version: 821a0439a0e153ae784fba1cbe46f626447529bd
+    version: 0c7cf9a92510dc8867faf404a946d8131ba956ff
     required: true
   - kind: capability
     id: limo-set-initial-pose
@@ -100,7 +100,7 @@ components:
     id: limo-pack-docs
     ref: docs://robot-pack/limo-ros1
     path: docs/README.md
-    digest: sha256:492e33b1cda09061f880b31ca45d2f180f72f3e13a4d60c8c9d5555e735054d3
+    digest: sha256:c33685b29807435568f1fdc3c5129f4ba781e223409a724d836b88a68e4c1103
 
 device:
   type: mobile_base
