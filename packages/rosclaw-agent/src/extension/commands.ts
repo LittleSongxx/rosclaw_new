@@ -8,6 +8,8 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { defaultOperatorSocket, operatorCall } from "../bridge/operatord-client.js";
 import type { ActiveSessionContext } from "../session/active-context.js";
 import type { ProductStateCenter } from "../session/state-center.js";
+import type { LocaleManager } from "../i18n/locale.js";
+import { t as i18nT } from "../i18n/index.js";
 
 export interface CommandDeps {
 	rosclawHome: string;
@@ -15,6 +17,8 @@ export interface CommandDeps {
 	/** PR-SIX-1：唯一状态中心——/status 与 rosclaw_status/Header/Footer
 	 *  同一份快照（不再各自为政）。 */
 	center: ProductStateCenter;
+	/** PR-SIX-5：UI/回答语言策略（/language 读写并持久化）。 */
+	locale: LocaleManager;
 	registeredToolNames: () => string[];
 }
 
@@ -198,6 +202,75 @@ export function buildCommandHandlers(deps: CommandDeps): Record<string, { descri
 			description: "Memory/Practice/How 查询指引",
 			handler: async (_args, ctx) => {
 				notify(ctx, "用自然语言提问即可——模型会经 rosclaw_memory_query 带证据查询。", "info");
+			},
+		},
+		"operator-init": {
+			description: "初始化并启动本机 Operator（仅 SIMULATION developer）",
+			handler: async (_args, ctx) => {
+				const loc = deps.locale.effective;
+				try {
+					const status = await deps.center.call("pi.operator.status", {});
+					if (status.running) {
+						notify(ctx, i18nT("operator.bootstrap_done", loc), "info");
+						return;
+					}
+					const result = await deps.center.call("pi.operator.bootstrap", {
+						mission_id: deps.active.current.missionId ?? "",
+					});
+					notify(
+						ctx,
+						result.ok
+							? i18nT("operator.bootstrap_done", loc)
+							: `${i18nT("operator.bootstrap_failed", loc)}: ${String(result.error ?? "")}`,
+						result.ok ? "info" : "error",
+					);
+					await deps.center.probeOperator(true);
+				} catch (err) {
+					notify(ctx, `${i18nT("operator.bootstrap_failed", loc)}: ${(err as Error).message}`, "error");
+				}
+			},
+		},
+		language: {
+			description: "界面/回答语言：/language [中文|English|auto|lock 中文|lock English]",
+			handler: async (args, ctx) => {
+				const lm = deps.locale;
+				const arg = args.trim();
+				if (!arg) {
+					notify(
+						ctx,
+						`语言策略：UI=${lm.current.ui_locale}（生效 ${lm.effective}）· ` +
+						`回答=${lm.current.reply_language}。用法：/language 中文|English|auto|lock 中文`,
+						"info",
+					);
+					return;
+				}
+				if (arg === "auto") {
+					lm.setUiLocale("auto");
+				} else if (arg === "中文" || arg === "zh-CN") {
+					lm.setUiLocale("zh-CN");
+				} else if (arg === "English" || arg === "en-US" || arg === "英文") {
+					lm.setUiLocale("en-US");
+				} else if (arg.startsWith("lock ")) {
+					const lang = arg.slice(5).trim();
+					if (lang === "中文" || lang === "zh-CN") {
+						lm.setReplyLanguage("zh-CN");
+					} else if (lang === "English" || lang === "en-US" || lang === "英文") {
+						lm.setReplyLanguage("en-US");
+					} else if (lang === "auto" || lang === "跟随") {
+						lm.setReplyLanguage("follow-user");
+					} else {
+						notify(ctx, `未知语言：${lang}`, "warning");
+						return;
+					}
+				} else {
+					notify(ctx, `未知参数：${arg}（中文|English|auto|lock …）`, "warning");
+					return;
+				}
+				notify(
+					ctx,
+					`已更新：UI=${lm.current.ui_locale}（生效 ${lm.effective}）· 回答=${lm.current.reply_language}`,
+					"info",
+				);
 			},
 		},
 	};

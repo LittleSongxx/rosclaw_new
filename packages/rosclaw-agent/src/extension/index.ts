@@ -22,6 +22,8 @@ import { ApprovalCardComponent } from "../ui/approval-card.js";
 import { ActionResultCardComponent, type ActionResultData } from "../ui/action-result-card.js";
 import { renderFooter, renderHeader } from "../ui/product-state.js";
 import type { ProductStateCenter } from "../session/state-center.js";
+import type { LocaleManager } from "../i18n/locale.js";
+import { t as i18nT } from "../i18n/index.js";
 import { EventMirror } from "./event-mirror.js";
 import { buildCommandHandlers } from "./commands.js";
 import { guardInput } from "./input-guard.js";
@@ -38,6 +40,8 @@ export interface RosclawExtensionOptions {
 	coordinator: AgentSessionCoordinator;
 	/** PR-SIX-1：唯一产品状态中心（Header/Footer/status/tool 同源）。 */
 	center: ProductStateCenter;
+	/** PR-SIX-5：UI/回答语言策略。 */
+	locale: LocaleManager;
 	rosclawHome: string;
 }
 
@@ -49,6 +53,7 @@ export function createRosclawExtension(options: RosclawExtensionOptions): Extens
 		//    refreshChrome 里用同一个 KernelSnapshotV1 重绘——不允许顶部
 		//    Kimi K3/OFFLINE 与底部未选模型/UNKNOWN 长期共存） --
 		const center = options.center;
+		const locale = options.locale;
 		let refreshChrome: () => void = () => undefined;
 		let probeTimer: ReturnType<typeof setInterval> | null = null;
 		pi.on("session_start", async (_event, ctx) => {
@@ -56,18 +61,93 @@ export function createRosclawExtension(options: RosclawExtensionOptions): Extens
 			ctx.ui.setTitle(`ROSClaw Native Agent`);
 			refreshChrome = () => {
 				const snap = center.snapshot(); // 一次读取，Header/Footer 共享
-				ctx.ui.setHeader((_tui, _theme) => new Text(renderHeader(snap)));
+				const loc = locale.effective;
+				ctx.ui.setHeader((_tui, _theme) => new Text(renderHeader(snap, loc)));
 				ctx.ui.setFooter((_tui, theme, _footerData) => {
-					return new Text(theme.fg("dim", renderFooter(snap)), 1, 0);
+					return new Text(theme.fg("dim", renderFooter(snap, loc)), 1, 0);
 				});
 			};
 			refreshChrome();
-			// 统一订阅：任何状态变化（context/lease/operator/model/kernel）
-			// 触发同一次 chrome 重绘。
+			// 统一订阅：任何状态变化（context/lease/operator/model/kernel/
+			// locale）触发同一次 chrome 重绘。
 			center.subscribe(() => refreshChrome());
+			locale.subscribe(() => refreshChrome());
 			// 真实探测 operatord——结果回来后经 subscribe 统一重绘
 			// （OFFLINE/READY/UNKNOWN 都是真实返回值，绝不硬编码 ready）。
 			void center.probeOperator();
+			// 六审 §7：Operator 未就绪时的非模态提示 + Ctrl+O/命令一键
+			// 初始化——模态 overlay 会劫持按键（TUI 矩阵/perf 实测回归），
+			// widget 只展示不抢输入。
+			const runBootstrap = async (cmdCtx: typeof ctx) => {
+				try {
+					const status = await center.call("pi.operator.status", {});
+					if (status.running) {
+						cmdCtx.ui.notify(i18nT("operator.bootstrap_done", locale.effective), "info");
+						return;
+					}
+					const result = await center.call("pi.operator.bootstrap", {
+						mission_id: options.active.current.missionId ?? "",
+					});
+					cmdCtx.ui.notify(
+						result.ok
+							? i18nT("operator.bootstrap_done", locale.effective)
+							: `${i18nT("operator.bootstrap_failed", locale.effective)}: ${String(result.error ?? "")}`,
+						result.ok ? "info" : "error",
+					);
+					await center.probeOperator(true);
+				} catch {
+					// 失败诚实保持 OFFLINE——不伪造 READY。
+				}
+			};
+			// 幂等：目标状态未变时不发 UDS 调用、不重绘（idle CPU 红线）。
+			let bootstrapWidgetState: "hidden" | "new" | "stopped" = "hidden";
+			const updateBootstrapWidget = async () => {
+				if (!ctx.hasUI) return;
+				if (options.profile !== "developer") return;
+				if (options.active.current.mode !== "SIMULATION") return;
+				if (center.snapshot().operator !== "OFFLINE") {
+					if (bootstrapWidgetState !== "hidden") {
+						bootstrapWidgetState = "hidden";
+						ctx.ui.setWidget("rosclaw-operator", undefined);
+					}
+					return;
+				}
+				// 已展示且 operator 仍 OFFLINE——enrollment/running 只能经
+				// 我们发起的 bootstrap 改变（它会显式复探）——跳过重复查询。
+				if (bootstrapWidgetState !== "hidden") return;
+				try {
+					const status = await center.call("pi.operator.status", {});
+					if (status.running) {
+						return;
+					}
+					const loc = locale.effective;
+					bootstrapWidgetState = status.enrolled ? "stopped" : "new";
+					ctx.ui.setWidget("rosclaw-operator", [
+						`${i18nT("operator.bootstrap_title", loc)} — ${i18nT(
+							status.enrolled
+								? "operator.bootstrap_state_stopped"
+								: "operator.bootstrap_state_new",
+							loc,
+						)}`,
+						i18nT("operator.bootstrap_offer", loc),
+					]);
+				} catch {
+					// 探测失败保持 OFFLINE 展示。
+				}
+			};
+			// operator 探测结果变化 → 统一刷新 widget（subscribe 链）。
+			center.subscribe(() => {
+				void updateBootstrapWidget();
+			});
+			setTimeout(() => {
+				void center.probeOperator(true);
+			}, 800);
+			pi.registerShortcut("shift+ctrl+b", {
+				description: i18nT("operator.bootstrap_title", locale.effective),
+				handler: async (shortcutCtx) => {
+					await runBootstrap(shortcutCtx as typeof ctx);
+				},
+			});
 			// 30s 周期复探（HOTFIX-3：timer 有明确生命周期——session
 			// shutdown 时清理，不积累）。
 			if (probeTimer !== null) clearInterval(probeTimer);
@@ -78,8 +158,8 @@ export function createRosclawExtension(options: RosclawExtensionOptions): Extens
 			ctx.ui.setWorkingIndicator({ frames: WORKING_FRAMES, intervalMs: 80 });
 			// P1-TUI-01：中性本地化状态词——不伪造思维过程（"Thinking..."
 			// 会让人以为在看模型推理；只有真实事件阶段才显示具体阶段）。
-			ctx.ui.setWorkingMessage("正在处理…");
-			ctx.ui.setHiddenThinkingLabel("正在处理…");
+			ctx.ui.setWorkingMessage(i18nT("working.default", locale.effective));
+			ctx.ui.setHiddenThinkingLabel(i18nT("working.default", locale.effective));
 		});
 
 		// -- `!` bash 功能级关闭（PNA-0 即生效；PNA-9 再做 profile 化 UI 拦截） -----
@@ -137,6 +217,7 @@ export function createRosclawExtension(options: RosclawExtensionOptions): Extens
 				rosclawHome: options.rosclawHome,
 				active: options.active,
 				center,
+				locale,
 				registeredToolNames: () => [
 					"rosclaw_status",
 					"rosclaw_capabilities",
