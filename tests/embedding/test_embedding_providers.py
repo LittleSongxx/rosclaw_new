@@ -225,4 +225,4 @@ def test_index_describe_rejects_non_native_backend_without_loading_model(tmp_pat
 
     output = json.loads(capsys.readouterr().out)
     assert output["ok"] is False
-    assert output["backend"] == "SQLiteKnowledgeStore"
+    assert output["backend"] == "SQLiteStructuredStore"

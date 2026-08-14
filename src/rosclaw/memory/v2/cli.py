@@ -17,7 +17,7 @@ from typing import Any
 
 from rosclaw.firstboot.config import load_rosclaw_yaml
 from rosclaw.firstboot.workspace import resolve_home
-from rosclaw.memory.seekdb_client import SQLiteKnowledgeStore
+from rosclaw.memory.seekdb_client import SQLiteStructuredStore
 from rosclaw.memory.v2.consolidate import MemoryConsolidator
 from rosclaw.memory.v2.distill import distill_session_dir
 from rosclaw.memory.v2.gate import MemoryWriteGate
@@ -35,8 +35,8 @@ from rosclaw.memory.v2.runtime_retrieval import (
     RetrievalPurpose,
     build_retrieval_facade,
 )
-from rosclaw.storage.factory import StorageFactory
-from rosclaw.storage.seekdb_native import SeekDBNativeStore
+from rosclaw.storage.factory import StoreFactory
+from rosclaw.storage.seekdb_native import SeekDBRetrievalStore
 from rosclaw.storage.vector import SQLiteVectorStore, TfidfEmbedder
 
 # Score-semantics disclosure: a vector score only has meaning relative to the
@@ -62,14 +62,14 @@ class _QueryTextPassthrough:
 
 
 class _NativeSeekDBVectorAdapter:
-    """Adapt :meth:`SeekDBNativeStore.similar` to the retriever's
+    """Adapt :meth:`SeekDBRetrievalStore.similar` to the retriever's
     ``vector_store.search(table, embedding, limit)`` protocol.
 
     The server embeds the query text itself, so ``embedding`` here is the raw
     query text supplied by :class:`_QueryTextPassthrough`.
     """
 
-    def __init__(self, client: SeekDBNativeStore):
+    def __init__(self, client: SeekDBRetrievalStore):
         self._client = client
 
     def search(self, table: str, embedding: Any, *, limit: int) -> list[dict[str, Any]]:
@@ -87,7 +87,7 @@ def _resolve_store_path(args: argparse.Namespace) -> str:
 
 
 def _open_stack(args: argparse.Namespace, *, with_vector: bool = False):
-    """Open the knowledge store via :class:`StorageFactory` and build the
+    """Open the knowledge store via :class:`StoreFactory` and build the
     retrieval stack on top.
 
     Backend resolution order: ``--backend`` → ``--seekdb-url`` /
@@ -111,14 +111,14 @@ def _open_stack(args: argparse.Namespace, *, with_vector: bool = False):
         home = resolve_home()
         cfg = load_rosclaw_yaml(home) or {}
         backend = (cfg.get("runtime", {}) or {}).get("seekdb_backend") or None
-    client = StorageFactory.create_knowledge_store(
+    client = StoreFactory.create_structured_store(
         backend=backend or ("sqlite" if not url else None),
         url=url,
         path=path,
     )
     client.connect()
     repo = MemoryRepository(client)
-    if isinstance(client, SeekDBNativeStore):
+    if isinstance(client, SeekDBRetrievalStore):
         # PR-MEM-5 (v4 §3.8): every write through this repository is also
         # projected into the ACTIVE versioned collection (best-effort,
         # watermarked) so runtime queries never serve a stale generation.
@@ -133,14 +133,14 @@ def _open_stack(args: argparse.Namespace, *, with_vector: bool = False):
     vector = None
     embedder = None
     if with_vector:
-        if isinstance(client, SeekDBNativeStore):
+        if isinstance(client, SeekDBRetrievalStore):
             vector = _NativeSeekDBVectorAdapter(client)
             embedder = _QueryTextPassthrough()
             meta["vector_source"] = "seekdb_native"
             meta["score_semantics"] = _SCORE_SEMANTICS["seekdb_native_1_minus_distance"]
             with contextlib.suppress(Exception):
                 meta["embedder"] = client.embedding_info("memory_items")
-        elif isinstance(client, SQLiteKnowledgeStore):
+        elif isinstance(client, SQLiteStructuredStore):
             vector = SQLiteVectorStore(client)
             embedder = TfidfEmbedder()
             corpus = [
@@ -179,14 +179,14 @@ def _build_facade(
     — the legacy retriever keeps its previous behavior there — and cleanup
     closes any additionally opened fallback store.
     """
-    native = client if isinstance(client, SeekDBNativeStore) else None
-    sqlite = client if isinstance(client, SQLiteKnowledgeStore) else None
+    native = client if isinstance(client, SeekDBRetrievalStore) else None
+    sqlite = client if isinstance(client, SQLiteStructuredStore) else None
     opened: list[Any] = []
     if native is not None and sqlite is None:
         sqlite_path = Path(_resolve_store_path(args)).expanduser()
         if sqlite_path.is_file():
             with contextlib.suppress(Exception):
-                fallback_sqlite = SQLiteKnowledgeStore(str(sqlite_path))
+                fallback_sqlite = SQLiteStructuredStore(str(sqlite_path))
                 fallback_sqlite.connect()
                 sqlite = fallback_sqlite
                 opened.append(fallback_sqlite)
@@ -237,12 +237,12 @@ def cmd_memory_v2_status(args: argparse.Namespace) -> int:
             if row.get("status", "active") == "active":
                 memory_type = row.get("memory_type", "?")
                 by_type[memory_type] = by_type.get(memory_type, 0) + 1
-        if isinstance(client, SeekDBNativeStore):
+        if isinstance(client, SeekDBRetrievalStore):
             index_info: Any = {
                 "mode": "seekdb_native_server_side",
                 "memory_items": client.embedding_info("memory_items"),
             }
-        elif isinstance(client, SQLiteKnowledgeStore):
+        elif isinstance(client, SQLiteStructuredStore):
             index_info = EmbeddingIndexManager(client, SQLiteVectorStore(client)).status()["active"]
         else:
             index_info = {"mode": "unsupported", "backend": type(client).__name__}
@@ -299,7 +299,7 @@ def cmd_memory_v2_query(args: argparse.Namespace) -> int:
                     "in the retrieval facade"
                 )
         else:
-            if vector is not None and not isinstance(client, SeekDBNativeStore):
+            if vector is not None and not isinstance(client, SeekDBRetrievalStore):
                 manager = EmbeddingIndexManager(client, vector)
                 if manager.active_index() is not None:
                     manager.check_query_embedder(embedder)
@@ -361,7 +361,7 @@ def cmd_memory_v2_explain(args: argparse.Namespace) -> int:
                 "score_semantics": response.score_semantics,
             }
         else:
-            if vector is not None and not isinstance(client, SeekDBNativeStore):
+            if vector is not None and not isinstance(client, SeekDBRetrievalStore):
                 manager = EmbeddingIndexManager(client, vector)
                 if manager.active_index() is not None:
                     manager.check_query_embedder(embedder)
@@ -392,8 +392,8 @@ def cmd_memory_v2_active(args: argparse.Namespace) -> int:
     facade, facade_cleanup = _build_facade(args, client)
     exit_code = 0
     try:
-        native = client if isinstance(client, SeekDBNativeStore) else None
-        sqlite = client if isinstance(client, SQLiteKnowledgeStore) else None
+        native = client if isinstance(client, SeekDBRetrievalStore) else None
+        sqlite = client if isinstance(client, SQLiteStructuredStore) else None
         probe = RetrievalHealthProbe(
             native_store=native,
             sqlite_store=sqlite,
@@ -451,7 +451,7 @@ def cmd_memory_v2_forget(args: argparse.Namespace) -> int:
         client.delete("memory_items", args.memory_id)
         for evidence in repo.evidence_for(args.memory_id):
             client.delete("memory_evidence", evidence.evidence_id)
-        if isinstance(client, SeekDBNativeStore):
+        if isinstance(client, SeekDBRetrievalStore):
             # The server-side embedder re-indexes on delete; nudge visibility.
             client.refresh_index("memory_items")
             from rosclaw.storage.versioned_projection import ActiveProjection
@@ -491,7 +491,7 @@ def cmd_memory_v2_distill(args: argparse.Namespace) -> int:
 def cmd_memory_v2_index_status(args: argparse.Namespace) -> int:
     client, repo, vector, _, _meta = _open_stack(args, with_vector=True)
     try:
-        if isinstance(client, SeekDBNativeStore):
+        if isinstance(client, SeekDBRetrievalStore):
             output = {
                 "mode": "seekdb_native_server_side",
                 "detail": (
@@ -501,7 +501,7 @@ def cmd_memory_v2_index_status(args: argparse.Namespace) -> int:
                 "memory_items": client.embedding_info("memory_items"),
                 "count": client.count("memory_items"),
             }
-        elif isinstance(client, SQLiteKnowledgeStore):
+        elif isinstance(client, SQLiteStructuredStore):
             output = EmbeddingIndexManager(client, vector).status()
         else:
             output = {"mode": "unsupported", "backend": type(client).__name__}
@@ -521,7 +521,7 @@ def cmd_memory_v2_index_describe(args: argparse.Namespace) -> int:
         from rosclaw.embedding.registry import get_provider
         from rosclaw.storage.versioned_collections import VersionedCollectionManager
 
-        if not isinstance(client, SeekDBNativeStore):
+        if not isinstance(client, SeekDBRetrievalStore):
             output = {
                 "ok": False,
                 "error": "versioned multilingual indexes require a native SeekDB backend",
@@ -546,7 +546,7 @@ def cmd_memory_v2_index_describe(args: argparse.Namespace) -> int:
 def cmd_memory_v2_index_rebuild(args: argparse.Namespace) -> int:
     client, repo, vector, _, _meta = _open_stack(args, with_vector=True)
     try:
-        if isinstance(client, SeekDBNativeStore):
+        if isinstance(client, SeekDBRetrievalStore):
             client.refresh_index("memory_items")
             output = {
                 "rebuilt": False,
@@ -556,7 +556,7 @@ def cmd_memory_v2_index_rebuild(args: argparse.Namespace) -> int:
                     "issued refresh_index instead of a local TF-IDF rebuild"
                 ),
             }
-        elif isinstance(client, SQLiteKnowledgeStore):
+        elif isinstance(client, SQLiteStructuredStore):
             embedder = TfidfEmbedder()
             items = repo.query(limit=200000)
             manager = EmbeddingIndexManager(client, vector)
@@ -596,7 +596,7 @@ def cmd_memory_v2_index_sync(args: argparse.Namespace) -> int:
     client, repo, _, _, _meta = _open_stack(args)
     exit_code = 0
     try:
-        if not isinstance(client, SeekDBNativeStore):
+        if not isinstance(client, SeekDBRetrievalStore):
             _emit(
                 {
                     "ok": False,
@@ -644,7 +644,7 @@ def cmd_memory_v2_index_rollback(args: argparse.Namespace) -> int:
     """
     client, repo, _, _, _meta = _open_stack(args)
     try:
-        if not isinstance(client, SeekDBNativeStore):
+        if not isinstance(client, SeekDBRetrievalStore):
             _emit(
                 {
                     "ok": False,
@@ -690,7 +690,7 @@ def cmd_memory_v2_index_rollback(args: argparse.Namespace) -> int:
 
 
 def _add_backend_arguments(p: Any) -> None:
-    """Add StorageFactory backend selection args to a v2 parser."""
+    """Add StoreFactory backend selection args to a v2 parser."""
     p.add_argument(
         "--backend",
         choices=["sqlite", "seekdb_embedded", "seekdb_server", "mysql", "memory"],

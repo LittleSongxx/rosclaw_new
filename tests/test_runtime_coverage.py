@@ -185,7 +185,7 @@ class TestRuntimeSeekDBBackendSelection:
         )
         rt = Runtime(config=cfg)
         client = rt._create_seekdb_client()
-        assert type(client).__name__ == "SeekDBMySQLClient"
+        assert type(client).__name__ == "SeekDBSQLStore"
 
     def test_mysql_backend_auto_detected_from_url(self):
         pytest.importorskip("pymysql")
@@ -195,19 +195,19 @@ class TestRuntimeSeekDBBackendSelection:
         )
         rt = Runtime(config=cfg)
         client = rt._create_seekdb_client()
-        assert type(client).__name__ == "SeekDBMySQLClient"
+        assert type(client).__name__ == "SeekDBSQLStore"
 
     def test_sqlite_backend_from_path(self):
         cfg = RuntimeConfig(seekdb_backend="sqlite", seekdb_path=":memory:")
         rt = Runtime(config=cfg)
         client = rt._create_seekdb_client()
-        assert type(client).__name__ == "SQLiteKnowledgeStore"
+        assert type(client).__name__ == "SQLiteStructuredStore"
 
     def test_sqlite_backend_auto_detected_from_url(self):
         cfg = RuntimeConfig(seekdb_backend="memory", seekdb_url="sqlite://:memory:")
         rt = Runtime(config=cfg)
         client = rt._create_seekdb_client()
-        assert type(client).__name__ == "SQLiteKnowledgeStore"
+        assert type(client).__name__ == "SQLiteStructuredStore"
 
     def test_http_url_rejected_for_mysql_backend(self):
         cfg = RuntimeConfig(
@@ -222,7 +222,7 @@ class TestRuntimeSeekDBBackendSelection:
         cfg = RuntimeConfig()
         rt = Runtime(config=cfg)
         client = rt._create_seekdb_client()
-        assert type(client).__name__ == "SQLiteKnowledgeStore"
+        assert type(client).__name__ == "SQLiteStructuredStore"
 
     def test_unknown_backend_raises(self):
         cfg = RuntimeConfig(seekdb_backend="oceanbase")
@@ -2381,7 +2381,7 @@ class TestMemorySeekDB:
         rt = Runtime(config=cfg)
         with (
             patch("rosclaw.memory.interface.MemoryInterface") as mock_mem_cls,
-            patch("rosclaw.storage.factory.StorageFactory.create_knowledge_store") as mock_create,
+            patch("rosclaw.storage.factory.StoreFactory.create_structured_store") as mock_create,
         ):
             mock_mem = MagicMock()
             mock_mem_cls.return_value = mock_mem
@@ -2411,7 +2411,7 @@ class TestMemorySeekDB:
         rt = Runtime(config=cfg)
         with (
             patch("rosclaw.memory.interface.MemoryInterface") as mock_mem_cls,
-            patch("rosclaw.storage.factory.StorageFactory.create_knowledge_store") as mock_create,
+            patch("rosclaw.storage.factory.StoreFactory.create_structured_store") as mock_create,
         ):
             mock_mem = MagicMock()
             mock_mem_cls.return_value = mock_mem

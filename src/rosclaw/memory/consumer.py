@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import Any
 
 from rosclaw.memory.interface import MemoryInterface
-from rosclaw.memory.seekdb_client import SeekDBClient
+from rosclaw.memory.seekdb_client import StructuredStore
 from rosclaw.memory.types import ArtifactRef, FailureMemory, PraxisEvent
 from rosclaw.runtime.component import RuntimeConsumer
 from rosclaw.runtime.event import RuntimeEvent
@@ -43,7 +43,7 @@ class MemoryConsumer(RuntimeConsumer):
         self,
         runtime_bus,
         robot_id: str = "default_robot",
-        seekdb_client: SeekDBClient | None = None,
+        seekdb_client: StructuredStore | None = None,
         event_bus=None,
     ) -> None:
         super().__init__("memory_consumer", runtime_bus)

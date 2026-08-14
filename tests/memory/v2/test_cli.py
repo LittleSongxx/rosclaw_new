@@ -103,7 +103,7 @@ def test_open_stack_native_seekdb_backend(shared_embedded_seekdb_target) -> None
         from rosclaw.storage.seekdb_native import SeekDBNativeStore
 
         assert isinstance(client, SeekDBNativeStore)
-        assert meta["backend"] == "SeekDBEmbeddedStore"
+        assert meta["backend"] == "SeekDBEmbeddedRetrievalStore"
         assert meta["vector_source"] == "seekdb_native"
         assert "SeekDB" in meta["score_semantics"]
         # The native adapter must NOT be a SQLite TF-IDF stack.
@@ -176,7 +176,7 @@ def test_query_native_without_active_declares_fallback(
         cleanup.delete_where("memory_items", {})
         _close(cleanup)
     output = json.loads(capsys.readouterr().out)
-    assert output["retrieval"]["backend"] == "SeekDBEmbeddedStore"
+    assert output["retrieval"]["backend"] == "SeekDBEmbeddedRetrievalStore"
     # No ACTIVE pointer and (in this environment) no sqlite fallback file:
     # the response abstains with the declared reason.
     assert output["retrieval"]["fallback"] is True
@@ -216,7 +216,7 @@ def test_query_native_active_serves_physical_collection(
                 cleanup._client.delete_collection(name)
         _close(cleanup)
     output = json.loads(capsys.readouterr().out)
-    assert output["retrieval"]["backend"] == "SeekDBEmbeddedStore"
+    assert output["retrieval"]["backend"] == "SeekDBEmbeddedRetrievalStore"
     assert output["retrieval"]["retrieval_mode"] == "active_bm25_metadata"
     assert output["retrieval"]["physical_collection"] == physical
     assert output["retrieval"]["fallback"] is True

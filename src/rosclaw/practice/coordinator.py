@@ -10,7 +10,7 @@ from typing import Any
 
 from rosclaw.core.event_bus import Event, EventBus
 from rosclaw.core.lifecycle import LifecycleMixin
-from rosclaw.memory.seekdb_client import SeekDBClient
+from rosclaw.memory.seekdb_client import StructuredStore
 from rosclaw.practice.adapters.base import SourceAdapter
 from rosclaw.practice.adapters.mock_agent_adapter import MockAgentAdapter
 from rosclaw.practice.adapters.mock_runtime_adapter import MockRuntimeAdapter
@@ -669,14 +669,14 @@ class PracticeCoordinator(LifecycleMixin):
             )
         return records
 
-    def _make_seekdb_client(self) -> SeekDBClient | None:
+    def _make_seekdb_client(self) -> StructuredStore | None:
         """Create a SeekDB client from the configured SQL URL."""
         url = self.config.seekdb.url
         if not url:
             return None
-        from rosclaw.storage.factory import StorageFactory
+        from rosclaw.storage.factory import StoreFactory
 
-        return StorageFactory.create_knowledge_store(url=url)
+        return StoreFactory.create_structured_store(url=url)
 
     def _ingest_seekdb(self) -> Any:
         """Distill and ingest the current session into SeekDB."""

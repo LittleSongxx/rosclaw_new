@@ -20,7 +20,7 @@ from typing import Any, Final
 
 from rosclaw.core.event_bus import Event, EventBus
 from rosclaw.core.lifecycle import LifecycleMixin
-from rosclaw.memory.seekdb_client import InMemoryKnowledgeStore, SeekDBClient
+from rosclaw.memory.seekdb_client import InMemoryStructuredStore, StructuredStore
 from rosclaw.memory.types import ArtifactRef, FailureMemory, PraxisEvent
 
 logger = logging.getLogger("rosclaw.memory.interface")
@@ -111,14 +111,14 @@ class MemoryInterface(LifecycleMixin):
         self,
         robot_id: str,
         event_bus: EventBus | None = None,
-        seekdb_client: SeekDBClient | None = None,
+        seekdb_client: StructuredStore | None = None,
         embodied_memory: Any | None = None,
         retrieval_facade: Any | None = None,
     ):
         super().__init__()
         self._robot_id = robot_id
         self.event_bus = event_bus
-        self._client = seekdb_client or InMemoryKnowledgeStore()
+        self._client = seekdb_client or InMemoryStructuredStore()
         self._embodied = embodied_memory
         # PR-MEM-5: when the unified retrieval facade is wired, memory
         # queries are served by the canonical ACTIVE index (with declared
@@ -301,7 +301,7 @@ class MemoryInterface(LifecycleMixin):
         self._client.disconnect()
 
     @property
-    def seekdb_client(self) -> SeekDBClient:
+    def seekdb_client(self) -> StructuredStore:
         """Public accessor for the SeekDB client (used by HOW/KNOW modules)."""
         return self._client
 
@@ -1590,7 +1590,7 @@ class KnowledgeGraphWrapper:
     requiring callers to know the SeekDB schema details.
     """
 
-    def __init__(self, client: SeekDBClient):
+    def __init__(self, client: StructuredStore):
         self._client = client
         self._table = "knowledge_graph"
 
@@ -1660,7 +1660,7 @@ class HeuristicRuleWrapper:
     Provides typed CRUD for heuristic rules used by the HOW recovery engine.
     """
 
-    def __init__(self, client: SeekDBClient):
+    def __init__(self, client: StructuredStore):
         self._client = client
         self._table = "heuristic_rules"
 
