@@ -122,7 +122,11 @@ class MemoryInterface(LifecycleMixin):
         super().__init__()
         self._robot_id = robot_id
         self.event_bus = event_bus
-        self._client = seekdb_client or InMemoryStructuredStore()
+        # NOTE: the default client is constructed through the LEGACY name on
+        # purpose (PR-DF-01 CI audit): downstream tests and integrations patch
+        # ``rosclaw.memory.interface.InMemoryKnowledgeStore``; the alias is an
+        # identity, so behavior is identical either way.
+        self._client = seekdb_client or InMemoryKnowledgeStore()
         self._embodied = embodied_memory
         # PR-MEM-5: when the unified retrieval facade is wired, memory
         # queries are served by the canonical ACTIVE index (with declared
