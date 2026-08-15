@@ -144,13 +144,13 @@ def cmd_regime_build_envelopes(args: argparse.Namespace) -> int:
     """Backfill OBSERVED applicability envelopes for the memories
     distilled from one practice session (v4 §5 — closes the
     distill → matcher link on real corpora)."""
-    from rosclaw.storage.factory import StorageFactory
+    from rosclaw.storage.factory import StoreFactory
 
     from .session_envelopes import build_session_envelopes
 
     backend = getattr(args, "backend", None) or None
     url = getattr(args, "seekdb_url", None) or None
-    store = StorageFactory.create_knowledge_store(
+    store = StoreFactory.create_structured_store(
         backend=backend or ("seekdb_server" if url else "sqlite"),
         url=url,
         path=getattr(args, "v2_path", None),

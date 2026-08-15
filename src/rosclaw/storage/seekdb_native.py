@@ -1,6 +1,6 @@
 """Native SeekDB backend via pyseekdb (PR-SDB-1, §7).
 
-``SeekDBNativeStore`` implements the :class:`SeekDBClient` knowledge-store
+``SeekDBRetrievalStore`` implements the :class:`StructuredStore` knowledge-store
 interface on top of native SeekDB collections — one collection per knowledge
 table.  Records live as collection metadata; the built-in server-side
 embedder vectorizes the document text, giving:
@@ -18,8 +18,8 @@ the filtered fetch, which is documented in the docstring.
 
 Two deployments share the class:
 
-* embedded — ``SeekDBNativeStore(path="~/.rosclaw/data/seekdb")``;
-* server — ``SeekDBNativeStore(host=..., port=2881, user=..., password=...)``
+* embedded — ``SeekDBRetrievalStore(path="~/.rosclaw/data/seekdb")``;
+* server — ``SeekDBRetrievalStore(host=..., port=2881, user=..., password=...)``
   (also works against OceanBase, which speaks the same protocol).
 """
 
@@ -31,7 +31,11 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from rosclaw.memory.seekdb_client import SeekDBClient
+from rosclaw.memory.seekdb_client import StructuredStore
+
+# ADR-0010 compat (PR-DF-01): keep the pre-rename module attribute
+SeekDBClient = StructuredStore
+
 
 logger = logging.getLogger("rosclaw.storage.seekdb_native")
 
@@ -169,7 +173,7 @@ class UnsupportedOperationError(RuntimeError):
     """
 
 
-class SeekDBNativeStore(SeekDBClient):
+class SeekDBRetrievalStore(StructuredStore):
     """Native SeekDB knowledge store (embedded or server)."""
 
     def __init__(
@@ -184,7 +188,7 @@ class SeekDBNativeStore(SeekDBClient):
         protocol: str | None = None,
     ):
         if path is None and host is None:
-            raise ValueError("SeekDBNativeStore requires either path (embedded) or host (server)")
+            raise ValueError("SeekDBRetrievalStore requires either path (embedded) or host (server)")
         self._path = path
         self._host = host
         self._port = port
@@ -231,7 +235,7 @@ class SeekDBNativeStore(SeekDBClient):
             stack.close()
             raise
         logger.info(
-            "SeekDBNativeStore connected (%s, database=%s)",
+            "SeekDBRetrievalStore connected (%s, database=%s)",
             f"embedded:{self._path}" if self._path else f"server:{self._host}:{self._port}",
             self._database,
         )
@@ -277,7 +281,7 @@ class SeekDBNativeStore(SeekDBClient):
                 last_exc = exc
                 time.sleep(0.5)
         raise RuntimeError(
-            f"SeekDBNativeStore engine not ready within {timeout_s}s: {last_exc}"
+            f"SeekDBRetrievalStore engine not ready within {timeout_s}s: {last_exc}"
         ) from last_exc
 
     def _ensure_database(self, admin: Any) -> None:
@@ -311,7 +315,7 @@ class SeekDBNativeStore(SeekDBClient):
             return self._collections[table]
         client = self._client
         if client is None:
-            raise RuntimeError("SeekDBNativeStore is not connected")
+            raise RuntimeError("SeekDBRetrievalStore is not connected")
         try:
             collection = client.get_collection(table)
         except Exception as exc:
@@ -428,7 +432,7 @@ class SeekDBNativeStore(SeekDBClient):
             # client-side is a LOCAL order masquerading as a global one, so
             # the native store fails loudly instead.
             raise UnsupportedOperationError(
-                "SeekDBNativeStore does not support order_by "
+                "SeekDBRetrievalStore does not support order_by "
                 "(pyseekdb has no global ORDER BY; client-side top-N sorting "
                 "is not a substitute). Use time-indexed tables or filter + "
                 "paginate instead."
@@ -691,7 +695,7 @@ class SeekDBNativeStore(SeekDBClient):
         """Names of all collections in the current database (engine catalog)."""
         client = self._client
         if client is None:
-            raise RuntimeError("SeekDBNativeStore is not connected")
+            raise RuntimeError("SeekDBRetrievalStore is not connected")
         return sorted(getattr(c, "name", str(c)) for c in client.list_collections())
 
     def deployment_info(self) -> dict[str, Any]:
@@ -711,7 +715,7 @@ class SeekDBNativeStore(SeekDBClient):
 
 
 # Deployment-specific aliases matching the PR-SDB-1 naming (§7.3).
-class SeekDBEmbeddedStore(SeekDBNativeStore):
+class SeekDBEmbeddedRetrievalStore(SeekDBRetrievalStore):
     """Embedded SeekDB knowledge store.
 
     pylibseekdb owns process-global engine state, so one process must reuse the
@@ -722,7 +726,7 @@ class SeekDBEmbeddedStore(SeekDBNativeStore):
         super().__init__(path=str(Path(path).expanduser()), database=database)
 
 
-class SeekDBServerStore(SeekDBNativeStore):
+class SeekDBServerRetrievalStore(SeekDBRetrievalStore):
     """Server-mode SeekDB / OceanBase knowledge store."""
 
     def __init__(
@@ -734,3 +738,9 @@ class SeekDBServerStore(SeekDBNativeStore):
         database: str = "rosclaw",
     ):
         super().__init__(host=host, port=port, user=user, password=password, database=database)
+
+
+# ADR-0010 compatibility aliases (PR-DF-01): pre-rename names.
+SeekDBNativeStore = SeekDBRetrievalStore
+SeekDBEmbeddedStore = SeekDBEmbeddedRetrievalStore
+SeekDBServerStore = SeekDBServerRetrievalStore

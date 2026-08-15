@@ -99,9 +99,9 @@ class ExperimentNamespace:
 
     def knowledge_store(self) -> Any:
         """The experiment's own knowledge store — never the shared one."""
-        from rosclaw.storage.factory import StorageFactory
+        from rosclaw.storage.factory import StoreFactory
 
-        store = StorageFactory.create_knowledge_store(backend="seekdb_server", url=self.dsn)
+        store = StoreFactory.create_structured_store(backend="seekdb_server", url=self.dsn)
         store.connect()
         return store
 

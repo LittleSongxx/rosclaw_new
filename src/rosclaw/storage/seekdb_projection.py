@@ -9,7 +9,7 @@ Transition architecture::
         → SeekDB Projection  (native vector/BM25/hybrid retrieval index)
 
 The projection is *disposable*: it can be dropped and rebuilt from the local
-store at any time (:meth:`SeekDBProjection.rebuild`).  Projection writes are
+store at any time (:meth:`MemoryRetrievalProjection.rebuild`).  Projection writes are
 idempotent (keyed by ``memory:<memory_id>``), so outbox redelivery never
 duplicates the remote record.
 """
@@ -26,7 +26,7 @@ PROJECTION_TABLE = "memory_items"
 PROJECTION_TARGET = "seekdb_projection"
 
 
-class SeekDBProjectionCommitter:
+class MemoryRetrievalProjectionCommitter:
     """Outbox committer that upserts memory records into native SeekDB.
 
     Implements the ``save_to_seekdb`` / ``save_to_seekdb_batch`` protocol used
@@ -53,7 +53,7 @@ class SeekDBProjectionCommitter:
         self._store.insert_many(PROJECTION_TABLE, records)
 
 
-class SeekDBProjection:
+class MemoryRetrievalProjection:
     """Maintains the native SeekDB retrieval projection of memory_items."""
 
     def __init__(self, store: Any, outbox: Any | None = None):
@@ -102,3 +102,8 @@ class SeekDBProjection:
             "elapsed_s": round(time.time() - started, 2),
             "projection": type(self._store).__name__,
         }
+
+
+# ADR-0010 compatibility aliases (PR-DF-01): pre-rename names.
+SeekDBProjection = MemoryRetrievalProjection
+SeekDBProjectionCommitter = MemoryRetrievalProjectionCommitter

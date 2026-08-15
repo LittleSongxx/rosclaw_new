@@ -12,9 +12,13 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from rosclaw.memory.seekdb_client import InMemoryKnowledgeStore, SeekDBClient
+from rosclaw.memory.seekdb_client import InMemoryStructuredStore, StructuredStore
 from rosclaw.practice.storage.catalog import PracticeCatalog
 from rosclaw.practice.storage.layout import PracticeLayout
+
+# ADR-0010 compat (PR-DF-01): keep the pre-rename module attribute
+SeekDBClient = StructuredStore
+InMemoryKnowledgeStore = InMemoryStructuredStore
 
 logger = logging.getLogger("rosclaw.practice.query")
 
@@ -26,12 +30,12 @@ class PracticeQuery:
         self,
         data_root: Path | str,
         *,
-        seekdb_client: SeekDBClient | None = None,
+        seekdb_client: StructuredStore | None = None,
         layout: PracticeLayout | None = None,
     ):
         self._data_root = Path(data_root)
         self._layout = layout or PracticeLayout(self._data_root)
-        self._client = seekdb_client or InMemoryKnowledgeStore()
+        self._client = seekdb_client or InMemoryStructuredStore()
         self._owns_connection = not self._client.is_connected()
         if self._owns_connection:
             self._client.connect()

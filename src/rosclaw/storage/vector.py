@@ -10,7 +10,7 @@ This module provides lightweight, dependency-minimal semantic search:
   cosine search in memory.  If ``sqlite-vec`` is installed it can be enabled for
   native vector indices, but the fallback requires no C extensions.
 
-The intent is *optional augmentation* of :class:`SQLiteKnowledgeStore`.  If
+The intent is *optional augmentation* of :class:`SQLiteStructuredStore`.  If
 vector support is disabled or dependencies are missing, callers fall back to the
 existing keyword/BM25 paths.
 """
@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-    from rosclaw.memory.seekdb_client import SQLiteKnowledgeStore
+    from rosclaw.memory.seekdb_client import SQLiteStructuredStore
 
 logger = logging.getLogger("rosclaw.storage.vector")
 
@@ -228,7 +228,7 @@ class SQLiteVectorStore(VectorStore):
     not modified.  Search scans the side table and ranks by cosine similarity.
     """
 
-    def __init__(self, store: SQLiteKnowledgeStore) -> None:
+    def __init__(self, store: SQLiteStructuredStore) -> None:
         self._store = store
 
     def _table_name(self, table: str) -> str:

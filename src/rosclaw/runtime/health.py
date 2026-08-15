@@ -20,7 +20,7 @@ Subsystem = tuple[str, str, str]
 SUBSYSTEMS: list[Subsystem] = [
     ("runtime", "rosclaw.core.runtime", "Runtime"),
     ("event_bus", "rosclaw.core.event_bus", "EventBus"),
-    ("seekdb", "rosclaw.memory.seekdb_client", "SeekDBClient"),
+    ("seekdb", "rosclaw.memory.seekdb_client", "StructuredStore"),
     ("registry", "rosclaw.runtime.eurdf_loader", "RobotRegistry"),
     ("sandbox", "rosclaw.sandbox.runtime_adapter", "SandboxRuntimeAdapter"),
     ("provider", "rosclaw.provider.core.registry", "ProviderRegistry"),

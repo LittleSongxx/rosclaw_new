@@ -97,7 +97,7 @@ def _exact_row_multiplier(row: dict[str, Any], exact: dict[str, list[str]]) -> f
 
 class VersionedCollectionManager:
     """Builds and switches versioned multilingual collections on a
-    SeekDBNativeStore (embedded or server).
+    SeekDBRetrievalStore (embedded or server).
 
     ``provider`` is optional: registry-only operations (``active``,
     ``registry``, ``describe``) never touch it, so read paths such as

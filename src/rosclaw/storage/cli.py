@@ -18,7 +18,7 @@ from typing import Any
 from rosclaw.firstboot.config import load_rosclaw_yaml
 from rosclaw.firstboot.workspace import resolve_home
 from rosclaw.practice.config import get_default_data_root
-from rosclaw.storage.factory import StorageFactory, _sanitize_url
+from rosclaw.storage.factory import StoreFactory, _sanitize_url
 from rosclaw.storage.migrations import MigrationRunner
 from rosclaw.storage.outbox import OutboxStore
 
@@ -102,7 +102,7 @@ def _load_storage_config(args: argparse.Namespace) -> dict[str, Any]:
 
 def _create_client(cfg: dict[str, Any]) -> Any:
     """Create a knowledge-store client from resolved config."""
-    return StorageFactory.create_knowledge_store(
+    return StoreFactory.create_structured_store(
         backend=cfg["backend"],
         url=cfg["url"],
         path=cfg["path"],
@@ -177,7 +177,7 @@ def _outbox_status(cfg: dict[str, Any]) -> dict[str, Any] | None:
 def _vector_status(client: Any) -> dict[str, Any]:
     """Return vector-store status for the connected client."""
     status: dict[str, Any] = {"enabled": False}
-    if type(client).__name__ in {"SeekDBEmbeddedStore", "SeekDBServerStore", "SeekDBNativeStore"}:
+    if type(client).__name__ in {"SeekDBEmbeddedRetrievalStore", "SeekDBServerRetrievalStore", "SeekDBRetrievalStore"}:
         # Native SeekDB embeds server-side on every write; there is no local
         # warmup step.  Report the deployment mode honestly instead of the
         # SQLite-only "disabled".
@@ -186,7 +186,7 @@ def _vector_status(client: Any) -> dict[str, Any]:
         with contextlib.suppress(Exception):
             status["collections"] = len(client.list_collections())
         return status
-    if type(client).__name__ != "SQLiteKnowledgeStore":
+    if type(client).__name__ != "SQLiteStructuredStore":
         return status
     enabled = getattr(client, "_vector_enabled", False)
     status["enabled"] = enabled
@@ -304,8 +304,8 @@ def cmd_db_status(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        ping = StorageFactory.ping(client)
-        caps = StorageFactory.capabilities(client)
+        ping = StoreFactory.ping(client)
+        caps = StoreFactory.capabilities(client)
         extras: dict[str, Any] = {}
         if cfg["backend"] in {"sqlite", "mysql"}:
             extras["migrations"] = _migration_status(client, cfg["backend"])
@@ -660,7 +660,7 @@ def cmd_db_doctor(args: argparse.Namespace) -> int:
     ping: dict[str, Any] = {"connected": False, "error": None}
     try:
         client = _create_client(cfg)
-        ping = StorageFactory.ping(client)
+        ping = StoreFactory.ping(client)
     except Exception as exc:  # noqa: BLE001
         ping["error"] = str(exc)
     finally:
@@ -1256,3 +1256,6 @@ def add_db_subparser(subparsers: Any) -> Any:
 # contextlib is imported lazily here to avoid a top-level dependency on
 # an unused module for the happy path.
 import contextlib  # noqa: E402
+
+# ADR-0010 compat (PR-DF-01): keep the pre-rename module attribute
+StorageFactory = StoreFactory

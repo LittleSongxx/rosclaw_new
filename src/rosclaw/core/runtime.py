@@ -395,12 +395,12 @@ class Runtime(LifecycleMixin):
                     # knowledge backend is native SeekDB; the SQLite store
                     # is the declared lexical fallback.  Construction never
                     # loads model weights and never fails memory init.
-                    from rosclaw.memory.seekdb_client import SQLiteKnowledgeStore
+                    from rosclaw.memory.seekdb_client import SQLiteStructuredStore
                     from rosclaw.memory.v2.runtime_retrieval import build_retrieval_facade
-                    from rosclaw.storage.seekdb_native import SeekDBNativeStore
+                    from rosclaw.storage.seekdb_native import SeekDBRetrievalStore
 
-                    native = seekdb if isinstance(seekdb, SeekDBNativeStore) else None
-                    sqlite = seekdb if isinstance(seekdb, SQLiteKnowledgeStore) else None
+                    native = seekdb if isinstance(seekdb, SeekDBRetrievalStore) else None
+                    sqlite = seekdb if isinstance(seekdb, SQLiteStructuredStore) else None
                     if native is not None or sqlite is not None:
                         retrieval_facade = build_retrieval_facade(
                             native_store=native, sqlite_store=sqlite
@@ -732,20 +732,20 @@ class Runtime(LifecycleMixin):
     def _create_seekdb_client(self) -> Any:
         """Create the legacy Memory/Auto/Skill store (not the Know v2 store).
 
-        Delegates to :class:`rosclaw.storage.factory.StorageFactory` so backend
+        Delegates to :class:`rosclaw.storage.factory.StoreFactory` so backend
         selection, URL validation, and future pooling/vector extensions live in
         one place.
         """
-        from rosclaw.storage.factory import StorageFactory
+        from rosclaw.storage.factory import StoreFactory
 
-        client = StorageFactory.create_knowledge_store(
+        client = StoreFactory.create_structured_store(
             backend=self.config.seekdb_backend,
             url=self.config.seekdb_url,
             path=self.config.seekdb_path,
             pool_size=self.config.storage.get("pool_size", 4),
             vector_enabled=self.config.storage.get("vector_enabled", False),
         )
-        capabilities = StorageFactory.capabilities(client)
+        capabilities = StoreFactory.capabilities(client)
         logger.info(
             "Knowledge store backend: %s (persistent=%s, vector=%s)",
             type(client).__name__,

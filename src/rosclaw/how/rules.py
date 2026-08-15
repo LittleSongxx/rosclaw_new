@@ -58,7 +58,7 @@ class RuleManager:
     def delete_rule(self, rule_id: str) -> bool:
         """Delete a rule by id."""
         try:
-            # SeekDBClient interface doesn't expose delete;
+            # StructuredStore interface doesn't expose delete;
             # use update with a tombstone flag (v1.0 limitation)
             return self._seekdb.update(self._table, rule_id, {"priority": -999})
         except Exception as exc:  # noqa: BLE001

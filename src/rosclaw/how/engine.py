@@ -79,7 +79,7 @@ class HeuristicEngine:
     """Fast heuristic rule engine backed by SeekDB.
 
     Args:
-        seekdb_client: Any SeekDBClient implementation (memory / SQLite).
+        seekdb_client: Any StructuredStore implementation (memory / SQLite).
         knowledge_interface: Optional knowledge interface for analogy fallback.
     """
 
@@ -388,7 +388,7 @@ class HeuristicEngine:
         for idx, (condition, action, priority) in enumerate(defaults):
             rid = f"rule_{idx}_{condition.replace(' ', '_')[:40]}"
             try:
-                # Upsert via insert (SeekDBClient.insert is INSERT OR REPLACE)
+                # Upsert via insert (StructuredStore.insert is INSERT OR REPLACE)
                 self._seekdb.insert(
                     self._table,
                     {

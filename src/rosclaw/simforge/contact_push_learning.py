@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 
 from rosclaw.know.task_card import TaskCard
-from rosclaw.memory.seekdb_client import InMemoryKnowledgeStore
+from rosclaw.memory.seekdb_client import InMemoryStructuredStore
 from rosclaw.memory.v2.models import MemoryItem, MemoryStatus, MemoryType
 from rosclaw.memory.v2.repository import MemoryRepository
 from rosclaw.memory.v2.retrieval import MemoryQuery, MemoryRetriever
@@ -35,6 +35,9 @@ from rosclaw.simforge.tasks.contact_push_v3 import (
     ContactPushScenario,
     ContactPushStatus,
 )
+
+# ADR-0010 compat (PR-DF-01): keep the pre-rename module attribute
+InMemoryKnowledgeStore = InMemoryStructuredStore
 
 
 class ContactPushCandidateType(StrEnum):
@@ -174,7 +177,7 @@ class ContactPushMemory:
     """Use ROSClaw Memory v2 for body-scoped, evidence-backed warm starts."""
 
     def __init__(self) -> None:
-        client = InMemoryKnowledgeStore()
+        client = InMemoryStructuredStore()
         client.connect()
         self.repository = MemoryRepository(client)
         self.retriever = MemoryRetriever(self.repository)

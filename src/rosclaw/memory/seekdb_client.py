@@ -1,9 +1,9 @@
 """Knowledge Plane storage backends for ROSClaw.
 
-Provides abstract SeekDBClient and concrete implementations:
-- InMemoryKnowledgeStore: In-memory backend for testing
-- SQLiteKnowledgeStore: SQLite backend for single-machine deployment
-- SeekDBMySQLClient: MySQL-compatible SeekDB/OceanBase server deployment
+Provides abstract StructuredStore and concrete implementations:
+- InMemoryStructuredStore: In-memory backend for testing
+- SQLiteStructuredStore: SQLite backend for single-machine deployment
+- SeekDBSQLStore: MySQL-compatible SeekDB/OceanBase server deployment
 
 Legacy aliases SeekDBMemoryClient and SeekDBSQLiteClient are kept for
 backward compatibility but emit DeprecationWarning on instantiation.
@@ -26,7 +26,7 @@ from urllib.parse import unquote, urlparse
 
 logger = logging.getLogger(__name__)
 
-SEEKDB_SCHEMAS: dict[str, Any] = {
+ROSCLAW_STRUCTURED_SCHEMAS: dict[str, Any] = {
     "experience_graph": {
         "columns": {
             "id": "TEXT PRIMARY KEY",
@@ -579,7 +579,7 @@ SEEKDB_SCHEMAS: dict[str, Any] = {
 }
 
 
-class SeekDBClient(ABC):
+class StructuredStore(ABC):
     """Abstract interface to SeekDB Knowledge Plane."""
 
     @abstractmethod
@@ -616,10 +616,10 @@ class SeekDBClient(ABC):
     def delete_where(self, table: str, filters: dict) -> int: ...
 
 
-class InMemoryKnowledgeStore(SeekDBClient):
+class InMemoryStructuredStore(StructuredStore):
     """In-memory knowledge store for testing.
 
-    Maintains inverted indexes on columns declared in SEEKDB_SCHEMAS
+    Maintains inverted indexes on columns declared in ROSCLAW_STRUCTURED_SCHEMAS
     to avoid full-table scans on the most common filter patterns.
 
     Thread-safe: all mutating operations are protected by a reentrant lock
@@ -638,7 +638,7 @@ class InMemoryKnowledgeStore(SeekDBClient):
         self._lock = threading.RLock()
 
     def connect(self) -> None:
-        for table_name, schema in SEEKDB_SCHEMAS.items():
+        for table_name, schema in ROSCLAW_STRUCTURED_SCHEMAS.items():
             if table_name not in self._tables:
                 self._tables[table_name] = {}
             if table_name not in self._indices:
@@ -788,7 +788,7 @@ class InMemoryKnowledgeStore(SeekDBClient):
             return len(to_delete)
 
 
-class SQLiteKnowledgeStore(SeekDBClient):
+class SQLiteStructuredStore(StructuredStore):
     """SQLite-backed knowledge store for single-machine deployment.
 
     Thread-safe: the connection is opened with ``check_same_thread=False`` and
@@ -864,7 +864,7 @@ class SQLiteKnowledgeStore(SeekDBClient):
 
     def _json_columns(self, table: str) -> list[str]:
         """Return the columns of *table* that should be JSON-deserialized."""
-        schema = SEEKDB_SCHEMAS.get(table, {})
+        schema = ROSCLAW_STRUCTURED_SCHEMAS.get(table, {})
         return [col for col in schema.get("columns", {}) if col in self._JSON_COLUMN_NAMES]
 
     def _extract_warmup_text(self, table: str, row: dict[str, Any]) -> str:
@@ -1111,15 +1111,15 @@ class SQLiteKnowledgeStore(SeekDBClient):
 
     def _create_tables(self) -> None:
         with self._lock:
-            for table_name, schema in SEEKDB_SCHEMAS.items():
+            for table_name, schema in ROSCLAW_STRUCTURED_SCHEMAS.items():
                 cols = ", ".join(f"{k} {v}" for k, v in schema["columns"].items())
                 self._connection.execute(f"CREATE TABLE IF NOT EXISTS {table_name} ({cols})")
             self._connection.commit()
-            # Add any columns that were added to SEEKDB_SCHEMAS after the table
+            # Add any columns that were added to ROSCLAW_STRUCTURED_SCHEMAS after the table
             # was first created before creating indexes that may reference them.
             self._migrate_missing_columns()
             # Create single-column and composite indexes
-            for table_name, schema in SEEKDB_SCHEMAS.items():
+            for table_name, schema in ROSCLAW_STRUCTURED_SCHEMAS.items():
                 for idx_col in schema.get("indices", []):
                     idx_name = f"idx_{table_name}_{idx_col}"
                     self._connection.execute(
@@ -1135,14 +1135,14 @@ class SQLiteKnowledgeStore(SeekDBClient):
             MigrationRunner().apply(self._connection, "sqlite")
 
     def _migrate_missing_columns(self) -> None:
-        """Add columns that were added to SEEKDB_SCHEMAS after table creation.
+        """Add columns that were added to ROSCLAW_STRUCTURED_SCHEMAS after table creation.
 
         SQLite ``ALTER TABLE ADD COLUMN`` rejects adding a ``NOT NULL`` column
         without a default value. We therefore strip ``NOT NULL`` and add a safe
         default when migrating older databases.
         """
         with self._lock:
-            for table_name, schema in SEEKDB_SCHEMAS.items():
+            for table_name, schema in ROSCLAW_STRUCTURED_SCHEMAS.items():
                 cursor = self._connection.execute(f"PRAGMA table_info({table_name})")
                 existing = {row["name"] for row in cursor.fetchall()}
                 if not existing:
@@ -1170,9 +1170,9 @@ class SQLiteKnowledgeStore(SeekDBClient):
         table: str,
         columns: list[str] | None = None,
     ) -> dict[str, Any]:
-        if table not in SEEKDB_SCHEMAS:
+        if table not in ROSCLAW_STRUCTURED_SCHEMAS:
             raise ValueError(f"Unknown table: {table}")
-        schema = SEEKDB_SCHEMAS[table]
+        schema = ROSCLAW_STRUCTURED_SCHEMAS[table]
         if columns:
             unknown = set(columns) - set(schema["columns"])
             if unknown:
@@ -1425,7 +1425,7 @@ class _ConnectionPool:
             self._created = 0
 
 
-class SeekDBMySQLClient(SeekDBClient):
+class SeekDBSQLStore(StructuredStore):
     """Experimental MySQL-compatible backend (SeekDB/OceanBase SQL port).
 
     URLs use a database DSN, for example
@@ -1592,9 +1592,9 @@ class SeekDBMySQLClient(SeekDBClient):
         table: str,
         columns: list[str] | None = None,
     ) -> dict[str, Any]:
-        if table not in SEEKDB_SCHEMAS:
+        if table not in ROSCLAW_STRUCTURED_SCHEMAS:
             raise ValueError(f"Unknown table: {table}")
-        schema = SEEKDB_SCHEMAS[table]
+        schema = ROSCLAW_STRUCTURED_SCHEMAS[table]
         if columns:
             unknown = set(columns) - set(schema["columns"])
             if unknown:
@@ -1603,7 +1603,7 @@ class SeekDBMySQLClient(SeekDBClient):
 
     def _create_tables(self, connection: Any) -> None:
         with connection.cursor() as cursor:
-            for table_name, schema in SEEKDB_SCHEMAS.items():
+            for table_name, schema in ROSCLAW_STRUCTURED_SCHEMAS.items():
                 indexed = set(schema.get("indices", []))
                 column_sql = ", ".join(
                     f"{self._quoted(column_name)} "
@@ -1785,29 +1785,40 @@ class SeekDBMySQLClient(SeekDBClient):
         return int(deleted)
 
 
-class SeekDBMemoryClient(InMemoryKnowledgeStore):
-    """Deprecated alias for :class:`InMemoryKnowledgeStore`."""
+class SeekDBMemoryClient(InMemoryStructuredStore):
+    """Deprecated alias for :class:`InMemoryStructuredStore`."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         import warnings
 
         warnings.warn(
-            "SeekDBMemoryClient is deprecated; use InMemoryKnowledgeStore",
+            "SeekDBMemoryClient is deprecated; use InMemoryStructuredStore",
             DeprecationWarning,
             stacklevel=2,
         )
         super().__init__(*args, **kwargs)
 
 
-class SeekDBSQLiteClient(SQLiteKnowledgeStore):
-    """Deprecated alias for :class:`SQLiteKnowledgeStore`."""
+class SeekDBSQLiteClient(SQLiteStructuredStore):
+    """Deprecated alias for :class:`SQLiteStructuredStore`."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         import warnings
 
         warnings.warn(
-            "SeekDBSQLiteClient is deprecated; use SQLiteKnowledgeStore",
+            "SeekDBSQLiteClient is deprecated; use SQLiteStructuredStore",
             DeprecationWarning,
             stacklevel=2,
         )
         super().__init__(*args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# ADR-0010 compatibility aliases (pre-DF-01 names — import surface kept until
+# all internal/external references migrate; do not add new uses).
+# ---------------------------------------------------------------------------
+SeekDBClient = StructuredStore
+InMemoryKnowledgeStore = InMemoryStructuredStore
+SQLiteKnowledgeStore = SQLiteStructuredStore
+SeekDBMySQLClient = SeekDBSQLStore
+SEEKDB_SCHEMAS = ROSCLAW_STRUCTURED_SCHEMAS

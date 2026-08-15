@@ -2,7 +2,7 @@
 
 Centralizes selection and health-checking of the knowledge-store backend
 (Memory / SQLite / MySQL-compatible SeekDB/OceanBase).  Other modules should
-use :class:`StorageFactory` instead of importing backend classes directly so
+use :class:`StoreFactory` instead of importing backend classes directly so
 that backend detection, URL validation, and observability stay in one place.
 """
 
@@ -14,10 +14,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 from rosclaw.memory.seekdb_client import (
-    InMemoryKnowledgeStore,
-    SeekDBClient,
-    SeekDBMySQLClient,
-    SQLiteKnowledgeStore,
+    InMemoryStructuredStore,
+    SeekDBSQLStore,
+    SQLiteStructuredStore,
+    StructuredStore,
 )
 from rosclaw.storage.vector import TfidfEmbedder
 
@@ -56,11 +56,11 @@ def _detect_backend_from_url(url: str | None) -> str | None:
     return None
 
 
-class StorageFactory:
+class StoreFactory:
     """Create and inspect knowledge-store backends from runtime configuration."""
 
     @staticmethod
-    def create_knowledge_store(
+    def create_structured_store(
         *,
         backend: str | None = None,
         url: str | None = None,
@@ -68,8 +68,8 @@ class StorageFactory:
         pool_size: int = 4,
         vector_enabled: bool = False,
         embedder: Any | None = None,
-    ) -> SeekDBClient:
-        """Return a :class:`SeekDBClient` for the chosen backend.
+    ) -> StructuredStore:
+        """Return a :class:`StructuredStore` for the chosen backend.
 
         Resolution order:
         1. If ``backend`` is explicitly provided, it wins (after validating the
@@ -108,7 +108,7 @@ class StorageFactory:
                     f"Use seekdb_http_url / ROSCLAW_PRACTICE_HTTP_ADAPTER_URL for the HTTP bridge."
                 )
             logger.info("Knowledge store backend: memory")
-            return InMemoryKnowledgeStore()
+            return InMemoryStructuredStore()
 
         if chosen == "sqlite":
             db_path = None
@@ -121,7 +121,7 @@ class StorageFactory:
             if not db_path:
                 raise ValueError("seekdb_backend='sqlite' requires seekdb_path or a sqlite:// URL.")
             logger.info("Knowledge store backend: sqlite (%s)", db_path)
-            return SQLiteKnowledgeStore(
+            return SQLiteStructuredStore(
                 db_path,
                 vector_enabled=vector_enabled,
                 embedder=embedder or (TfidfEmbedder() if vector_enabled else None),
@@ -141,7 +141,7 @@ class StorageFactory:
                     f"ROSCLAW_PRACTICE_HTTP_ADAPTER_URL; for SQL use mysql:// or seekdb://."
                 )
             logger.info("Knowledge store backend: mysql (%s)", _sanitize_url(str(url)))
-            return SeekDBMySQLClient(
+            return SeekDBSQLStore(
                 str(url),
                 pool_size=pool_size,
                 connect_timeout=5.0,
@@ -150,18 +150,18 @@ class StorageFactory:
             )
 
         if chosen == "seekdb_embedded":
-            from rosclaw.storage.seekdb_native import SeekDBEmbeddedStore
+            from rosclaw.storage.seekdb_native import SeekDBEmbeddedRetrievalStore
 
             db_path = path or (str(url) if url and not _is_http_url(url) else None)
             logger.info("Knowledge store backend: seekdb_embedded (%s)", db_path or "default")
             if db_path:
-                return SeekDBEmbeddedStore(path=db_path)
-            return SeekDBEmbeddedStore()
+                return SeekDBEmbeddedRetrievalStore(path=db_path)
+            return SeekDBEmbeddedRetrievalStore()
 
         if chosen == "seekdb_server":
             from urllib.parse import urlparse
 
-            from rosclaw.storage.seekdb_native import SeekDBServerStore
+            from rosclaw.storage.seekdb_native import SeekDBServerRetrievalStore
 
             if not url:
                 raise ValueError(
@@ -174,7 +174,7 @@ class StorageFactory:
                 )
             parsed = urlparse(str(url))
             logger.info("Knowledge store backend: seekdb_server (%s)", _sanitize_url(str(url)))
-            return SeekDBServerStore(
+            return SeekDBServerRetrievalStore(
                 host=parsed.hostname or "127.0.0.1",
                 port=parsed.port or 2881,
                 user=parsed.username or "root",
@@ -193,14 +193,14 @@ class StorageFactory:
         backend: str | None = None,
         url: str | None = None,
     ) -> str:
-        """Return the backend that :meth:`create_knowledge_store` would select."""
+        """Return the backend that :meth:`create_structured_store` would select."""
         detected = _detect_backend_from_url(url)
         if backend == "memory" and detected:
             return detected
         return (backend or detected or "memory").lower()
 
     @staticmethod
-    def ping(client: SeekDBClient) -> dict[str, Any]:
+    def ping(client: StructuredStore) -> dict[str, Any]:
         """Ping *client* and return latency/health metadata.
 
         The client is connected if necessary.  For SQLite, the WAL size is also
@@ -217,8 +217,8 @@ class StorageFactory:
         try:
             client.connect()
             t0 = time.perf_counter()
-            # InMemoryKnowledgeStore does not support arbitrary SQL; count a known table.
-            if isinstance(client, InMemoryKnowledgeStore):
+            # InMemoryStructuredStore does not support arbitrary SQL; count a known table.
+            if isinstance(client, InMemoryStructuredStore):
                 client.count("experience_graph", {})
             else:
                 client.count("experience_graph", {})
@@ -228,7 +228,7 @@ class StorageFactory:
             result["error"] = str(exc)
             return result
 
-        if isinstance(client, SQLiteKnowledgeStore):
+        if isinstance(client, SQLiteStructuredStore):
             try:
                 db_path = Path(client._db_path).expanduser()
                 wal_path = db_path.parent / f"{db_path.name}-wal"
@@ -240,20 +240,33 @@ class StorageFactory:
         return result
 
     @staticmethod
-    def capabilities(client: SeekDBClient) -> dict[str, bool]:
+    def create_knowledge_store(**kwargs: Any) -> StructuredStore:
+        """Deprecated alias for :meth:`create_structured_store` (ADR-0010)."""
+        return StoreFactory.create_structured_store(**kwargs)
+
+    @staticmethod
+    def capabilities(client: StructuredStore) -> dict[str, bool]:
         """Return capability flags for *client*."""
-        from rosclaw.storage.seekdb_native import SeekDBNativeStore
+        from rosclaw.storage.seekdb_native import SeekDBRetrievalStore
 
         has_vector = False
-        if isinstance(client, SQLiteKnowledgeStore):
+        if isinstance(client, SQLiteStructuredStore):
             has_vector = getattr(client, "_vector_enabled", False)
-        elif isinstance(client, SeekDBNativeStore):
+        elif isinstance(client, SeekDBRetrievalStore):
             has_vector = True
         return {
-            "persistent": not isinstance(client, InMemoryKnowledgeStore),
-            "sql": isinstance(client, (SQLiteKnowledgeStore, SeekDBMySQLClient)),
-            "mysql": isinstance(client, SeekDBMySQLClient),
-            "sqlite": isinstance(client, SQLiteKnowledgeStore),
+            "persistent": not isinstance(client, InMemoryStructuredStore),
+            "sql": isinstance(client, (SQLiteStructuredStore, SeekDBSQLStore)),
+            "mysql": isinstance(client, SeekDBSQLStore),
+            "sqlite": isinstance(client, SQLiteStructuredStore),
             "vector": has_vector,
-            "native_seekdb": isinstance(client, SeekDBNativeStore),
+            "native_seekdb": isinstance(client, SeekDBRetrievalStore),
         }
+
+
+# ADR-0010 compatibility aliases (PR-DF-01).
+StorageFactory = StoreFactory
+
+
+# ADR-0010 compatibility aliases (PR-DF-01).
+StorageFactory = StoreFactory
