@@ -5,7 +5,7 @@ resolves the canonical ACTIVE index, pins the embedding provider to the
 ACTIVE descriptor, runs the versioned native retriever, and degrades through
 the declared fallback chain — always disclosing mode and reason.
 
-Modules must not construct ``SQLiteVectorStore`` / ``SeekDBNativeStore.similar``
+Modules must not construct ``SQLiteVectorStore`` / ``SeekDBRetrievalStore.similar``
 / ``VersionedCollectionManager.shadow_query`` for serving queries; those are
 build-time or legacy-compat paths only.
 """

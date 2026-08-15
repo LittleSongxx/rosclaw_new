@@ -549,9 +549,9 @@ class DashboardWebServer:
             promoted_rules: list[dict[str, Any]] = []
             if dsn:
                 try:
-                    from rosclaw.storage.factory import StorageFactory
+                    from rosclaw.storage.factory import StoreFactory
 
-                    store = StorageFactory.create_knowledge_store(
+                    store = StoreFactory.create_structured_store(
                         backend="seekdb_server", url=dsn
                     )
                     store.connect()

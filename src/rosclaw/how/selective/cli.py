@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from rosclaw.memory.seekdb_client import SQLiteKnowledgeStore
+from rosclaw.memory.seekdb_client import SQLiteStructuredStore
 from rosclaw.memory.v2.regime import (
     ApplicabilityStore,
     CurrentRegimeBuilder,
@@ -24,11 +24,16 @@ from rosclaw.memory.v2.regime.session_samples import (
     load_session_events,
 )
 from rosclaw.memory.v2.runtime_retrieval import build_retrieval_facade
-from rosclaw.storage.factory import StorageFactory
-from rosclaw.storage.seekdb_native import SeekDBNativeStore
+from rosclaw.storage.factory import StoreFactory
+from rosclaw.storage.seekdb_native import SeekDBRetrievalStore
 
 from .metrics import SelectiveRiskLedger
 from .pipeline import SelectiveInterventionPipeline
+
+# ADR-0010 compat (PR-DF-01): keep the pre-rename module attribute
+SQLiteKnowledgeStore = SQLiteStructuredStore
+StorageFactory = StoreFactory
+SeekDBNativeStore = SeekDBRetrievalStore
 
 _DEFAULT_REGIME_CONFIG = "configs/regimes/rh56_rps_v1.yaml"
 _DEFAULT_CONTRACT = "configs/choreography/rh56_rps_v1.yaml"
@@ -95,7 +100,7 @@ def _open_knowledge(args: argparse.Namespace) -> tuple[Any, str]:
     path = getattr(args, "v2_path", None) or str(
         Path.home() / "data" / "memory" / "knowledge.sqlite"
     )
-    client = StorageFactory.create_knowledge_store(
+    client = StoreFactory.create_structured_store(
         backend=backend or ("sqlite" if not url else None),
         url=url,
         path=path,
@@ -107,8 +112,8 @@ def _open_knowledge(args: argparse.Namespace) -> tuple[Any, str]:
 def cmd_how_decide(args: argparse.Namespace) -> int:
     client, store_path = _open_knowledge(args)
     try:
-        native = client if isinstance(client, SeekDBNativeStore) else None
-        sqlite = client if isinstance(client, SQLiteKnowledgeStore) else None
+        native = client if isinstance(client, SeekDBRetrievalStore) else None
+        sqlite = client if isinstance(client, SQLiteStructuredStore) else None
         facade = build_retrieval_facade(native_store=native, sqlite_store=sqlite)
         matcher_config = MatcherConfig()
         config_path = getattr(args, "config", None) or _DEFAULT_REGIME_CONFIG

@@ -221,7 +221,7 @@ class ActiveProjectionCommitter:
 class ActiveProjection:
     """Repository projection hook targeting the ACTIVE physical collection.
 
-    Mirrors :class:`rosclaw.storage.seekdb_projection.SeekDBProjection`:
+    Mirrors :class:`rosclaw.storage.seekdb_projection.MemoryRetrievalProjection`:
     with an outbox the projection is asynchronous and durable; without one it
     is a direct synchronous commit (still idempotent — upsert keyed by id).
     """

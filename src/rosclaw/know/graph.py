@@ -1,7 +1,7 @@
 """Knowledge Graph operations for v1.0.
 
 Provides high-level graph queries over the SeekDB knowledge_graph table.
-These are convenience wrappers around SeekDBClient.query().
+These are convenience wrappers around StructuredStore.query().
 """
 
 from __future__ import annotations

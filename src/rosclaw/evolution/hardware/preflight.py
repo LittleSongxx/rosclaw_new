@@ -114,9 +114,9 @@ def default_serial_probe() -> dict[str, Any]:
 
 def default_store_probe(dsn: str) -> dict[str, Any]:
     try:
-        from rosclaw.storage.factory import StorageFactory
+        from rosclaw.storage.factory import StoreFactory
 
-        store = StorageFactory.create_knowledge_store(backend="seekdb_server", url=dsn)
+        store = StoreFactory.create_structured_store(backend="seekdb_server", url=dsn)
         store.connect()
         return {"available": True, "dsn": dsn}
     except Exception as exc:  # noqa: BLE001
