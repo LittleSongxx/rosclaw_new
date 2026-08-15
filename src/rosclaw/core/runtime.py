@@ -679,13 +679,16 @@ class Runtime(LifecycleMixin):
             try:
                 from rosclaw.memory.insights import MemoryInsightService
 
+                _auto_cfg = getattr(self.config, "auto", None)
                 self._memory_insights = MemoryInsightService(
                     self.event_bus,
                     data_plane.structured_store,
                     robot_id=self.config.robot_id,
-                    failure_threshold=int(self.config.auto.get("trigger_failure_threshold", 3))
-                    if isinstance(getattr(self.config, "auto", None), dict)
-                    else 3,
+                    failure_threshold=(
+                        int(_auto_cfg.get("trigger_failure_threshold", 3))
+                        if isinstance(_auto_cfg, dict)
+                        else 3
+                    ),
                 )
                 self._memory_insights.subscribe()
             except Exception as exc:  # noqa: BLE001
