@@ -5029,6 +5029,7 @@ def cmd_memory_ingest(args: argparse.Namespace) -> int:
     print(f"Events:        {result.get('event_count')}")
     print(f"Outcome:       {result.get('outcome')}")
     print("=" * 60)
+    return 0
 
 
 def cmd_memory_migrate(args: argparse.Namespace) -> int:
@@ -5061,7 +5062,6 @@ def cmd_memory_migrate(args: argparse.Namespace) -> int:
         print(f"Deduplicated:  {stats['deduplicated']}")
         print(f"Skipped:       {stats['skipped']}")
         print("=" * 60)
-    return 0
     return 0
 
 

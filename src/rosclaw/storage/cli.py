@@ -300,6 +300,11 @@ def _projection_status(cfg: dict[str, Any], client: Any) -> dict[str, Any] | Non
     """
     if not cfg.get("retrieval_enabled"):
         return None
+    # Never create or open a store that doesn't exist: opening an empty path
+    # would initialize one (side effect), and an unrelated host store with a
+    # different embedding profile reads as a false failure (DF-15 CI audit).
+    if not Path(str(cfg.get("retrieval_path") or "")).exists():
+        return None
     result: dict[str, Any] = {"enabled": True, "path": cfg.get("retrieval_path")}
     try:
         result["source_count"] = client.count("memory_items")
@@ -708,7 +713,7 @@ def _flywheel_checks(
         pass
 
     # Retrieval projection (§18/§45): source vs projected watermark lag.
-    if cfg.get("retrieval_enabled"):
+    if cfg.get("retrieval_enabled") and Path(str(cfg.get("retrieval_path") or "")).exists():
         try:
             source = client.count("memory_items")
             projected = None
