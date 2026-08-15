@@ -87,6 +87,10 @@ class RuntimeConfig:
     enable_skill_manager: bool = True
     enable_knowledge: bool = True  # KnowledgeInterface (KNOW module)
     enable_how: bool = True  # HeuristicEngine (HOW module)
+    # PR-DF-08 (flywheel §23): wire the RecoveryLoop into the Runtime
+    # lifecycle.  The loop only learns from verified physics outcomes;
+    # REAL recovery still flows through the full gateway path (§24).
+    enable_recovery_loop: bool = True
     # Versioned Know/How integration. ``disabled`` preserves the legacy
     # adapters as a rollback path; v2 never receives Memory's store.
     knowledge_v2_mode: str = field(
@@ -104,6 +108,10 @@ class RuntimeConfig:
         default_factory=lambda: os.environ.get("ROSCLAW_KNOW_SEEKDB_PATH")
     )
     enable_auto: bool = True  # Self-Evolution Control Plane (AUTO module)
+    # PR-DF-13 (flywheel §39): Darwin evaluation pressure as a first-class
+    # Runtime module.  Off by default — benchmarks are expensive.
+    enable_darwin: bool = False
+    darwin: dict[str, Any] = field(default_factory=dict)  # seeds / episodes
     enable_provider: bool = True
     joint_dof: int = 6
     sampling_rate_hz: int = 1000
@@ -222,6 +230,16 @@ class Runtime(LifecycleMixin):
         self._episode_recorder: Any | None = None
         self._sandbox_practice_bridge: Any | None = None
         self._seekdb_bridge: Any | None = None
+        self._data_plane: Any | None = None  # DataPlaneContext (PR-DF-03)
+        self._memory_repository: Any | None = None  # Memory v2 canonical (PR-DF-05)
+        self._memory_gate: Any | None = None
+        self._projection_worker: Any | None = None  # PR-DF-07
+        self._recovery_loop: Any | None = None  # PR-DF-08
+        self._knowledge_usage_tracker: Any | None = None  # PR-DF-10
+        self._memory_insights: Any | None = None  # PR-DF-11
+        self._darwin: Any | None = None  # PR-DF-13
+        self._lineage: Any | None = None  # PR-DF-14
+        self._receipt_projector: Any | None = None
         self._mcp_drivers: dict[str, Any] = {}
         self._emergency_stop_receipts: dict[str, Any] = {}
         self._emergency_stop_latched = False
@@ -264,9 +282,17 @@ class Runtime(LifecycleMixin):
             else Path(self.config.timeline_output_dir).expanduser().resolve()
         )
 
+        # PR-DF-03 (ADR-0009 §2): the data plane is assembled exactly once.
+        # Modules receive their parts from the context by dependency
+        # injection; the bare ``seekdb`` local below is kept ONLY so the
+        # pre-DF-03 call sites in this method stay readable, and always
+        # points at ``data_plane.structured_store``.
+        data_plane = self._create_data_plane(workspace_home)
+        self._data_plane = data_plane
+
         # Legacy store shared by Memory, Auto, SkillManager, and rollback-only
         # Know/How adapters. Know/How v2 never receives this object.
-        seekdb: Any | None = None
+        seekdb: Any | None = data_plane.structured_store
 
         # Initialize EventBus subscriptions for internal coordination
         self._setup_internal_subscriptions()
@@ -387,26 +413,7 @@ class Runtime(LifecycleMixin):
             try:
                 from rosclaw.memory.interface import MemoryInterface
 
-                seekdb = self._create_seekdb_client()
-                retrieval_facade = None
-                try:
-                    # PR-MEM-5: unified retrieval facade — the canonical
-                    # ACTIVE index serves Memory/KNOW/HOW queries when the
-                    # knowledge backend is native SeekDB; the SQLite store
-                    # is the declared lexical fallback.  Construction never
-                    # loads model weights and never fails memory init.
-                    from rosclaw.memory.seekdb_client import SQLiteStructuredStore
-                    from rosclaw.memory.v2.runtime_retrieval import build_retrieval_facade
-                    from rosclaw.storage.seekdb_native import SeekDBRetrievalStore
-
-                    native = seekdb if isinstance(seekdb, SeekDBRetrievalStore) else None
-                    sqlite = seekdb if isinstance(seekdb, SQLiteStructuredStore) else None
-                    if native is not None or sqlite is not None:
-                        retrieval_facade = build_retrieval_facade(
-                            native_store=native, sqlite_store=sqlite
-                        )
-                except Exception as facade_exc:  # noqa: BLE001
-                    logger.info("Retrieval facade not available: %s", facade_exc)
+                retrieval_facade = data_plane.memory_retrieval
                 self._memory = MemoryInterface(
                     robot_id=self.config.robot_id,
                     event_bus=self.event_bus,
@@ -414,6 +421,24 @@ class Runtime(LifecycleMixin):
                     embodied_memory=self.config.embodied_memory,
                     retrieval_facade=retrieval_facade,
                 )
+                # PR-DF-05 (flywheel §12-14): the canonical Memory write path
+                # — MemoryItem -> WriteGate -> Repository over the SAME
+                # structured store.  Built once here; failures degrade to the
+                # legacy experience_graph projection only.
+                self._memory_repository = None
+                self._memory_gate = None
+                try:
+                    from rosclaw.memory.v2.gate import MemoryWriteGate
+                    from rosclaw.memory.v2.repository import MemoryRepository
+
+                    if data_plane.structured_store is not None:
+                        self._memory_repository = MemoryRepository(
+                            data_plane.structured_store,
+                            projection=data_plane.memory_projection,
+                        )
+                        self._memory_gate = MemoryWriteGate(self._memory_repository)
+                except Exception as gate_exc:  # noqa: BLE001
+                    logger.info("Memory canonical write path unavailable: %s", gate_exc)
                 self._modules.append(self._memory)
                 if self._sense is not None:
                     self._memory.set_sense_runtime(self._sense)
@@ -438,47 +463,8 @@ class Runtime(LifecycleMixin):
             except ImportError as e:
                 logger.info(f"UnifiedTimeline not available: {e}")
 
-            # Optional SeekDB bridge for practice event persistence
-            self._seekdb_bridge = None
-            http_url = self.config.seekdb_http_url
-            if http_url:
-                try:
-                    from rosclaw.practice.seekdb_bridge import SeekDBBridge
-                    from rosclaw.storage.outbox import OutboxStore
-
-                    outbox_enabled = self.config.storage.get("outbox_enabled", False)
-                    if outbox_enabled:
-                        outbox_path = self.config.storage.get(
-                            "outbox_path",
-                            str(workspace_home / "storage" / "outbox.sqlite"),
-                        )
-                        outbox = OutboxStore(
-                            db_path=outbox_path,
-                            max_records=self.config.storage.get("outbox_max_records", 100_000),
-                        )
-                        outbox.connect()
-                        self._seekdb_bridge = SeekDBBridge(
-                            seekdb_url=http_url,
-                            fallback_dir=self.config.seekdb_fallback_dir,
-                            outbox=outbox,
-                        )
-                        # Bridge owns the worker when only outbox is passed.
-                        logger.info(
-                            "SeekDBBridge initialized at %s with outbox (%s)",
-                            http_url,
-                            outbox_path,
-                        )
-                    else:
-                        self._seekdb_bridge = SeekDBBridge(
-                            seekdb_url=http_url,
-                            fallback_dir=self.config.seekdb_fallback_dir,
-                        )
-                        logger.info("SeekDBBridge initialized at %s", http_url)
-                except ImportError as e:
-                    logger.info(f"rosclaw_practice not installed, SeekDB integration disabled: {e}")
-                except Exception as e:
-                    logger.warning(f"SeekDBBridge initialization failed: {e}")
-
+            # Practice event sink + outbox come from the data plane (PR-DF-03).
+            self._seekdb_bridge = data_plane.practice_sink
             seekdb_bridge = self._seekdb_bridge
 
             # Initialize EpisodeRecorder for artifact management
@@ -569,6 +555,21 @@ class Runtime(LifecycleMixin):
                 know_path = self.config.know_store_path or str(
                     workspace_home / "data" / "know" / "seekdb"
                 )
+                # PR-DF-09 (flywheel §28): Knowledge keeps its own logical
+                # store, but the federation coordinates are now actually
+                # passed — shared ID/lineage/evidence references resolve
+                # against the Runtime's data plane instead of env defaults.
+                federation: dict[str, Any] = {}
+                if self._data_plane is not None and self._data_plane.structured_store is not None:
+                    federation["memory_path"] = self.config.seekdb_path
+                    dsn = self.config.seekdb_url
+                    if dsn:
+                        from urllib.parse import urlparse
+
+                        db = urlparse(str(dsn)).path.lstrip("/")
+                        if db:
+                            federation["memory_database"] = db
+                federation["practice_path"] = str(workspace_home / "data" / "practice")
                 service_config = KnowledgeServiceConfig(
                     mode=v2_mode,
                     know_url=self.config.know_url,
@@ -578,14 +579,27 @@ class Runtime(LifecycleMixin):
                     timeout=self.config.knowledge_timeout,
                     know_store_mode=self.config.know_store_mode,
                     know_store_path=know_path,
+                    **federation,
                 )
                 self._knowledge_v2_manager = KnowledgeServiceManager(service_config)
                 self._knowledge_v2 = KnowledgeFacade(
                     self._knowledge_v2_manager, event_bus=self.event_bus
                 )
+                # PR-DF-10 (flywheel §29-31): automatic ReferencePack → Advice
+                # → Receipt → Feedback loop; conservative verdicts only.
+                try:
+                    from rosclaw.knowledge.usage_tracker import KnowledgeUsageTracker
+
+                    self._knowledge_usage_tracker = KnowledgeUsageTracker(
+                        self.event_bus, self._knowledge_v2
+                    )
+                    self._knowledge_usage_tracker.subscribe()
+                except Exception as track_exc:  # noqa: BLE001
+                    logger.info("Knowledge usage tracker unavailable: %s", track_exc)
                 logger.info(
-                    "Knowledge v2 orchestration initialized (mode=%s, memory_store_shared=false)",
+                    "Knowledge v2 orchestration initialized (mode=%s, federation=%s)",
                     v2_mode,
+                    sorted(federation),
                 )
             except Exception as exc:  # noqa: BLE001 - optional integration
                 logger.warning("Knowledge v2 initialization degraded: %s", exc)
@@ -657,6 +671,47 @@ class Runtime(LifecycleMixin):
             except Exception as e:  # noqa: BLE001
                 logger.info(f"Heuristic grounding not available: {e}")
 
+        # PR-DF-11 (flywheel §25-27): the publisher half of
+        # rosclaw.memory.insight — recurring failures with proven recoveries
+        # become typed insights that Auto turns into memory-guided Proposals.
+        self._memory_insights = None
+        if self._memory is not None and data_plane.structured_store is not None:
+            try:
+                from rosclaw.memory.insights import MemoryInsightService
+
+                self._memory_insights = MemoryInsightService(
+                    self.event_bus,
+                    data_plane.structured_store,
+                    robot_id=self.config.robot_id,
+                    failure_threshold=int(self.config.auto.get("trigger_failure_threshold", 3))
+                    if isinstance(getattr(self.config, "auto", None), dict)
+                    else 3,
+                )
+                self._memory_insights.subscribe()
+            except Exception as exc:  # noqa: BLE001
+                logger.info("MemoryInsightService not available: %s", exc)
+
+        # PR-DF-08 (flywheel §23): the RecoveryLoop closes
+        # failure → hint → retry → VERIFIED physics outcome → rule efficacy.
+        # It only learns — it never dispatches motion, and REAL recovery
+        # proposals still re-enter through the ActionGateway/permit path
+        # (§24), so the safety control plane is never bypassed.
+        self._recovery_loop = None
+        if (
+            self.config.enable_how
+            and self.config.enable_recovery_loop
+            and self._memory is not None
+            and self._how is not None
+        ):
+            try:
+                from rosclaw.how.recovery_loop import RecoveryLoop
+
+                self._recovery_loop = RecoveryLoop(self.event_bus, self._memory, self._how)
+                self._recovery_loop.subscribe()
+                logger.info("RecoveryLoop subscribed (How recovery learning active)")
+            except Exception as exc:  # noqa: BLE001
+                logger.info("RecoveryLoop not available: %s", exc)
+
         # Initialize Auto Self-Evolution Control Plane
         if self.config.enable_auto:
             try:
@@ -665,8 +720,18 @@ class Runtime(LifecycleMixin):
                 # Reuse Memory's SeekDB client if available
                 if self._memory is not None:
                     seekdb = getattr(self._memory, "seekdb_client", None)
+                # PR-DF-12: with a data plane present, Evolution state goes
+                # to the structured store (LocalStore becomes its spool).
+                auto_storage = (
+                    "hybrid"
+                    if self._data_plane is not None and self._data_plane.structured_store is not None
+                    else "local"
+                )
                 self._auto = AutoPlugin(
-                    config={"local_store_path": str(workspace_home / "data" / "auto")},
+                    config={
+                        "local_store_path": str(workspace_home / "data" / "auto"),
+                        "storage_backend": auto_storage,
+                    },
                     event_bus=self.event_bus,
                     seekdb_client=seekdb,
                     skill_registry=getattr(self._skill_manager, "registry", None)
@@ -678,6 +743,34 @@ class Runtime(LifecycleMixin):
                 logger.info("Self-Evolution Control Plane (Auto) initialized")
             except ImportError as e:
                 logger.info(f"Auto module not available: {e}")
+
+        # PR-DF-13 (flywheel §39-40): Darwin enters the Runtime lifecycle,
+        # sharing the event bus and the data plane's structured store so
+        # Evolution experiments land as darwin_benchmarks rows with full
+        # provenance.  Off by default.
+        self._darwin = None
+        if self.config.enable_darwin:
+            try:
+                from rosclaw.darwin.plugin import DarwinPlugin
+
+                self._darwin = DarwinPlugin(
+                    config={
+                        "default_seeds": self.config.darwin.get("seeds", [0, 1, 2])
+                        if isinstance(getattr(self.config, "darwin", None), dict)
+                        else [0, 1, 2],
+                        "default_episodes": self.config.darwin.get("episodes", 50)
+                        if isinstance(getattr(self.config, "darwin", None), dict)
+                        else 50,
+                    }
+                    if isinstance(getattr(self.config, "darwin", None), dict)
+                    else {},
+                    event_bus=self.event_bus,
+                    seekdb_client=data_plane.structured_store,
+                )
+                self._modules.append(self._darwin)
+                logger.info("Darwin evaluation plane initialized")
+            except ImportError as e:
+                logger.info(f"Darwin module not available: {e}")
 
         # Initialize Provider Layer (Capability Router + Guard)
         if self.config.enable_provider and ProviderRegistry is not None:
@@ -728,6 +821,152 @@ class Runtime(LifecycleMixin):
             )
 
         logger.info("Initialization complete")
+
+    def _create_data_plane(self, workspace_home: Any) -> Any:
+        """Assemble the :class:`DataPlaneContext` exactly once (PR-DF-03).
+
+        Every piece is best-effort: a data-plane failure must never take the
+        robot down (ADR-0009 §4) — the affected field stays None and the
+        corresponding module degrades exactly as it did before this context
+        existed.
+        """
+        from rosclaw.storage.context import DataPlaneContext
+
+        ctx = DataPlaneContext()
+        try:
+            ctx.structured_store = self._create_seekdb_client()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Data plane: structured store unavailable: %s", exc)
+        store = ctx.structured_store
+        if store is not None:
+            try:
+                # PR-MEM-5: unified retrieval facade — the canonical ACTIVE
+                # index serves Memory/KNOW/HOW queries when the knowledge
+                # backend is native SeekDB; the SQLite store is the declared
+                # lexical fallback.  Construction never loads model weights
+                # and never fails memory init.
+                from rosclaw.memory.seekdb_client import SQLiteStructuredStore
+                from rosclaw.memory.v2.runtime_retrieval import build_retrieval_facade
+                from rosclaw.storage.seekdb_native import SeekDBRetrievalStore
+
+                if isinstance(store, SeekDBRetrievalStore):
+                    ctx.retrieval_store = store
+                sqlite = store if isinstance(store, SQLiteStructuredStore) else None
+                if ctx.retrieval_store is not None or sqlite is not None:
+                    ctx.memory_retrieval = build_retrieval_facade(
+                        native_store=ctx.retrieval_store, sqlite_store=sqlite
+                    )
+            except Exception as facade_exc:  # noqa: BLE001
+                logger.info("Retrieval facade not available: %s", facade_exc)
+            # PR-DF-07 (flywheel §17-18): when the structured store is the
+            # SQLite source of truth and a retrieval backend is configured,
+            # maintain the native SeekDB retrieval projection of
+            # memory_items — rebuildable, never the source of truth.  All
+            # best-effort: a missing pyseekdb or a dead native store leaves
+            # the fields None and changes nothing else.
+            try:
+                storage_cfg = self.config.storage or {}
+                retrieval_cfg = storage_cfg.get("retrieval", {})
+                retrieval_enabled = retrieval_cfg.get(
+                    "enabled", storage_cfg.get("vector_enabled", False)
+                )
+                from rosclaw.memory.seekdb_client import SQLiteStructuredStore as _SQLite
+
+                if retrieval_enabled and isinstance(store, _SQLite):
+                    from rosclaw.storage.seekdb_native import SeekDBEmbeddedRetrievalStore
+                    from rosclaw.storage.seekdb_projection import (
+                        MemoryRetrievalProjection,
+                        MemoryRetrievalProjectionCommitter,
+                    )
+
+                    native_path = retrieval_cfg.get("path") or str(
+                        workspace_home / "data" / "seekdb"
+                    )
+                    ctx.retrieval_store = SeekDBEmbeddedRetrievalStore(path=native_path)
+                    projection_outbox = ctx.outbox
+                    if projection_outbox is not None:
+                        # Target-filtered worker: drains ONLY projection
+                        # records off the shared outbox (the practice
+                        # bridge's worker owns its own target), so the two
+                        # pipelines never race each other's rows.
+                        from rosclaw.storage.outbox import OutboxWorker
+
+                        self._projection_worker = OutboxWorker(
+                            projection_outbox,
+                            MemoryRetrievalProjectionCommitter(ctx.retrieval_store),
+                            target="seekdb_projection",
+                            name="memory-projection-worker",
+                            interval_sec=float(
+                                storage_cfg.get("outbox", {}).get(
+                                    "flush_interval_sec",
+                                    storage_cfg.get("outbox_flush_interval_sec", 5.0),
+                                )
+                            ),
+                        )
+                        self._projection_worker.start()
+                    ctx.memory_projection = MemoryRetrievalProjection(
+                        ctx.retrieval_store, outbox=projection_outbox
+                    )
+                    logger.info(
+                        "Memory retrieval projection: native SeekDB at %s (outbox=%s)",
+                        native_path,
+                        projection_outbox is not None,
+                    )
+            except Exception as proj_exc:  # noqa: BLE001
+                logger.info("Memory retrieval projection not available: %s", proj_exc)
+        # PR-DF-14 (flywheel §21/§36): receipt projection + lineage graph.
+        # Async index only — the authorization path never consults it.
+        try:
+            from rosclaw.storage.lineage import LineageRepository
+            from rosclaw.storage.receipts import ReceiptProjector
+
+            if ctx.structured_store is not None:
+                self._lineage = LineageRepository(ctx.structured_store)
+                self._receipt_projector = ReceiptProjector(
+                    self.event_bus, ctx.structured_store, lineage=self._lineage
+                )
+                self._receipt_projector.subscribe()
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Receipt projection unavailable: %s", exc)
+        http_url = self.config.seekdb_http_url
+        if http_url:
+            try:
+                from rosclaw.practice.seekdb_bridge import SeekDBBridge
+                from rosclaw.storage.outbox import OutboxStore
+
+                outbox_enabled = self.config.storage.get("outbox_enabled", False)
+                if outbox_enabled:
+                    outbox_path = self.config.storage.get(
+                        "outbox_path",
+                        str(workspace_home / "storage" / "outbox.sqlite"),
+                    )
+                    ctx.outbox = OutboxStore(
+                        db_path=outbox_path,
+                        max_records=self.config.storage.get("outbox_max_records", 100_000),
+                    )
+                    ctx.outbox.connect()
+                    ctx.practice_sink = SeekDBBridge(
+                        seekdb_url=http_url,
+                        fallback_dir=self.config.seekdb_fallback_dir,
+                        outbox=ctx.outbox,
+                    )
+                    # Bridge owns the worker when only outbox is passed.
+                    logger.info(
+                        "SeekDBBridge initialized at %s with outbox (%s)",
+                        http_url,
+                        outbox_path,
+                    )
+                else:
+                    ctx.practice_sink = SeekDBBridge(
+                        seekdb_url=http_url,
+                        fallback_dir=self.config.seekdb_fallback_dir,
+                    )
+                    logger.info("SeekDBBridge initialized at %s", http_url)
+            except ImportError as e:
+                logger.info(f"rosclaw_practice not installed, SeekDB integration disabled: {e}")
+            except Exception as e:
+                logger.warning(f"SeekDBBridge initialization failed: {e}")
+        return ctx
 
     def _create_seekdb_client(self) -> Any:
         """Create the legacy Memory/Auto/Skill store (not the Know v2 store).
@@ -817,6 +1056,42 @@ class Runtime(LifecycleMixin):
         if self._event_sink is not None:
             self._event_sink.close()
             self._event_sink = None
+        # PR-DF-14: receipt projector off the bus.
+        if self._receipt_projector is not None:
+            try:
+                self._receipt_projector.unsubscribe()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("ReceiptProjector unsubscribe failed (non-fatal): %s", exc)
+            self._receipt_projector = None
+        # PR-DF-11: insight service off the bus.
+        if self._memory_insights is not None:
+            try:
+                self._memory_insights.unsubscribe()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("MemoryInsightService unsubscribe failed (non-fatal): %s", exc)
+            self._memory_insights = None
+        # PR-DF-10: usage tracker off the bus.
+        if self._knowledge_usage_tracker is not None:
+            try:
+                self._knowledge_usage_tracker.unsubscribe()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Usage tracker unsubscribe failed (non-fatal): %s", exc)
+            self._knowledge_usage_tracker = None
+        # PR-DF-08: RecoveryLoop off the bus first (no learning mid-shutdown).
+        if self._recovery_loop is not None:
+            try:
+                self._recovery_loop.unsubscribe()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("RecoveryLoop unsubscribe failed (non-fatal): %s", exc)
+            self._recovery_loop = None
+        # PR-DF-07: flush + stop the projection worker before the bridge.
+        if self._projection_worker is not None:
+            try:
+                self._projection_worker.flush(timeout=5.0)
+                self._projection_worker.stop()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Projection worker stop failed (non-fatal): %s", exc)
+            self._projection_worker = None
         # Close SeekDB bridge (and any owned outbox worker) before stopping modules.
         if self._seekdb_bridge is not None and hasattr(self._seekdb_bridge, "close"):
             try:
@@ -1053,6 +1328,19 @@ class Runtime(LifecycleMixin):
             if reason:
                 tags.append(reason.replace(" ", "_"))
 
+            # PR-DF-05: the canonical write — CriticJudgment becomes an
+            # evidence-backed MemoryItem through the WriteGate.  The legacy
+            # store_experience call below stays as the compatibility
+            # projection (Phase A of the experience_graph retirement, §15).
+            self._store_critic_memory_item(
+                episode_id=episode_id,
+                status=status,
+                reward=reward,
+                reason=reason,
+                skill_name=skill_name,
+                instruction=instruction,
+                tags=tags,
+            )
             self._memory.store_experience(
                 event_id=episode_id,
                 event_type="praxis",
@@ -1074,6 +1362,76 @@ class Runtime(LifecycleMixin):
             )
         except Exception as e:
             logger.info(f"Critic judgment Memory sync failed (non-fatal): {e}")
+
+    def _store_critic_memory_item(
+        self,
+        *,
+        episode_id: str,
+        status: str,
+        reward: float,
+        reason: str,
+        skill_name: str,
+        instruction: str,
+        tags: list[str],
+    ) -> str | None:
+        """Write one critic judgment as an evidence-backed MemoryItem (PR-DF-05 §14).
+
+        The WriteGate decides STORE/MERGE/UPDATE/IGNORE/QUARANTINE exactly as
+        the session distiller's candidates; application mirrors
+        ``distill_events``.  Idempotent: repository content-hash dedup makes
+        a repeated judgment a no-op.  Returns the memory_id or None.
+        """
+        if self._memory_gate is None or self._memory_repository is None:
+            return None
+        try:
+            from rosclaw.memory.v2.models import MemoryItem, MemoryType
+
+            failed = status != "SUCCESS"
+            memory_type = MemoryType.FAILURE.value if failed else MemoryType.EPISODIC.value
+            title = (
+                f"Critic: {skill_name} {status}"
+                + (f" — {reason}" if failed and reason else "")
+            )
+            document = (
+                f"Critic judgment for skill '{skill_name}' (robot {self.config.robot_id}): "
+                f"status={status} reward={reward}."
+                + (f" Reason: {reason}." if reason else "")
+                + (f" Instruction: {instruction}." if instruction else "")
+            )
+            item = MemoryItem(
+                memory_type=memory_type,
+                robot_id=self.config.robot_id,
+                title=title,
+                document=document,
+                episode_id=episode_id,
+                skill_id=skill_name if skill_name != "unknown" else None,
+                outcome=status,
+                reward=reward,
+                failure_type=(reason or None) if failed else None,
+                evidence_refs=[f"critic_result:{episode_id}"],
+                tags=list(tags),
+                metadata={
+                    "source_event_type": "critic_judgment",
+                    "evidence_type": "critic_result",
+                    "source": "runtime_critic",
+                },
+            )
+            decision = self._memory_gate.evaluate(item)
+            if decision.decision == "STORE":
+                return self._memory_repository.store(item)
+            if decision.decision == "MERGE" and decision.target_memory_id:
+                self._memory_repository.merge_into(decision.target_memory_id, item)
+                return decision.target_memory_id
+            if decision.decision == "UPDATE" and decision.target_memory_id:
+                self._memory_repository.supersede(decision.target_memory_id, item)
+                return decision.target_memory_id
+            if decision.decision == "QUARANTINE":
+                item.status = "quarantined"
+                return self._memory_repository.store(item)
+            return None  # IGNORE
+        except Exception as exc:  # noqa: BLE001 — memory write never breaks the loop
+            logger.info("Critic MemoryItem write failed (non-fatal): %s", exc)
+            return None
 
     def _on_agent_command(self, event: Event) -> None:
         """Handle agent commands - route to appropriate module."""

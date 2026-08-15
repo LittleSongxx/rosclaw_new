@@ -81,6 +81,11 @@ def _load_storage_config(args: argparse.Namespace) -> dict[str, Any]:
     outbox_enabled = storage_cfg.get("outbox_enabled", False)
     outbox_path = storage_cfg.get("outbox_path") or str(home / "storage" / "outbox.sqlite")
 
+    # PR-DF-07: retrieval projection section (Config v2) with legacy fallback
+    retrieval_cfg = storage_cfg.get("retrieval", {})
+    retrieval_enabled = retrieval_cfg.get("enabled", storage_cfg.get("vector_enabled", False))
+    retrieval_path = retrieval_cfg.get("path") or str(home / "data" / "seekdb")
+
     practice_data_root = practice_cfg.get("output_dir") or str(get_default_data_root())
 
     return {
@@ -96,6 +101,8 @@ def _load_storage_config(args: argparse.Namespace) -> dict[str, Any]:
         "vector_enabled": storage_cfg.get("vector_enabled", False),
         "outbox_enabled": outbox_enabled,
         "outbox_path": outbox_path,
+        "retrieval_enabled": retrieval_enabled,
+        "retrieval_path": retrieval_path,
         "practice_data_root": practice_data_root,
     }
 
@@ -285,6 +292,34 @@ def _session_event_consistency(
     return event_count, events_lines, consistent, timeline_exists
 
 
+def _projection_status(cfg: dict[str, Any], client: Any) -> dict[str, Any] | None:
+    """Retrieval-projection watermark/lag for ``db status`` (PR-DF-07 §18).
+
+    Only meaningful when the structured store is the SQL source of truth and
+    a retrieval backend is enabled; entirely best-effort.
+    """
+    if not cfg.get("retrieval_enabled"):
+        return None
+    result: dict[str, Any] = {"enabled": True, "path": cfg.get("retrieval_path")}
+    try:
+        result["source_count"] = client.count("memory_items")
+    except Exception:  # noqa: BLE001
+        result["source_count"] = None
+    try:
+        from rosclaw.storage.seekdb_native import SeekDBEmbeddedRetrievalStore
+
+        native = SeekDBEmbeddedRetrievalStore(path=cfg["retrieval_path"])
+        native.connect()
+        result["projection_backend"] = type(native).__name__
+        result["projection_count"] = native.count("memory_items")
+        if result["source_count"] is not None:
+            result["lag"] = result["source_count"] - result["projection_count"]
+    except Exception as exc:  # noqa: BLE001
+        result["projection_count"] = None
+        result["error"] = str(exc)
+    return result
+
+
 @_with_stdout_flush
 def cmd_db_status(args: argparse.Namespace) -> int:
     """Show storage backend status and capabilities."""
@@ -314,6 +349,9 @@ def cmd_db_status(args: argparse.Namespace) -> int:
             extras["outbox"] = outbox_stats
         extras["vector"] = _vector_status(client)
         extras["practice"] = _practice_status(cfg)
+        projection = _projection_status(cfg, client)
+        if projection is not None:
+            extras["projection"] = projection
     finally:
         _close_client(client)
 
@@ -360,6 +398,16 @@ def cmd_db_status(args: argparse.Namespace) -> int:
         print("  Vector:")
         print(f"    enabled:    {vec.get('enabled')}")
         print(f"    warmed:     {vec.get('warmed')}")
+    if extras.get("projection"):
+        proj = extras["projection"]
+        print("  Retrieval projection:")
+        print(f"    backend:    {proj.get('projection_backend')}")
+        print(f"    source:     {proj.get('source_count')}")
+        print(f"    projected:  {proj.get('projection_count')}")
+        if proj.get("lag") is not None:
+            print(f"    lag:        {proj['lag']}")
+        if proj.get("error"):
+            print(f"    error:      {proj['error']}")
     if extras.get("practice"):
         prac = extras["practice"]
         print("  Practice:")
@@ -613,6 +661,96 @@ def _native_seekdb_checks(
         dsn = f"{deployment.get('user')}@{deployment.get('host')}:{deployment.get('port')}/{deployment.get('database')}"
         checks.append(("dsn auth", f"authenticated as {dsn}", True))
         result["seekdb"]["dsn"] = dsn
+
+
+def _flywheel_checks(
+    cfg: dict[str, Any],
+    client: Any,
+    checks: list[tuple[str, str, bool]],
+    issues: list[str],
+) -> None:
+    """Data-flywheel integrity checks for db doctor (PR-DF-15 §45-46).
+
+    All best-effort: every probe degrades to a skipped check, never a crash.
+    """
+    if client is None:
+        return
+
+    # Memory integrity (§46): ACTIVE memory_items must carry evidence.
+    try:
+        items = client.query("memory_items", {"status": "active"}, limit=100_000)
+        if items:
+            orphan = 0
+            for item in items:
+                evd = client.query("memory_evidence", {"memory_id": item["id"]}, limit=1)
+                refs = item.get("evidence_refs")
+                if not evd and not refs:
+                    orphan += 1
+            checks.append(("memory evidence", f"{orphan} orphan of {len(items)}", orphan == 0))
+            if orphan:
+                issues.append(f"{orphan} ACTIVE memory_items have no evidence rows.")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Lineage (§36/§45): receipts that never got a lineage edge.
+    try:
+        receipts = client.query("execution_receipts", limit=100_000)
+        if receipts:
+            edges = client.query("lineage_edges", limit=500_000)
+            linked = {e.get("from_id") for e in edges}
+            missing = sum(1 for r in receipts if r.get("id") not in linked)
+            checks.append(
+                ("lineage edges", f"{missing} receipt(s) unlinked of {len(receipts)}", missing == 0)
+            )
+            if missing:
+                issues.append(f"{missing} execution_receipts have no lineage edges.")
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Retrieval projection (§18/§45): source vs projected watermark lag.
+    if cfg.get("retrieval_enabled"):
+        try:
+            source = client.count("memory_items")
+            projected = None
+            error = None
+            try:
+                from rosclaw.storage.seekdb_native import SeekDBEmbeddedRetrievalStore
+
+                native = SeekDBEmbeddedRetrievalStore(path=cfg["retrieval_path"])
+                native.connect()
+                projected = native.count("memory_items")
+            except Exception as exc:  # noqa: BLE001
+                error = str(exc)
+            if projected is None:
+                checks.append(("retrieval projection", f"unavailable: {error}", False))
+                issues.append(f"Retrieval projection unavailable: {error}")
+            else:
+                lag = source - projected
+                checks.append(
+                    ("projection lag", f"{lag} (source {source} / projected {projected})", lag == 0)
+                )
+                if lag != 0:
+                    issues.append(
+                        f"Retrieval projection lag {lag} — run the projection rebuild/catch-up."
+                    )
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Outbox health (§45): pending + dead letters.
+    if cfg.get("outbox_enabled"):
+        try:
+            from rosclaw.storage.outbox import OutboxStore
+
+            outbox = OutboxStore(db_path=cfg["outbox_path"])
+            outbox.connect()
+            stats = outbox.stats()
+            pending = stats.get("pending", 0)
+            dead = stats.get("deadletters", stats.get("dead_letters", 0)) or 0
+            checks.append(("outbox", f"pending={pending} dead={dead}", dead == 0))
+            if dead:
+                issues.append(f"Outbox has {dead} dead-letter record(s).")
+        except Exception:  # noqa: BLE001
+            pass
 
 
 @_with_stdout_flush
@@ -891,6 +1029,10 @@ def cmd_db_doctor(args: argparse.Namespace) -> int:
             }
         except Exception as exc:  # noqa: BLE001
             issues.append(f"Latest session consistency check failed: {exc}")
+
+    # PR-DF-15: data-flywheel integrity checks (memory evidence, lineage,
+    # projection lag, outbox dead letters)
+    _flywheel_checks(cfg, client, checks, issues)
 
     if client is not None:
         _close_client(client)
