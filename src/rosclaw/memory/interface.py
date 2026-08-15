@@ -23,6 +23,10 @@ from rosclaw.core.lifecycle import LifecycleMixin
 from rosclaw.memory.seekdb_client import InMemoryStructuredStore, StructuredStore
 from rosclaw.memory.types import ArtifactRef, FailureMemory, PraxisEvent
 
+# ADR-0010 compat (PR-DF-01): keep the pre-rename module attribute
+SeekDBClient = StructuredStore
+InMemoryKnowledgeStore = InMemoryStructuredStore
+
 logger = logging.getLogger("rosclaw.memory.interface")
 
 _MAX_RECOVERY_HINT_CHARS: Final[int] = 4096
