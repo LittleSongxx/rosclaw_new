@@ -105,9 +105,14 @@ class ExecutionRouter:
 
     @staticmethod
     def _preferred_harness() -> str:
-        """启动前健康选择：已安装的 ACP Harness 优先于内置 Pi。"""
+        """启动前健康选择（readiness preflight）：Codex app-server 原生
+        路径优先（需二进制+自有登录配置），其次 ACP Harness，否则
+        内置 Pi。"""
         import shutil
+        from pathlib import Path
 
+        if shutil.which("codex") and (Path.home() / ".codex").exists():
+            return "harness:codex-app-server"
         for binary, runtime in (
             ("claude-code-acp", "harness:acp:claude-local"),
             ("pi-acp", "harness:acp:pi-acp"),
@@ -230,6 +235,10 @@ class TaskControlPlane:
         try:
             if route["domain"] == "executor" and route["runtime"] == "executor:simulation":
                 await self._drive_simulation(execution_id, mission_id, spec)
+            elif route["domain"] == "executor":
+                # RF-6：其余 executor runtime（body-observer 等）走确定性
+                # capability 调用——不落 harness（不开 Agent Worker）。
+                await self._drive_capability_executor(execution_id, spec, route)
             elif route["domain"] == "physical":
                 self._update_state(
                     execution_id, "BLOCKED",
@@ -242,6 +251,45 @@ class TaskControlPlane:
             raise
         except Exception as exc:  # noqa: BLE001 - 执行失败是数据
             self._update_state(execution_id, "FAILED", summary=str(exc)[:500])
+
+    async def _drive_capability_executor(
+        self, execution_id: str, spec: dict, route: dict
+    ) -> None:
+        """RF-6：确定性 capability 执行域（robot.observe.* 等）——经
+        tool registry 直接调用，零 Agent Worker，结果即证据。"""
+        service = self._service
+        inputs = spec.get("inputs") or {}
+        capability_id = str(
+            inputs.get("capability_id")
+            or (spec.get("required_capabilities") or [""])[0]
+        )
+        if not capability_id:
+            self._update_state(
+                execution_id, "BLOCKED",
+                summary="executor 任务缺 capability_id——编译期失败，未执行",
+            )
+            return
+        await service._ensure_mcp_discovered()
+        self._update_state(execution_id, "RUNNING")
+        try:
+            raw = await service._tool_registry.execute(
+                capability_id, dict(inputs.get("arguments") or {})
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._update_state(
+                execution_id, "FAILED",
+                summary=f"capability {capability_id} 执行失败: {exc}"[:400],
+            )
+            return
+        text = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
+        self._update_state(
+            execution_id, "SUCCEEDED",
+            summary=text[:500],
+            artifacts_json=json.dumps(
+                {"capability": capability_id, "result": text[:2000]},
+                ensure_ascii=False,
+            ),
+        )
 
     async def _drive_simulation(
         self, execution_id: str, mission_id: str, spec: dict
@@ -307,12 +355,46 @@ class TaskControlPlane:
     async def _drive_harness(
         self, execution_id: str, mission_id: str, spec: dict, route: dict
     ) -> None:
-        """Harness 域：ACP runtime 走协议驱动（PR-RF-3）；pi-builtin 走
-        现有 worker manager（RF-9 前保留）。"""
+        """Harness 域：codex app-server 原生路径（RF-5）/ACP（RF-3）/
+        pi-builtin（RF-9 前保留）。"""
+        if route["runtime"] == "harness:codex-app-server":
+            await self._drive_codex(execution_id, spec)
+            return
         if route["runtime"].startswith("harness:acp:"):
             await self._drive_acp(execution_id, spec, route["runtime"])
             return
         await self._drive_pi_builtin(execution_id, mission_id, spec)
+
+    async def _drive_codex(self, execution_id: str, spec: dict) -> None:
+        """Codex app-server：单 thread 单 turn；sandbox（RF-4）+ 原生
+        thread/resume/compaction。事件落 EventStore。"""
+        from rosclaw.agentd.codex_driver import CodexAppServerDriver, codex_binary
+
+        if codex_binary() is None:
+            self._update_state(
+                execution_id, "BLOCKED",
+                summary="codex CLI 未安装——preflight 失败，未创建执行",
+            )
+            return
+        self._update_state(execution_id, "RUNNING")
+        from rosclaw.agentd.workers.event_store import WorkerEventStore
+
+        events = WorkerEventStore(self._service._home)
+
+        async def sink(kind: str, payload: dict) -> None:
+            events.append_event(execution_id, "", kind, payload)
+
+        driver = CodexAppServerDriver(
+            cwd=str(self._service._home),
+            event_sink=sink,
+            sandbox_home=self._service._home / "work" / execution_id,
+        )
+        result = await driver.run(str(spec.get("goal", "")))
+        self._update_state(
+            execution_id,
+            "SUCCEEDED" if result["ok"] else "FAILED",
+            summary=result["detail"][:500],
+        )
 
     async def _drive_acp(
         self, execution_id: str, spec: dict, runtime: str
@@ -404,7 +486,16 @@ class TaskControlPlane:
                 execution_id, "INTERRUPTED",
                 summary=result.summary[:500],
             )
-        else:
+        elif result.status == "CANCELLED":
+            # 用户取消是 CANCELLED——绝不能落成 FAILED（自审修复：
+            # task_cancel 后 driver 收尾曾把 CANCELLED 覆盖成 FAILED）。
             self._update_state(
-                execution_id, "FAILED", summary=result.summary[:500]
+                execution_id, "CANCELLED",
+                summary=result.summary[:500] or "已取消",
             )
+        else:
+            current = self._get(execution_id)
+            if current and current["state"] != "CANCELLED":
+                self._update_state(
+                    execution_id, "FAILED", summary=result.summary[:500]
+                )
