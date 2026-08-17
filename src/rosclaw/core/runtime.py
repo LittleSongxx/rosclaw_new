@@ -709,6 +709,7 @@ class Runtime(LifecycleMixin):
                         if isinstance(_auto_cfg, dict)
                         else 3
                     ),
+                    lineage_repository=self._lineage,
                 )
                 self._memory_insights.subscribe()
             except Exception as exc:  # noqa: BLE001
@@ -761,6 +762,7 @@ class Runtime(LifecycleMixin):
                     if self._skill_manager
                     else None,
                     sense_runtime=self._sense,
+                    lineage_repository=self._lineage,
                 )
                 self._modules.append(self._auto)
                 logger.info("Self-Evolution Control Plane (Auto) initialized")
