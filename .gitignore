@@ -106,3 +106,13 @@ node_modules/
 # Large CMU ARE mesh assets are kept local and are not committed. They are
 # fetched by vehicle_simulator/mesh/download_environments.sh (~600MB per env).
 third_party/**/vehicle_simulator/mesh/
+
+# Large CMU ARE planner/model assets are supplied out-of-band and verified by
+# docs/assets/cmu-are-assets.yaml. Keep source and launch files tracked.
+third_party/**/ariadne2/scripts/model/checkpoint.pth
+third_party/**/local_planner/paths/correspondences.txt
+third_party/**/local_planner/paths/paths.ply
+third_party/**/local_planner/paths/startPaths.ply
+third_party/**/local_planner/paths/pathList.ply
+third_party/planner/
+third_party/simulator/

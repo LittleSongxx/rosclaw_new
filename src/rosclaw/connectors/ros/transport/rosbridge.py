@@ -24,6 +24,15 @@ logger = logging.getLogger("rosclaw.connectors.ros.transport.rosbridge")
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
 
 
+def _is_receive_timeout(exc: Exception) -> bool:
+    """Distinguish an idle subscription from a broken WebSocket session."""
+
+    return isinstance(exc, (TimeoutError, socket.timeout)) or type(exc).__name__ in {
+        "WebSocketTimeoutException",
+        "TimeoutError",
+    }
+
+
 class RosbridgeTransport:
     """Thread-safe WebSocket transport for rosbridge.
 
@@ -163,7 +172,12 @@ class RosbridgeTransport:
             except Exception as exc:
                 error = f"Receive failed or timed out after {actual_timeout}s: {exc}"
                 logger.warning(error)
-                self._invalidate()
+                # An observation timeout means no message arrived within the
+                # bounded window; it does not by itself establish that the
+                # rosbridge connection generation changed.  Broken sockets
+                # still invalidate immediately and must reconnect.
+                if not _is_receive_timeout(exc):
+                    self._invalidate()
                 return RosTransportResult(ok=False, error=error, raw=str(exc))
 
             try:

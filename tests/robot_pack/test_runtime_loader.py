@@ -664,9 +664,7 @@ def test_limo_speech_executor_returns_energy_verified_receipt(tmp_path, monkeypa
 
     def run_worker(*_args, **kwargs):
         worker_call.update(kwargs)
-        return SimpleNamespace(
-            returncode=0, stdout=__import__("json").dumps(payload), stderr=""
-        )
+        return SimpleNamespace(returncode=0, stdout=__import__("json").dumps(payload), stderr="")
 
     monkeypatch.setattr("rosclaw.robot_pack.runtime_loader.subprocess.run", run_worker)
 

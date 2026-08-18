@@ -145,6 +145,7 @@ class Runner:
         self.exploration_active = rospy.get_param('~start_active', False)
         self.paused = not self.exploration_active
         self.stopped = False
+        self._last_published_exploration_state = None
 
         # save mode
         self.save_mode = False
@@ -161,6 +162,12 @@ class Runner:
         self.node_pub = rospy.Publisher('/node', PointCloud2, queue_size=1)
         self.frontier_pub = rospy.Publisher('/frontier', PointCloud2, queue_size=1)
         self.community_pub = rospy.Publisher('/communities', Marker, queue_size=1)
+        # The daemon-owned SHADOW adapter uses this fixed, read-only lifecycle
+        # signal to verify that a control command changed ARiADNE2 state.
+        self.exploration_state_pub = rospy.Publisher(
+            '/rosclaw/exploration_state', String, queue_size=1, latch=True
+        )
+        self.publish_exploration_state()
         
         # get map and robot location
         while self.map_info is None or self.robot_location is None:
@@ -271,8 +278,29 @@ class Runner:
             rospy.loginfo("ROSClaw exploration control: stop")
         else:
             rospy.logwarn("ROSClaw exploration control: unknown command '%s'", command)
+            return
+        self.publish_exploration_state()
+
+    def exploration_state(self):
+        if self.done:
+            return 'done'
+        if self.stopped:
+            return 'stopped'
+        if self.paused:
+            return 'paused'
+        if self.exploration_active:
+            return 'active'
+        return 'inactive'
+
+    def publish_exploration_state(self):
+        state = self.exploration_state()
+        if state == self._last_published_exploration_state:
+            return
+        self.exploration_state_pub.publish(String(data=state))
+        self._last_published_exploration_state = state
 
     def run(self, event=None):
+        self.publish_exploration_state()
         # no more planning if exploration is completed
         t1 = time.time()
         if self.done or self.stopped or not self.exploration_active or self.paused:
@@ -345,6 +373,7 @@ class Runner:
             n= "\033[0m"
             rospy.loginfo(f"{g}Exploration Completed{n}")
             self.done = True
+            self.publish_exploration_state()
             run_time = Float32()
             run_time.data = 0
             self.run_time_pub.publish(run_time)

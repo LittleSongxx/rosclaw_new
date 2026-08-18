@@ -39,6 +39,9 @@ _DAEMON_EXECUTOR_CONTRACTS: dict[str, tuple[str, frozenset[str]]] = {
     "limo.play_tone": ("actuation", frozenset({"SHADOW", "REAL"})),
     "limo.speak_text": ("actuation", frozenset({"SHADOW", "REAL"})),
     "limo.set_initial_pose": ("actuation", frozenset({"SHADOW", "REAL"})),
+    "cmu_are.navigate_to_waypoint": ("actuation", frozenset({"SHADOW"})),
+    "cmu_are.exploration_control": ("actuation", frozenset({"SHADOW"})),
+    "cmu_are.stop": ("actuation", frozenset({"SHADOW"})),
 }
 
 
@@ -1511,6 +1514,12 @@ def load_daemon_robot_pack(
 ) -> dict[str, Any] | None:
     """Load exactly one configured Pack instance into a daemon Runtime."""
 
+    # CMU ARE is a deliberately built-in simulation binding.  It has a fixed
+    # simulated identity and does not go through live-device discovery or the
+    # installed-adapter registry used by hardware Packs.
+    if robot_id == "cmu_are_sim":
+        return load_cmu_are_simulation_pack(runtime, home=home)
+
     resolved_home = resolve_home(str(home) if home is not None else None)
     instances_root = resolved_home / "robots" / "instances"
     config_path = instances_root / f"{robot_id}.yaml"
@@ -1595,52 +1604,57 @@ def load_daemon_robot_pack(
                 instance,
                 adapter_source=limo_adapter_source,
             )
-            runtime.action_gateway.register_executor(
-                capability.id,
-                ExecutionMode.SHADOW,
-                LimoInitialPoseShadowExecutor(
-                    instance,
-                    adapter_source=limo_adapter_source,
-                ),
-            )
-            registered.append(f"{capability.id}:SHADOW")
+            if "SHADOW" in capability.execution_modes:
+                runtime.action_gateway.register_executor(
+                    capability.id,
+                    ExecutionMode.SHADOW,
+                    LimoInitialPoseShadowExecutor(
+                        instance,
+                        adapter_source=limo_adapter_source,
+                    ),
+                )
+                registered.append(f"{capability.id}:SHADOW")
         elif capability.id == "limo.navigate_to_pose" and capability.safety_class == "actuation":
             assert limo_adapter_source is not None
             executor = LimoNavigationExecutor(instance, adapter_source=limo_adapter_source)
-            runtime.action_gateway.register_executor(
-                capability.id,
-                ExecutionMode.SHADOW,
-                LimoNavigationShadowExecutor(instance, adapter_source=limo_adapter_source),
-            )
-            registered.append(f"{capability.id}:SHADOW")
+            if "SHADOW" in capability.execution_modes:
+                runtime.action_gateway.register_executor(
+                    capability.id,
+                    ExecutionMode.SHADOW,
+                    LimoNavigationShadowExecutor(instance, adapter_source=limo_adapter_source),
+                )
+                registered.append(f"{capability.id}:SHADOW")
         elif capability.id == "limo.play_tone" and capability.safety_class == "actuation":
             assert limo_adapter_source is not None
             executor = LimoToneExecutor(instance, adapter_source=limo_adapter_source)
-            runtime.action_gateway.register_executor(
-                capability.id,
-                ExecutionMode.SHADOW,
-                LimoToneShadowExecutor(instance, adapter_source=limo_adapter_source),
-            )
-            registered.append(f"{capability.id}:SHADOW")
+            if "SHADOW" in capability.execution_modes:
+                runtime.action_gateway.register_executor(
+                    capability.id,
+                    ExecutionMode.SHADOW,
+                    LimoToneShadowExecutor(instance, adapter_source=limo_adapter_source),
+                )
+                registered.append(f"{capability.id}:SHADOW")
         elif capability.id == "limo.speak_text" and capability.safety_class == "actuation":
             assert limo_adapter_source is not None
             executor = LimoSpeechExecutor(instance, adapter_source=limo_adapter_source)
-            runtime.action_gateway.register_executor(
-                capability.id,
-                ExecutionMode.SHADOW,
-                LimoSpeechShadowExecutor(instance, adapter_source=limo_adapter_source),
-            )
-            registered.append(f"{capability.id}:SHADOW")
+            if "SHADOW" in capability.execution_modes:
+                runtime.action_gateway.register_executor(
+                    capability.id,
+                    ExecutionMode.SHADOW,
+                    LimoSpeechShadowExecutor(instance, adapter_source=limo_adapter_source),
+                )
+                registered.append(f"{capability.id}:SHADOW")
         else:
             raise RobotPackRuntimeError(
                 f"No daemon-side executor is implemented for Pack capability {capability.id!r}"
             )
-        runtime.action_gateway.register_executor(
-            capability.id,
-            ExecutionMode.REAL,
-            executor,
-        )
-        registered.append(f"{capability.id}:REAL")
+        if "REAL" in capability.execution_modes:
+            runtime.action_gateway.register_executor(
+                capability.id,
+                ExecutionMode.REAL,
+                executor,
+            )
+            registered.append(f"{capability.id}:REAL")
 
     status = {
         "loaded": True,
@@ -1656,6 +1670,91 @@ def load_daemon_robot_pack(
         },
         "registered_executors": registered,
         "safety": instance.safety,
+    }
+    runtime.robot_pack_status = status
+    return status
+
+
+def load_cmu_are_simulation_pack(
+    runtime: Any,
+    *,
+    home: str | Path | None = None,
+) -> dict[str, Any]:
+    """Load the signed, source-tree CMU ARE simulation Pack.
+
+    Unlike a hardware instance this path has no discovery step, no device
+    serial, and no REAL executor.  The Pack still goes through the same schema,
+    checksum, and detached-signature verifier before registration.
+    """
+
+    from rosclaw.integrations.cmu_are.contracts import CMU_ARE_BODY_ID
+    from rosclaw.integrations.cmu_are.executor import CmuAreShadowExecutor
+
+    pack_root = Path(__file__).resolve().parent / "packs" / "cmu-are-sim"
+    try:
+        verification = verify_robot_pack(pack_root)
+        if not verification.ok or not verification.trusted or verification.manifest is None:
+            raise RobotPackRuntimeError(
+                "Built-in CMU ARE simulation Pack failed trusted verification: "
+                + "; ".join(verification.errors)
+            )
+        manifest = verification.manifest
+    except RobotPackRuntimeError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - startup must fail closed
+        raise RobotPackRuntimeError(f"CMU ARE simulation Pack cannot be loaded: {exc}") from exc
+
+    if manifest.pack.name != "cmu-are-sim" or manifest.adapter.transport != "rosbridge":
+        raise RobotPackRuntimeError("CMU ARE Pack identity or transport contract is invalid")
+    loader_contract_ok, loader_contract_errors = validate_daemon_loader_contract(manifest)
+    if not loader_contract_ok:
+        raise RobotPackRuntimeError("; ".join(loader_contract_errors))
+    if any("REAL" in capability.execution_modes for capability in manifest.capabilities):
+        raise RobotPackRuntimeError("CMU ARE simulation Pack must not declare REAL execution")
+
+    resolved_home = resolve_home(str(home) if home is not None else None)
+    source_asset_manifest = Path(__file__).resolve().parents[3] / "docs/assets/cmu-are-assets.yaml"
+    executor = CmuAreShadowExecutor(
+        home=resolved_home,
+        pack_version=manifest.pack.version,
+        # The simulated identity is derived from the reviewed source-tree
+        # manifest, never from mutable ROSCLAW_HOME content.
+        asset_manifest=source_asset_manifest,
+    )
+    registered: list[str] = []
+    for capability in manifest.capabilities:
+        if capability.id not in {
+            "cmu_are.navigate_to_waypoint",
+            "cmu_are.exploration_control",
+            "cmu_are.stop",
+        }:
+            raise RobotPackRuntimeError(
+                f"No CMU ARE daemon executor is implemented for {capability.id!r}"
+            )
+        runtime.action_gateway.register_executor(capability.id, ExecutionMode.SHADOW, executor)
+        registered.append(f"{capability.id}:SHADOW")
+
+    status = {
+        "loaded": True,
+        "instance_id": CMU_ARE_BODY_ID,
+        "pack_ref": manifest.canonical_ref,
+        "manifest_digest": verification.manifest_digest,
+        "signature_status": verification.signature_status,
+        "support_tier": manifest.support.baseline_tier.value,
+        "candidate_tier": manifest.support.candidate_tier.value,
+        "device": {
+            "type": "mobile_base",
+            "model": "CMU ARE Simulator",
+            "serial": "cmu_are_simulated_device_v1",
+            "stable_uri": "sim://cmu_are_sim",
+        },
+        "body_snapshot_hash": executor.expected_body_snapshot_hash,
+        "registered_executors": registered,
+        "safety": {
+            "actuation": manifest.safety.actuation,
+            "agent_southbound_access": manifest.safety.agent_southbound_access,
+            "real_executor": False,
+        },
     }
     runtime.robot_pack_status = status
     return status
@@ -1798,5 +1897,6 @@ __all__ = [
     "LimoInitialPoseShadowExecutor",
     "RealSenseCaptureExecutor",
     "RobotPackRuntimeError",
+    "load_cmu_are_simulation_pack",
     "load_daemon_robot_pack",
 ]

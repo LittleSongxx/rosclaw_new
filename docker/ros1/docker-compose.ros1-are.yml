@@ -1,4 +1,4 @@
-# ROSClaw - ROS1 CMU ARE / ARiADNE2 stack (demo apps)
+# ROSClaw - ROS1 CMU ARE / ARiADNE2 simulation stack
 #
 # Separate from the repo-root docker-compose.yml, which runs the mainline
 # ROSClaw runtime. Run this one explicitly:
@@ -21,11 +21,19 @@ services:
     tty: true
     volumes:
       - ../../practice_data:/opt/rosclaw/practice_data
+      - ${CMU_ARE_ASSET_ROOT:-../../third_party}:/opt/rosclaw/third_party:ro
+      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/ariadne2/scripts/model/checkpoint.pth:/opt/rosclaw/ros1_ws/src/ariadne2/scripts/model/checkpoint.pth:ro
+      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/local_planner/paths/correspondences.txt:/opt/rosclaw/ros1_ws/src/local_planner/paths/correspondences.txt:ro
+      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/local_planner/paths/paths.ply:/opt/rosclaw/ros1_ws/src/local_planner/paths/paths.ply:ro
+      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/local_planner/paths/startPaths.ply:/opt/rosclaw/ros1_ws/src/local_planner/paths/startPaths.ply:ro
+      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/local_planner/paths/pathList.ply:/opt/rosclaw/ros1_ws/src/local_planner/paths/pathList.ply:ro
+      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/vehicle_simulator/mesh:/opt/rosclaw/ros1_ws/src/vehicle_simulator/mesh:ro
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - /mnt/wslg:/mnt/wslg:rw
       - /usr/lib/wsl:/usr/lib/wsl:ro
     environment:
       CMU_ARE_WORLD: ${CMU_ARE_WORLD:-campus}
+      ROSBRIDGE_PORT: ${ROSBRIDGE_PORT:-9090}
       HEADLESS: ${HEADLESS:-true}
       USE_RVIZ: ${USE_RVIZ:-false}
       START_ARIADNE2: ${START_ARIADNE2:-true}
@@ -42,28 +50,6 @@ services:
       SPAWN_CAMERA: ${SPAWN_CAMERA:-false}
       LIBGL_ALWAYS_SOFTWARE: ${LIBGL_ALWAYS_SOFTWARE:-1}
       DISABLE_ROS1_EOL_WARNINGS: ${DISABLE_ROS1_EOL_WARNINGS:-1}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
-      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
-      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-}
-      CMU_PLACES: ${CMU_PLACES:-docker/ros1/places.campus.yaml}
-      CMU_OUTPUT_DIR: ${CMU_OUTPUT_DIR:-practice_data/app_runs}
-      CMU_NAV_TIMEOUT: ${CMU_NAV_TIMEOUT:-120}
-      CMU_READINESS_TIMEOUT: ${CMU_READINESS_TIMEOUT:-60}
-      CMU_NAV_TOLERANCE: ${CMU_NAV_TOLERANCE:-1.5}
-      CMU_SPEED: ${CMU_SPEED:-2.0}
-      CMU_MAX_RELATIVE_M: ${CMU_MAX_RELATIVE_M:-20}
-      CMU_CHAT_PROGRESS_INTERVAL: ${CMU_CHAT_PROGRESS_INTERVAL:-3}
-      CMU_MAX_SEQUENCE_STEPS: ${CMU_MAX_SEQUENCE_STEPS:-8}
-      CMU_CIRCLE_SEGMENTS: ${CMU_CIRCLE_SEGMENTS:-12}
-      CMU_MAX_CIRCLE_RADIUS: ${CMU_MAX_CIRCLE_RADIUS:-6}
-      CMU_TASK_PREEMPT_POLICY: ${CMU_TASK_PREEMPT_POLICY:-preempt}
-      CMU_EXPLORATION_ON_MANUAL: ${CMU_EXPLORATION_ON_MANUAL:-pause}
-      CMU_DASHBOARD_HOST: ${CMU_DASHBOARD_HOST:-0.0.0.0}
-      CMU_DASHBOARD_PORT: ${CMU_DASHBOARD_PORT:-18770}
-      CMU_DASHBOARD_MAX_POINTS: ${CMU_DASHBOARD_MAX_POINTS:-2000}
       DISPLAY: ${DISPLAY:-:0}
       WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-wayland-0}
       ROSCLAW_XDG_RUNTIME_DIR: ${ROSCLAW_XDG_RUNTIME_DIR:-/tmp/runtime-root}
@@ -74,7 +60,7 @@ services:
       PYTHONUNBUFFERED: "1"
     command: ["rosclaw-are-launch"]
     healthcheck:
-      test: ["CMD", "bash", "-lc", "source /opt/ros/noetic/setup.bash && source /opt/rosclaw/ros1_ws/devel/setup.bash && rostopic list >/dev/null"]
+      test: ["CMD", "bash", "-lc", "source /opt/ros/noetic/setup.bash && source /opt/rosclaw/ros1_ws/devel/setup.bash && rostopic list >/dev/null && rosservice list | grep -q '^/rosapi/topics$'"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -93,34 +79,35 @@ services:
     tty: true
     volumes:
       - ../../practice_data:/opt/rosclaw/practice_data
+      - ${CMU_ARE_ASSET_ROOT:-../../third_party}:/opt/rosclaw/third_party:ro
+      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/ariadne2/scripts/model/checkpoint.pth:/opt/rosclaw/ros1_ws/src/ariadne2/scripts/model/checkpoint.pth:ro
+      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/local_planner/paths/correspondences.txt:/opt/rosclaw/ros1_ws/src/local_planner/paths/correspondences.txt:ro
+      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/local_planner/paths/paths.ply:/opt/rosclaw/ros1_ws/src/local_planner/paths/paths.ply:ro
+      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/local_planner/paths/startPaths.ply:/opt/rosclaw/ros1_ws/src/local_planner/paths/startPaths.ply:ro
+      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/local_planner/paths/pathList.ply:/opt/rosclaw/ros1_ws/src/local_planner/paths/pathList.ply:ro
+      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/vehicle_simulator/mesh:/opt/rosclaw/ros1_ws/src/vehicle_simulator/mesh:ro
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - /mnt/wslg:/mnt/wslg:rw
       - /usr/lib/wsl:/usr/lib/wsl:ro
     environment:
       LIBGL_ALWAYS_SOFTWARE: ${LIBGL_ALWAYS_SOFTWARE:-1}
       DISABLE_ROS1_EOL_WARNINGS: ${DISABLE_ROS1_EOL_WARNINGS:-1}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
-      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
-      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-}
-      CMU_PLACES: ${CMU_PLACES:-docker/ros1/places.campus.yaml}
-      CMU_OUTPUT_DIR: ${CMU_OUTPUT_DIR:-practice_data/app_runs}
-      CMU_NAV_TIMEOUT: ${CMU_NAV_TIMEOUT:-120}
-      CMU_READINESS_TIMEOUT: ${CMU_READINESS_TIMEOUT:-60}
-      CMU_NAV_TOLERANCE: ${CMU_NAV_TOLERANCE:-1.5}
-      CMU_SPEED: ${CMU_SPEED:-2.0}
-      CMU_MAX_RELATIVE_M: ${CMU_MAX_RELATIVE_M:-20}
-      CMU_CHAT_PROGRESS_INTERVAL: ${CMU_CHAT_PROGRESS_INTERVAL:-3}
-      CMU_MAX_SEQUENCE_STEPS: ${CMU_MAX_SEQUENCE_STEPS:-8}
-      CMU_CIRCLE_SEGMENTS: ${CMU_CIRCLE_SEGMENTS:-12}
-      CMU_MAX_CIRCLE_RADIUS: ${CMU_MAX_CIRCLE_RADIUS:-6}
-      CMU_TASK_PREEMPT_POLICY: ${CMU_TASK_PREEMPT_POLICY:-preempt}
-      CMU_EXPLORATION_ON_MANUAL: ${CMU_EXPLORATION_ON_MANUAL:-pause}
-      CMU_DASHBOARD_HOST: ${CMU_DASHBOARD_HOST:-0.0.0.0}
-      CMU_DASHBOARD_PORT: ${CMU_DASHBOARD_PORT:-18770}
-      CMU_DASHBOARD_MAX_POINTS: ${CMU_DASHBOARD_MAX_POINTS:-2000}
+      CMU_ARE_WORLD: ${CMU_ARE_WORLD:-campus}
+      ROSBRIDGE_PORT: ${ROSBRIDGE_PORT:-9090}
+      HEADLESS: ${HEADLESS:-true}
+      USE_RVIZ: ${USE_RVIZ:-false}
+      START_ARIADNE2: ${START_ARIADNE2:-true}
+      ARIADNE2_ACTIVE: ${ARIADNE2_ACTIVE:-false}
+      ARIADNE2_USE_RVIZ: ${ARIADNE2_USE_RVIZ:-false}
+      ARIADNE2_START_DELAY: ${ARIADNE2_START_DELAY:-12}
+      ARIADNE2_LAYERED_PROJECTION: ${ARIADNE2_LAYERED_PROJECTION:-false}
+      ARIADNE2_PROJECTION_Z_BELOW: ${ARIADNE2_PROJECTION_Z_BELOW:-1.0}
+      ARIADNE2_PROJECTION_Z_ABOVE: ${ARIADNE2_PROJECTION_Z_ABOVE:-1.6}
+      ARIADNE2_PROJECTION_MIN_KNOWN_CELLS: ${ARIADNE2_PROJECTION_MIN_KNOWN_CELLS:-80}
+      ARIADNE2_PROJECTION_ROBOT_CHECK_RADIUS: ${ARIADNE2_PROJECTION_ROBOT_CHECK_RADIUS:-1.5}
+      ARIADNE2_PROJECTION_MIN_ROBOT_FREE_CELLS: ${ARIADNE2_PROJECTION_MIN_ROBOT_FREE_CELLS:-4}
+      ARIADNE2_PROJECTION_OVERLAY_RADIUS: ${ARIADNE2_PROJECTION_OVERLAY_RADIUS:-8.0}
+      SPAWN_CAMERA: ${SPAWN_CAMERA:-false}
       DISPLAY: ${DISPLAY:-:0}
       WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-wayland-0}
       ROSCLAW_XDG_RUNTIME_DIR: ${ROSCLAW_XDG_RUNTIME_DIR:-/tmp/runtime-root}
@@ -130,49 +117,3 @@ services:
       NO_AT_BRIDGE: "1"
       PYTHONUNBUFFERED: "1"
     command: ["bash"]
-
-  cmu-dashboard:
-    image: rosclaw/noetic-are:latest
-    build:
-      context: ../..
-      dockerfile: docker/ros1/Dockerfile.noetic-are
-    container_name: rosclaw-cmu-dashboard
-    profiles: ["dashboard"]
-    restart: unless-stopped
-    ports:
-      - "${CMU_DASHBOARD_PORT:-18770}:${CMU_DASHBOARD_PORT:-18770}"
-    volumes:
-      - ../../practice_data:/opt/rosclaw/practice_data
-    environment:
-      DISABLE_ROS1_EOL_WARNINGS: ${DISABLE_ROS1_EOL_WARNINGS:-1}
-      CMU_OUTPUT_DIR: ${CMU_OUTPUT_DIR:-practice_data/app_runs}
-      CMU_DASHBOARD_HOST: ${CMU_DASHBOARD_HOST:-0.0.0.0}
-      CMU_DASHBOARD_PORT: ${CMU_DASHBOARD_PORT:-18770}
-      CMU_DASHBOARD_MAX_POINTS: ${CMU_DASHBOARD_MAX_POINTS:-2000}
-      PYTHONUNBUFFERED: "1"
-    command:
-      - rosclaw
-      - app
-      - cmu-dashboard
-      - --host
-      - 0.0.0.0
-      - --port
-      - ${CMU_DASHBOARD_PORT:-18770}
-      - --output-dir
-      - ${CMU_OUTPUT_DIR:-practice_data/app_runs}
-      - --max-points
-      - ${CMU_DASHBOARD_MAX_POINTS:-2000}
-      - --no-ros
-
-  # Optional: SeekDB SQLite persistence service
-  seekdb:
-    image: alpine:latest
-    container_name: rosclaw-seekdb
-    restart: unless-stopped
-    volumes:
-      - seekdb-data:/data
-    command: ["sh", "-c", "echo 'SeekDB SQLite volume ready' && tail -f /dev/null"]
-
-volumes:
-  seekdb-data:
-    driver: local

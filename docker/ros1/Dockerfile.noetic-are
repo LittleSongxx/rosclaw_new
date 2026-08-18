@@ -42,6 +42,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-noetic-pcl-conversions \
     ros-noetic-pcl-ros \
     ros-noetic-robot-state-publisher \
+    ros-noetic-rosapi \
+    ros-noetic-rosbridge-suite \
     ros-noetic-rviz \
     ros-noetic-tf \
     ros-noetic-xacro \
@@ -62,6 +64,10 @@ COPY third_party/ ./third_party/
 
 RUN mkdir -p /opt/rosclaw/ros1_ws/src /opt/rosclaw/practice_data /opt/rosclaw/rosclaw_data \
     && cp -a /opt/rosclaw/third_party/ros1/are/src/. /opt/rosclaw/ros1_ws/src/ \
+    && mkdir -p \
+        /opt/rosclaw/ros1_ws/src/ariadne2/scripts/model \
+        /opt/rosclaw/ros1_ws/src/local_planner/paths \
+        /opt/rosclaw/ros1_ws/src/vehicle_simulator/mesh \
     && source /opt/ros/noetic/setup.bash \
     && cd /opt/rosclaw/ros1_ws/src \
     && catkin_init_workspace \
@@ -75,7 +81,7 @@ COPY README.md pyproject.toml rosclaw.yaml ./
 RUN chmod +x /opt/rosclaw/docker/scripts/rosclaw-noetic-are-entrypoint.sh \
     /opt/rosclaw/docker/scripts/rosclaw-noetic-are-launch.sh \
     && ln -s /opt/rosclaw/docker/scripts/rosclaw-noetic-are-launch.sh /usr/local/bin/rosclaw-are-launch \
-    && printf '#!/usr/bin/env bash\nORIG_ARGS=("$@")\nset --\nsource /opt/ros/noetic/setup.bash\nsource /opt/rosclaw/ros1_ws/devel/setup.bash\nset -- "${ORIG_ARGS[@]}"\nexport PYTHONPATH=/opt/rosclaw/src:${PYTHONPATH:-}\nexec python3 -m rosclaw.cli "$@"\n' > /usr/local/bin/rosclaw \
+    && printf '#!/usr/bin/env bash\nORIG_ARGS=("$@")\nset --\nsource /opt/ros/noetic/setup.bash\nsource /opt/rosclaw/ros1_ws/devel/setup.bash\nset -- "${ORIG_ARGS[@]}"\nexport PYTHONPATH=/opt/rosclaw/src:${PYTHONPATH:-}\nexec python3 -m rosclaw.entrypoint "$@"\n' > /usr/local/bin/rosclaw \
     && chmod +x /usr/local/bin/rosclaw
 
 ENTRYPOINT ["/opt/rosclaw/docker/scripts/rosclaw-noetic-are-entrypoint.sh"]

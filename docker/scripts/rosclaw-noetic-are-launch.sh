@@ -30,6 +30,7 @@ ARIADNE2_PROJECTION_MIN_KNOWN_CELLS="${ARIADNE2_PROJECTION_MIN_KNOWN_CELLS:-80}"
 ARIADNE2_PROJECTION_ROBOT_CHECK_RADIUS="${ARIADNE2_PROJECTION_ROBOT_CHECK_RADIUS:-1.5}"
 ARIADNE2_PROJECTION_MIN_ROBOT_FREE_CELLS="${ARIADNE2_PROJECTION_MIN_ROBOT_FREE_CELLS:-4}"
 ARIADNE2_PROJECTION_OVERLAY_RADIUS="${ARIADNE2_PROJECTION_OVERLAY_RADIUS:-8.0}"
+ROSBRIDGE_PORT="${ROSBRIDGE_PORT:-9090}"
 
 if [[ "${HEADLESS}" == "true" ]]; then
   GAZEBO_GUI="false"
@@ -53,10 +54,23 @@ roslaunch vehicle_simulator "system_${WORLD}.launch" \
   spawn_camera:="${SPAWN_CAMERA}" &
 SIM_PID=$!
 
+# Southbound ROS1 access is exposed only through the fixed rosbridge endpoint;
+# the host rosclawd owns the WebSocket client and Agents never run rospy.
+roslaunch rosbridge_server rosbridge_websocket.launch port:="${ROSBRIDGE_PORT}" &
+ROSBRIDGE_PID=$!
+roslaunch rosapi rosapi.launch &
+ROSAPI_PID=$!
+
 cleanup() {
   kill "${SIM_PID}" 2>/dev/null || true
   if [[ -n "${ARIADNE_PID:-}" ]]; then
     kill "${ARIADNE_PID}" 2>/dev/null || true
+  fi
+  if [[ -n "${ROSBRIDGE_PID:-}" ]]; then
+    kill "${ROSBRIDGE_PID}" 2>/dev/null || true
+  fi
+  if [[ -n "${ROSAPI_PID:-}" ]]; then
+    kill "${ROSAPI_PID}" 2>/dev/null || true
   fi
   wait || true
 }

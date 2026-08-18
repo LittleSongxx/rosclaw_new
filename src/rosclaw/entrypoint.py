@@ -79,6 +79,12 @@ def main() -> int:
     if result is not None:
         return result
 
+    from rosclaw.sim.cli import dispatch_sim_argv
+
+    result = dispatch_sim_argv(sys.argv[1:])
+    if result is not None:
+        return result
+
     from rosclaw.collective.cli import dispatch_collective_argv
 
     result = dispatch_collective_argv(sys.argv[1:])

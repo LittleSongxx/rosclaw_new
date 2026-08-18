@@ -1,0 +1,14 @@
+schema_version: rosclaw.robot_policy.v1
+id: cmu-are-shadow
+applies_to: [cmu_are.navigate_to_waypoint, cmu_are.exploration_control, cmu_are.stop]
+allow: [bounded_waypoint, named_place, exploration_lifecycle, daemon_rosbridge]
+deny: [arbitrary_ros_publish, arbitrary_topic, cmd_vel, device_path, real_executor]
+execution:
+  gateway: rosclawd
+  mode: SHADOW
+  body_snapshot_required: true
+  connection_generation_required: true
+failure:
+  default: fail_closed
+  rosbridge_disconnect: terminate_action
+  stale_snapshot: block

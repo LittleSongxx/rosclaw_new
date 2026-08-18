@@ -82,7 +82,7 @@ safety_defaults:
 
 # Geofence and command-magnitude limits enforced before a goal is published.
 # These are the declarative source of truth for the values that used to be
-# hardcoded in rosclaw.apps.cmu_are_bridge.
+# enforced by the daemon-owned CMU ARE simulation contract.
 operational_limits:
   # Absolute goal coordinates must fall inside this axis-aligned box, in the
   # map frame. Also caps the LLM-parsed 'absolute' intent.

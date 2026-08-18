@@ -1,0 +1,22 @@
+schema_version: rosclaw.capability.v1
+id: cmu_are.stop
+title: Stop CMU ARE simulated motion
+input:
+  type: object
+  additionalProperties: false
+  properties:
+    schema_version: {const: cmu_are.stop.v1}
+    timeout_sec: {type: number, exclusiveMinimum: 0.0, maximum: 60.0}
+  required: [schema_version, timeout_sec]
+safety:
+  class: actuation
+  actuation: guarded
+  direct_driver_access: forbidden
+  gateway: rosclawd
+execution:
+  modes: [SHADOW]
+  adapter: cmu-are-rosbridge
+  operation: STOP
+evidence:
+  minimum: TASK_VERIFIED
+  predicates: [zero-velocity]

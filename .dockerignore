@@ -20,3 +20,11 @@ third_party/ros1/are/log
 **/log
 **/*.bag
 **/*Zone.Identifier*
+third_party/**/vehicle_simulator/mesh/
+third_party/**/ariadne2/scripts/model/checkpoint.pth
+third_party/**/local_planner/paths/correspondences.txt
+third_party/**/local_planner/paths/paths.ply
+third_party/**/local_planner/paths/startPaths.ply
+third_party/**/local_planner/paths/pathList.ply
+third_party/planner/
+third_party/simulator/

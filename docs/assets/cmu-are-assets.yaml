@@ -1,0 +1,88 @@
+schema_version: rosclaw.cmu_are.assets.v1
+project: cmu_are_sim
+description: >-
+  Out-of-band assets required to build or run the ROS1 CMU ARE simulation.
+  Source code and launch files remain tracked in third_party/ros1/are; the
+  files below are intentionally supplied by the operator and verified before
+  a Docker launch.
+
+assets:
+  - asset_id: ariadne2-model-checkpoint
+    relative_path: third_party/ros1/are/src/ariadne2/scripts/model/checkpoint.pth
+    source: local ARE/ARiADNE2 checkout or approved artifact store
+    upstream_version_or_commit: unknown-at-import
+    size_bytes: 52166807
+    sha256: cc2190d9cf53797c4afa257f5404aecf5cc172bd548d22b14daedefd9d2ad8d6
+    license: upstream-project-license
+    mount_path: /opt/rosclaw/ros1_ws/src/ariadne2/scripts/model/checkpoint.pth
+    required_for: [ariadne2_exploration]
+
+  - asset_id: local-planner-correspondences
+    relative_path: third_party/ros1/are/src/local_planner/paths/correspondences.txt
+    source: local ARE/ARiADNE2 checkout or approved artifact store
+    upstream_version_or_commit: unknown-at-import
+    size_bytes: 25914568
+    sha256: 8d2e1b6a628608dc167c8b3326b9c8478569d93a68b31b1a602406c34cb5a47e
+    license: upstream-project-license
+    mount_path: /opt/rosclaw/ros1_ws/src/local_planner/paths/correspondences.txt
+    required_for: [local_planner]
+
+  - asset_id: local-planner-paths
+    relative_path: third_party/ros1/are/src/local_planner/paths/paths.ply
+    source: local ARE/ARiADNE2 checkout or approved artifact store
+    upstream_version_or_commit: unknown-at-import
+    size_bytes: 3422954
+    sha256: 16de5c80c5756499f0b0e5c4af3f2f755b1b78a6379e67a0670eab04b93519ad
+    license: upstream-project-license
+    mount_path: /opt/rosclaw/ros1_ws/src/local_planner/paths/paths.ply
+    required_for: [local_planner]
+
+  - asset_id: local-planner-start-paths
+    relative_path: third_party/ros1/are/src/local_planner/paths/startPaths.ply
+    source: local ARE/ARiADNE2 checkout or approved artifact store
+    upstream_version_or_commit: unknown-at-import
+    size_bytes: 20784
+    sha256: 8b78fe114710d6867c4f4483b3a88769b3ee31c778d2891247007a3fbe0f74b8
+    license: upstream-project-license
+    mount_path: /opt/rosclaw/ros1_ws/src/local_planner/paths/startPaths.ply
+    required_for: [local_planner]
+
+  - asset_id: local-planner-path-list
+    relative_path: third_party/ros1/are/src/local_planner/paths/pathList.ply
+    source: local ARE/ARiADNE2 checkout or approved artifact store
+    upstream_version_or_commit: unknown-at-import
+    size_bytes: 11537
+    sha256: 115bd9b0f8e950779b327ea20438deac2cb7b0967cade33da40c4552a28aaf7b
+    license: upstream-project-license
+    mount_path: /opt/rosclaw/ros1_ws/src/local_planner/paths/pathList.ply
+    required_for: [local_planner]
+
+  - asset_id: vehicle-simulator-meshes
+    relative_path: third_party/ros1/are/src/vehicle_simulator/mesh/
+    source: CMU ARE vehicle_simulator environment bundle
+    upstream_version_or_commit: unknown-at-import
+    size_bytes: null
+    sha256: null
+    license: upstream-project-license
+    mount_path: /opt/rosclaw/ros1_ws/src/vehicle_simulator/mesh/
+    required_for: [gazebo_world]
+
+  - asset_id: external-planner-bundle
+    relative_path: third_party/planner/
+    source: local planner dependency bundle
+    upstream_version_or_commit: unknown-at-import
+    size_bytes: null
+    sha256: null
+    license: verify-before-use
+    mount_path: /opt/rosclaw/third_party/planner/
+    required_for: [optional_planner_acceleration]
+
+  - asset_id: external-simulator-bundle
+    relative_path: third_party/simulator/
+    source: local simulator dependency bundle
+    upstream_version_or_commit: unknown-at-import
+    size_bytes: null
+    sha256: null
+    license: verify-before-use
+    mount_path: /opt/rosclaw/third_party/simulator/
+    required_for: [optional_simulator_extension]

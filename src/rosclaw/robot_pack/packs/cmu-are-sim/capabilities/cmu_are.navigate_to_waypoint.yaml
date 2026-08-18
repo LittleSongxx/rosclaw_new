@@ -1,0 +1,37 @@
+schema_version: rosclaw.capability.v1
+id: cmu_are.navigate_to_waypoint
+title: Navigate to a bounded CMU ARE waypoint
+input:
+  type: object
+  additionalProperties: false
+  properties:
+    schema_version: {const: cmu_are.navigation.v1}
+    target:
+      type: object
+      additionalProperties: false
+      properties:
+        frame_id: {const: map}
+        x: {type: number, minimum: -100.0, maximum: 100.0}
+        y: {type: number, minimum: -100.0, maximum: 100.0}
+        z: {type: number, minimum: -10.0, maximum: 10.0}
+      required: [frame_id, x, y, z]
+    speed_mps: {type: number, exclusiveMinimum: 0.0, maximum: 2.0}
+    tolerance_m: {type: number, exclusiveMinimum: 0.0, maximum: 20.0}
+    timeout_sec: {type: number, exclusiveMinimum: 0.0, maximum: 600.0}
+    expected_effect:
+      const: {kind: navigate_to_waypoint, final_frame: map, stop_required: true}
+  required: [schema_version, target, speed_mps, tolerance_m, timeout_sec]
+output:
+  required: [dispatch_result, verification_result, receipt]
+safety:
+  class: actuation
+  actuation: guarded
+  direct_driver_access: forbidden
+  gateway: rosclawd
+execution:
+  modes: [SHADOW]
+  adapter: cmu-are-rosbridge
+  operation: NAVIGATE_TO_WAYPOINT
+evidence:
+  minimum: TASK_VERIFIED
+  predicates: [fresh-odometry, target-tolerance, zero-velocity]

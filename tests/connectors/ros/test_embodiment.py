@@ -120,7 +120,9 @@ def test_parse_rejects_unknown_schema_version():
 def test_parse_defaults_missing_schema_version_to_v1():
     """Hand-written cards may omit schema_version; that is treated as v1."""
 
-    body = "\n".join(line for line in CARD_YAML.splitlines() if not line.startswith("schema_version:"))
+    body = "\n".join(
+        line for line in CARD_YAML.splitlines() if not line.startswith("schema_version:")
+    )
 
     assert _parse(body).schema_version == EMBODIMENT_CARD_SCHEMA
 

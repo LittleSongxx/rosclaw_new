@@ -1,0 +1,24 @@
+schema_version: rosclaw.capability.v1
+id: cmu_are.exploration_control
+title: Control ARiADNE2 exploration lifecycle
+input:
+  type: object
+  additionalProperties: false
+  properties:
+    schema_version: {const: cmu_are.exploration.v1}
+    command: {enum: [start, pause, resume, stop]}
+    speed_mps: {type: number, exclusiveMinimum: 0.0, maximum: 2.0}
+    timeout_sec: {type: number, exclusiveMinimum: 0.0, maximum: 600.0}
+  required: [schema_version, command, speed_mps, timeout_sec]
+safety:
+  class: actuation
+  actuation: guarded
+  direct_driver_access: forbidden
+  gateway: rosclawd
+execution:
+  modes: [SHADOW]
+  adapter: cmu-are-rosbridge
+  operation: EXPLORATION_CONTROL
+evidence:
+  minimum: TASK_VERIFIED
+  predicates: [ariadne2-state-change]

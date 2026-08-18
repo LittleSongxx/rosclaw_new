@@ -150,7 +150,7 @@ class DeviceContract(_StrictModel):
 
 
 class DiscoveryContract(_StrictModel):
-    backend: Literal["realsense", "serial_modbus", "ros2", "manual"]
+    backend: Literal["realsense", "serial_modbus", "ros2", "manual", "simulation"]
     fallback_backends: list[Literal["linux_sysfs", "manual"]] = Field(default_factory=list)
     required_identity_fields: list[str] = Field(min_length=1)
 
@@ -162,7 +162,7 @@ class ToolRequirement(_StrictModel):
 
 class AdapterContract(_StrictModel):
     component_id: str
-    transport: Literal["mcp_stdio", "ros2", "serial_modbus"]
+    transport: Literal["mcp_stdio", "ros2", "rosbridge", "serial_modbus"]
     server_name_patterns: list[str] = Field(default_factory=list)
     tools: list[ToolRequirement] = Field(default_factory=list)
     direct_driver_access: Literal["forbidden", "operator_only"] = "forbidden"
@@ -293,9 +293,7 @@ class RobotPackManifest(_StrictModel):
             and (not stage.requires_hardware or not stage.requires_independent_observer)
             for stage in self.verification
         ):
-            raise ValueError(
-                "H3/H4 verification requires hardware and independent observation"
-            )
+            raise ValueError("H3/H4 verification requires hardware and independent observation")
 
         if self.safety.actuation == "forbidden" and any(
             capability.safety_class != "read_only" for capability in self.capabilities

@@ -1,0 +1,20 @@
+schema_version: rosclaw.robot_pack.verification.v1
+id: cmu-are-simulation
+pack: rosclaw://robot_pack/ros-claw/cmu-are-sim@0.1.0
+stage: simulation
+requires:
+  hardware: false
+  independent_observer_for_tier: false
+checks:
+  - id: rosbridge-ready
+    pass: rosapi topics and fixed CMU ARE topics are available
+  - id: waypoint-observation
+    pass: odometry reaches the bounded target within tolerance
+  - id: exploration-state
+    pass: ARiADNE2 lifecycle state changes after control command
+  - id: stop-observation
+    pass: zero velocity is observed after stop
+promotion:
+  candidate_tier: H2_SIMULATION_VERIFIED
+  automatic: false
+  reason: simulation evidence cannot promote hardware support

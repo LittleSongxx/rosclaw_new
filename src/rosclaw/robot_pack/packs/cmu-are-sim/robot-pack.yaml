@@ -1,0 +1,141 @@
+schema_version: rosclaw.robot_pack.v1
+
+pack:
+  namespace: ros-claw
+  name: cmu-are-sim
+  version: 0.1.0
+  title: CMU ARE / ARiADNE2 Simulation Pack
+  summary: ROS1 Noetic CMU Autonomous Exploration Environment over rosbridge.
+  vendor: ROSClaw
+  kind: mobile_base
+  aliases: [cmu_are_sim, ariadne2-sim]
+
+compatibility:
+  os: [linux]
+  arch: [x86_64, aarch64]
+  python: ">=3.11,<3.14"
+  ros_distributions: [noetic]
+
+components:
+  - kind: body
+    id: cmu-are-sim-body
+    ref: builtin://eurdf/cmu_are_sim
+    version: 1.0.0
+    path: body/cmu_are_sim.body.yaml
+    digest: sha256:2f0554f53fb17b89c4dd88d3bef83b62a64ecd315b7bf160b886ce155f347c01
+  - kind: hardware_adapter
+    id: cmu-are-rosbridge
+    ref: builtin://rosbridge/cmu-are
+    version: 1.0.0
+    required: true
+  - kind: capability
+    id: cmu-are-navigate
+    ref: rosclaw://capability/cmu_are.navigate_to_waypoint@1
+    version: "1"
+    path: capabilities/cmu_are.navigate_to_waypoint.yaml
+    digest: sha256:99b45a423031eaa938c7bc8a1487c886a03df1206d323b17246f9a69e2725e85
+  - kind: capability
+    id: cmu-are-exploration
+    ref: rosclaw://capability/cmu_are.exploration_control@1
+    version: "1"
+    path: capabilities/cmu_are.exploration_control.yaml
+    digest: sha256:09c543499f855ad0924ddd679986e1c869dcb1a16e7a146aaa36e7f337de7bbb
+  - kind: capability
+    id: cmu-are-stop
+    ref: rosclaw://capability/cmu_are.stop@1
+    version: "1"
+    path: capabilities/cmu_are.stop.yaml
+    digest: sha256:b6cb643db348a59fa2dcb3206595e8477e5b72adb6db180561f272df43d75401
+  - kind: policy
+    id: cmu-are-shadow-policy
+    ref: rosclaw://policy/cmu-are-shadow@1
+    version: "1"
+    path: policies/shadow.yaml
+    digest: sha256:c3d6d607a7e99fb5fa772c8c8c96728863997deeed2b96988ad7565948e53bc4
+  - kind: verification
+    id: cmu-are-verification
+    ref: rosclaw://verification/cmu-are-sim@1
+    version: "1"
+    path: verification/simulation.yaml
+    digest: sha256:e90dd81b38320a31233aee0593b2f7d05a7b6199af3b49ebe50b290cb2f31be3
+  - kind: documentation
+    id: cmu-are-docs
+    ref: docs://robot-pack/cmu-are-sim
+    path: docs/README.md
+    digest: sha256:48d1e8d76bd5a6f8532466e5ea0d746a96bacab1d93f89d4f478817bdf50ad97
+
+device:
+  type: mobile_base
+  vendor_ids: ["0000"]
+  variants:
+    - model: CMU ARE Simulator
+      model_patterns: [CMU ARE Simulator, cmu_are_sim]
+      product_ids: ["0001"]
+      body_profile: cmu_are_sim
+
+discovery:
+  backend: simulation
+  fallback_backends: []
+  required_identity_fields: [model, serial, stable_uri, backend]
+
+adapter:
+  component_id: cmu-are-rosbridge
+  transport: rosbridge
+  server_name_patterns: [cmu-are-rosbridge]
+  tools: []
+  direct_driver_access: forbidden
+
+capabilities:
+  - id: cmu_are.navigate_to_waypoint
+    title: Navigate to a bounded CMU ARE waypoint
+    safety_class: actuation
+    adapter_component_id: cmu-are-rosbridge
+    adapter_tools_any_of: [cmu_are_rosbridge]
+    execution_modes: [SHADOW]
+    required_evidence: TASK_VERIFIED
+  - id: cmu_are.exploration_control
+    title: Control ARiADNE2 exploration lifecycle
+    safety_class: actuation
+    adapter_component_id: cmu-are-rosbridge
+    adapter_tools_any_of: [cmu_are_rosbridge]
+    execution_modes: [SHADOW]
+    required_evidence: TASK_VERIFIED
+  - id: cmu_are.stop
+    title: Stop the simulated base and exploration worker
+    safety_class: actuation
+    adapter_component_id: cmu-are-rosbridge
+    adapter_tools_any_of: [cmu_are_rosbridge]
+    execution_modes: [SHADOW]
+    required_evidence: TASK_VERIFIED
+
+safety:
+  perception_only: false
+  actuation: guarded
+  direct_driver_access: forbidden
+  agent_southbound_access: daemon_only
+
+verification:
+  - id: contract
+    target_tier: H1_CONTRACT_VERIFIED
+    checks: [schema, safety-card, asset-manifest, rosbridge-contract]
+    requires_hardware: false
+    requires_independent_observer: false
+  - id: simulation
+    target_tier: H2_SIMULATION_VERIFIED
+    checks: [docker-compose, ros-graph, odometry, exploration-state, stop-observation]
+    requires_hardware: false
+    requires_independent_observer: false
+
+support:
+  baseline_tier: H1_CONTRACT_VERIFIED
+  candidate_tier: H2_SIMULATION_VERIFIED
+  evidence_ids: [cmu-are-contract-20260818]
+
+integrity:
+  checksums_file: checksums.txt
+  signature:
+    required: true
+    scheme: ed25519
+    key_id: rosclaw-cmu-are-pack-v1
+    file: signatures/manifest.ed25519
+    payload: manifest-and-checksums-v1

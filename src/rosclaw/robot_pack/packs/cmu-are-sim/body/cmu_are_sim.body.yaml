@@ -1,0 +1,27 @@
+schema_version: rosclaw.body.v1
+body_id: cmu_are_sim
+body_type: differential_drive_mobile_base
+description: Contract-only simulated CMU ARE mobile base; no hardware identity.
+frames:
+  - map
+  - base_link
+  - odom
+workspace:
+  frame_id: map
+  boundaries:
+    x: [-100.0, 100.0]
+    y: [-100.0, 100.0]
+    z: [-10.0, 10.0]
+capabilities:
+  - cmu_are.navigate_to_waypoint
+  - cmu_are.exploration_control
+  - cmu_are.stop
+execution:
+  modes: [SHADOW]
+  transport: rosbridge
+safety:
+  max_speed_mps: 2.0
+  max_relative_move_m: 20.0
+  max_sequence_steps: 8
+  direct_driver_access: forbidden
+  real_executor: absent

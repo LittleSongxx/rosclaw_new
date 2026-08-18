@@ -11,7 +11,7 @@ LABEL description="ROSClaw - Universal OS for Software-Defined Embodied AI"
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
-    libgl1 \
+    libgl1-mesa-glx \
     libglib2.0-0 \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
@@ -34,14 +34,12 @@ RUN pip install --no-cache-dir -e ".[dev]"
 # Create runtime directories
 RUN mkdir -p /opt/rosclaw/practice_data /opt/rosclaw/rosclaw_data /opt/rosclaw/models
 
-# Non-root user for security. A real home directory is required because the
-# runtime writes episode artifacts under $HOME/.rosclaw.
-RUN groupadd -r rosclaw && useradd -r -g rosclaw -m -d /home/rosclaw rosclaw \
-    && chown -R rosclaw:rosclaw /opt/rosclaw /home/rosclaw
+# Non-root user for security
+RUN groupadd -r rosclaw && useradd -r -g rosclaw rosclaw \
+    && chown -R rosclaw:rosclaw /opt/rosclaw
 USER rosclaw
 
 # Default environment
-ENV HOME=/home/rosclaw
 ENV PYTHONPATH=/opt/rosclaw/src
 ENV ROSCLAW_WORKDIR=/opt/rosclaw
 ENV ROSCLAW_PRACTICE_DIR=/opt/rosclaw/practice_data
