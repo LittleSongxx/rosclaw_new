@@ -18,21 +18,21 @@ from rosclaw.how.selective.decision import (
     REASON_SUGGEST_BAND,
     REASON_VALIDATED_MATCH,
 )
-from rosclaw.memory.seekdb_client import InMemoryKnowledgeStore
-from rosclaw.memory.v2.models import MemoryItem
-from rosclaw.memory.v2.regime import (
+from rosclaw.memory.models import MemoryItem
+from rosclaw.memory.regime import (
     ApplicabilityEnvelope,
     ApplicabilityStore,
     EnvelopeType,
     RegimeLabel,
     empty_regime,
 )
-from rosclaw.memory.v2.runtime_retrieval import MODE_ACTIVE_BM25
-from rosclaw.memory.v2.runtime_retrieval.result import (
+from rosclaw.memory.runtime_retrieval import MODE_ACTIVE_BM25
+from rosclaw.memory.runtime_retrieval.result import (
     RetrievalCandidate,
     RetrievalPurpose,
     RetrievalResponse,
 )
+from rosclaw.memory.seekdb_client import InMemoryKnowledgeStore
 
 T0 = 1_700_000_000.0
 

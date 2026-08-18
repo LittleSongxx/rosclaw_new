@@ -103,15 +103,15 @@ def test_exp3_counter_regime_passes() -> None:
     """v4 §11.3: the thermal memory in a healthy regime → ABSTAIN."""
     from rosclaw.how.choreography import ChoreographyValidator, load_contract
     from rosclaw.how.selective import SelectiveInterventionPipeline
-    from rosclaw.memory.seekdb_client import InMemoryKnowledgeStore
-    from rosclaw.memory.v2.models import MemoryItem
-    from rosclaw.memory.v2.regime import (
+    from rosclaw.memory.models import MemoryItem
+    from rosclaw.memory.regime import (
         ApplicabilityEnvelope,
         ApplicabilityStore,
         RegimeLabel,
         empty_regime,
     )
-    from rosclaw.memory.v2.runtime_retrieval import build_retrieval_facade
+    from rosclaw.memory.runtime_retrieval import build_retrieval_facade
+    from rosclaw.memory.seekdb_client import InMemoryKnowledgeStore
 
     client = InMemoryKnowledgeStore()
     client.connect()
