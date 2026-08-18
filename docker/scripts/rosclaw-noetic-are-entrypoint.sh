@@ -8,7 +8,10 @@ source /opt/rosclaw/ros1_ws/devel/setup.bash
 set -- "${ORIG_ARGS[@]}"
 
 export PYTHONPATH="/opt/rosclaw/src:${PYTHONPATH:-}"
-export GAZEBO_MODEL_PATH="/opt/rosclaw/third_party/ros1/are/src/vehicle_simulator/mesh:${GAZEBO_MODEL_PATH:-}"
+# The simulator mesh is mounted at the package runtime path by Compose.  Do
+# not derive this from the host asset layout: the external ARE workspace uses
+# a different ``src/...`` tree than the tracked source bundle.
+export GAZEBO_MODEL_PATH="/opt/rosclaw/ros1_ws/src/vehicle_simulator/mesh:${GAZEBO_MODEL_PATH:-}"
 export GAZEBO_MODEL_DATABASE_URI="${GAZEBO_MODEL_DATABASE_URI:-}"
 export ROSBRIDGE_PORT="${ROSBRIDGE_PORT:-9090}"
 export MPLBACKEND="${MPLBACKEND:-Agg}"

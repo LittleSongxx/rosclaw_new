@@ -85,10 +85,18 @@ class MockTransport:
         latch: bool = False,
         queue_size: int = 1,
     ) -> RosTransportResult:
-        return self.request({"op": "advertise", "topic": topic, "type": msg_type})
+        return self.send(
+            {
+                "op": "advertise",
+                "topic": topic,
+                "type": msg_type,
+                "latch": latch,
+                "queue_size": queue_size,
+            }
+        )
 
     def unadvertise(self, topic: str) -> RosTransportResult:
-        return self.request({"op": "unadvertise", "topic": topic})
+        return self.send({"op": "unadvertise", "topic": topic})
 
     def publish(self, topic: str, msg: dict[str, Any]) -> RosTransportResult:
         return self.send({"op": "publish", "topic": topic, "msg": msg})

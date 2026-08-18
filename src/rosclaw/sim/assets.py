@@ -27,6 +27,18 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _safe_relative_path(value: Any, *, field: str) -> Path:
+    """Validate a manifest path before joining it to an asset root."""
+
+    text = str(value).strip()
+    if not text:
+        raise ValueError(f"{field} must not be empty")
+    path = Path(text)
+    if path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"{field} must be a safe relative path")
+    return path
+
+
 def load_asset_manifest(path: str | Path = DEFAULT_ASSET_MANIFEST) -> dict[str, Any]:
     """Load and minimally validate the CMU ARE asset manifest."""
 
@@ -61,9 +73,13 @@ def load_asset_manifest(path: str | Path = DEFAULT_ASSET_MANIFEST) -> dict[str, 
         relative_text = str(item.get("relative_path", "")).strip()
         if not relative_text:
             raise ValueError(f"Asset {asset_id!r} has no relative_path")
-        relative = Path(relative_text)
-        if relative.is_absolute() or ".." in relative.parts:
-            raise ValueError(f"Asset {asset_id!r} has an unsafe relative_path")
+        _safe_relative_path(relative_text, field=f"Asset {asset_id!r} relative_path")
+        external_relative = item.get("external_relative_path")
+        if external_relative is not None:
+            _safe_relative_path(
+                external_relative,
+                field=f"Asset {asset_id!r} external_relative_path",
+            )
         if not isinstance(item.get("source"), str) or not item["source"].strip():
             raise ValueError(f"Asset {asset_id!r} has no source")
         if not isinstance(item.get("mount_path"), str) or not item["mount_path"].strip():
@@ -106,9 +122,36 @@ def verify_assets(
             continue
         relative_text = str(raw["relative_path"])
         relative = Path(relative_text)
-        if external_root is not None and relative.parts[:1] == ("third_party",):
+        source_relative = relative
+        if external_root is not None:
+            # ``relative_path`` is the immutable in-repository/canonical path.
+            # External workspaces are allowed to use a different layout (the
+            # CMU ARE checkout has ``src/ARiADNE2-ROS-Planner/src`` and
+            # ``src/autonomous_exploration_development_environment/src``).
+            # Keep the mapping explicit in the manifest instead of guessing
+            # from arbitrary host paths.
+            external_text = raw.get("external_relative_path")
+            if external_text is not None:
+                source_relative = _safe_relative_path(
+                    external_text,
+                    field=f"Asset {raw['asset_id']!r} external_relative_path",
+                )
+            elif relative.parts[:1] == ("third_party",):
+                source_relative = Path(*relative.parts[1:])
+
             candidate_root = external_root
-            candidate = (external_root / Path(*relative.parts[1:])).resolve()
+            candidate = (external_root / source_relative).resolve()
+
+            # It is common for an operator to point CMU_ARE_ASSET_ROOT at the
+            # workspace's ``src`` directory rather than its parent.  Accept
+            # that one unambiguous spelling while preserving the manifest's
+            # explicit source mapping.
+            if not candidate.exists() and source_relative.parts[:1] == ("src",):
+                src_relative = Path(*source_relative.parts[1:])
+                src_candidate = (external_root / src_relative).resolve()
+                if src_candidate.exists():
+                    candidate = src_candidate
+                    source_relative = src_relative
         else:
             candidate_root = root
             candidate = (root / relative).resolve()
@@ -119,6 +162,7 @@ def verify_assets(
                 {
                     "asset_id": raw["asset_id"],
                     "relative_path": str(relative),
+                    "source_relative_path": str(source_relative),
                     "status": "invalid_path",
                     "message": "asset path escapes project root",
                 }
@@ -132,6 +176,8 @@ def verify_assets(
         item: dict[str, Any] = {
             "asset_id": raw["asset_id"],
             "relative_path": str(relative),
+            "source_relative_path": str(source_relative),
+            "resolved_path": str(candidate),
             "status": "ok" if exists else "missing",
             "required_for": sorted(requirements),
         }

@@ -4,21 +4,24 @@ description: >-
   Out-of-band assets required to build or run the ROS1 CMU ARE simulation.
   Source code and launch files remain tracked in third_party/ros1/are; the
   files below are intentionally supplied by the operator and verified before
-  a Docker launch.
+  a Docker launch. ``external_relative_path`` records the layout used by the
+  local ARE workspace without embedding a host-specific absolute path.
 
 assets:
   - asset_id: ariadne2-model-checkpoint
     relative_path: third_party/ros1/are/src/ariadne2/scripts/model/checkpoint.pth
-    source: local ARE/ARiADNE2 checkout or approved artifact store
-    upstream_version_or_commit: unknown-at-import
-    size_bytes: 52166807
-    sha256: cc2190d9cf53797c4afa257f5404aecf5cc172bd548d22b14daedefd9d2ad8d6
-    license: upstream-project-license
+    external_relative_path: src/ARiADNE2-ROS-Planner/src/scripts/model/checkpoint.pth
+    source: local ARE/ARiADNE2 checkout
+    upstream_version_or_commit: 5f0fc9ee2a98accfbfaabe4df28dc55680dc21ca
+    size_bytes: 50971374
+    sha256: a480478a7269c1f2fce743b303046204ff6613b9d440546701e478136bf98f53
+    license: MIT
     mount_path: /opt/rosclaw/ros1_ws/src/ariadne2/scripts/model/checkpoint.pth
     required_for: [ariadne2_exploration]
 
   - asset_id: local-planner-correspondences
     relative_path: third_party/ros1/are/src/local_planner/paths/correspondences.txt
+    external_relative_path: src/autonomous_exploration_development_environment/src/local_planner/paths/correspondences.txt
     source: local ARE/ARiADNE2 checkout or approved artifact store
     upstream_version_or_commit: unknown-at-import
     size_bytes: 25914568
@@ -29,6 +32,7 @@ assets:
 
   - asset_id: local-planner-paths
     relative_path: third_party/ros1/are/src/local_planner/paths/paths.ply
+    external_relative_path: src/autonomous_exploration_development_environment/src/local_planner/paths/paths.ply
     source: local ARE/ARiADNE2 checkout or approved artifact store
     upstream_version_or_commit: unknown-at-import
     size_bytes: 3422954
@@ -39,9 +43,10 @@ assets:
 
   - asset_id: local-planner-start-paths
     relative_path: third_party/ros1/are/src/local_planner/paths/startPaths.ply
+    external_relative_path: src/autonomous_exploration_development_environment/src/local_planner/paths/startPaths.ply
     source: local ARE/ARiADNE2 checkout or approved artifact store
     upstream_version_or_commit: unknown-at-import
-    size_bytes: 20784
+    size_bytes: 20930
     sha256: 8b78fe114710d6867c4f4483b3a88769b3ee31c778d2891247007a3fbe0f74b8
     license: upstream-project-license
     mount_path: /opt/rosclaw/ros1_ws/src/local_planner/paths/startPaths.ply
@@ -49,6 +54,7 @@ assets:
 
   - asset_id: local-planner-path-list
     relative_path: third_party/ros1/are/src/local_planner/paths/pathList.ply
+    external_relative_path: src/autonomous_exploration_development_environment/src/local_planner/paths/pathList.ply
     source: local ARE/ARiADNE2 checkout or approved artifact store
     upstream_version_or_commit: unknown-at-import
     size_bytes: 11537
@@ -59,6 +65,7 @@ assets:
 
   - asset_id: vehicle-simulator-meshes
     relative_path: third_party/ros1/are/src/vehicle_simulator/mesh/
+    external_relative_path: src/autonomous_exploration_development_environment/src/vehicle_simulator/mesh/
     source: CMU ARE vehicle_simulator environment bundle
     upstream_version_or_commit: unknown-at-import
     size_bytes: null

@@ -41,6 +41,9 @@ class _FakeAdapter:
     def stop(self, **_kwargs):
         return {"status": "success", "stop_confirmed": True}
 
+    def emergency_stop(self):
+        return {"status": "success", "stop_confirmed": True}
+
 
 def _action(executor: CmuAreShadowExecutor, **arguments) -> ActionEnvelope:
     return ActionEnvelope(
@@ -154,3 +157,12 @@ def test_connection_generation_change_fails_closed(tmp_path: Path) -> None:
     result = executor(_action(executor))
     assert result.final_state is ActionState.FAILED
     assert result.errors[0]["code"] == "CMU_ARE_CONNECTION_GENERATION_CHANGED"
+
+
+def test_shadow_executor_exposes_verified_emergency_stop(tmp_path: Path) -> None:
+    executor = CmuAreShadowExecutor(_FakeAdapter(), home=tmp_path)
+    result = executor.emergency_stop()
+    assert result["acknowledged"] is True
+    assert result["physical_stop_observed"] is True
+    assert result["execution_mode"] == "SHADOW"
+    assert result["verification_source"] == "/cmd_vel"

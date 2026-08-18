@@ -27,6 +27,27 @@ REQUIRED_TOPICS = {
     "/terrain_map": "sensor_msgs/PointCloud2",
 }
 
+# ``/rosapi/topics`` only proves that a topic name was advertised at some
+# point.  A half-started ROS graph can still contain the names while the
+# simulator nodes are gone.  These fixed node/topic edges are part of the
+# CMU ARE contract and are intentionally not caller-configurable.
+REQUIRED_NODE_EDGES: dict[str, dict[str, tuple[str, ...]]] = {
+    "publishers": {
+        "/cmd_vel": ("/pathFollower",),
+        "/state_estimation": ("/vehicleSimulator",),
+        "/registered_scan": ("/vehicleSimulator",),
+        "/terrain_map": ("/terrainAnalysis",),
+        "/rosclaw/exploration_state": ("/ariadne2_planner",),
+    },
+    "subscribers": {
+        "/cmd_vel": ("/vehicleSimulator",),
+        "/speed": ("/localPlanner", "/pathFollower"),
+        "/stop": ("/pathFollower",),
+        "/way_point": ("/localPlanner",),
+        "/rosclaw/exploration_control": ("/ariadne2_planner",),
+    },
+}
+
 
 class CmuAreTransportError(RuntimeError):
     """Raised when the rosbridge worker cannot satisfy a bounded operation."""
@@ -145,7 +166,13 @@ class CmuAreRosbridgeAdapter:
         if not result.ok:
             self._invalidate()
             raise CmuAreTransportError(result.error or "rosapi topic discovery failed")
-        values = (result.data or {}).get("values", {})
+        response = result.data or {}
+        if response.get("result") is False:
+            self._invalidate()
+            raise CmuAreTransportError(
+                str(response.get("values") or "rosapi topic discovery failed")
+            )
+        values = response.get("values", {})
         topics = values.get("topics", []) if isinstance(values, dict) else []
         types = values.get("types", []) if isinstance(values, dict) else []
         topic_types = {
@@ -153,12 +180,59 @@ class CmuAreRosbridgeAdapter:
             for topic, message_type in zip(topics, types, strict=False)
         }
         missing = sorted(topic for topic in REQUIRED_TOPICS if topic not in topic_types)
+        node_details: dict[str, dict[str, Any]] = {}
+        node_errors: dict[str, str] = {}
+        for node in sorted(
+            {
+                expected_node
+                for direction in REQUIRED_NODE_EDGES.values()
+                for expected_nodes in direction.values()
+                for expected_node in expected_nodes
+            }
+        ):
+            details_result = self.transport.call_service(
+                "/rosapi/node_details",
+                {"node": node},
+                timeout_sec=timeout_sec,
+            )
+            if not details_result.ok:
+                node_errors[node] = details_result.error or "node details request failed"
+                continue
+            details_response = details_result.data or {}
+            if details_response.get("result") is False:
+                node_errors[node] = str(
+                    details_response.get("values") or "node details request failed"
+                )
+                continue
+            details = details_response.get("values")
+            if not isinstance(details, dict):
+                node_errors[node] = "node details response was not an object"
+                continue
+            node_details[node] = details
+
+        missing_edges: list[dict[str, str]] = []
+        for direction, topic_edges in REQUIRED_NODE_EDGES.items():
+            field = "publishing" if direction == "publishers" else "subscribing"
+            for topic, expected_nodes in topic_edges.items():
+                for node in expected_nodes:
+                    actual = node_details.get(node, {}).get(field, [])
+                    if node in node_errors or not isinstance(actual, list) or topic not in actual:
+                        missing_edges.append(
+                            {
+                                "direction": direction,
+                                "topic": topic,
+                                "node": node,
+                                "reason": node_errors.get(node, "edge not present"),
+                            }
+                        )
         report = {
-            "ok": not missing,
+            "ok": not missing and not missing_edges,
             "connection": self.connection.__dict__ if self.connection else None,
             "topics": topic_types,
             "required_topics": REQUIRED_TOPICS,
             "missing_topics": missing,
+            "node_details": node_details,
+            "missing_edges": missing_edges,
         }
         self.last_check = report
         return report

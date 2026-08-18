@@ -1721,6 +1721,12 @@ def load_cmu_are_simulation_pack(
         # manifest, never from mutable ROSCLAW_HOME content.
         asset_manifest=source_asset_manifest,
     )
+    register_driver = getattr(runtime, "register_driver", None)
+    if callable(register_driver):
+        # Runtime watchdog/E-stop fan-out only discovers explicit driver
+        # hooks.  This remains a SHADOW simulation binding; it does not create
+        # a REAL executor or perform hardware discovery.
+        register_driver("cmu_are_sim_shadow", executor)
     registered: list[str] = []
     for capability in manifest.capabilities:
         if capability.id not in {

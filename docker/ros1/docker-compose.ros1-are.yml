@@ -7,60 +7,89 @@
 #
 # Build contexts are relative to this file, so they point back at the repo root.
 name: rosclaw-ros1-are
+
+# The tracked ROS packages are copied into the image at build time.  Large
+# runtime assets are always mounted read-only.  The *_SOURCE variables are
+# populated by ``rosclaw sim cmu-are launch`` from the verified asset
+# manifest; their defaults preserve the original in-repository layout for
+# direct ``docker compose`` use.
+x-cmu-are-asset-volumes: &cmu-are-asset-volumes
+  - ../../practice_data:/opt/rosclaw/practice_data
+  - ${CMU_ARE_ASSET_ROOT:-../../third_party}:/opt/rosclaw/third_party:ro
+  - ${CMU_ARE_ARIADNE2_MODEL_CHECKPOINT_SOURCE:-../../third_party/ros1/are/src/ariadne2/scripts/model/checkpoint.pth}:/opt/rosclaw/ros1_ws/src/ariadne2/scripts/model/checkpoint.pth:ro
+  - ${CMU_ARE_LOCAL_PLANNER_CORRESPONDENCES_SOURCE:-../../third_party/ros1/are/src/local_planner/paths/correspondences.txt}:/opt/rosclaw/ros1_ws/src/local_planner/paths/correspondences.txt:ro
+  - ${CMU_ARE_LOCAL_PLANNER_PATHS_SOURCE:-../../third_party/ros1/are/src/local_planner/paths/paths.ply}:/opt/rosclaw/ros1_ws/src/local_planner/paths/paths.ply:ro
+  - ${CMU_ARE_LOCAL_PLANNER_START_PATHS_SOURCE:-../../third_party/ros1/are/src/local_planner/paths/startPaths.ply}:/opt/rosclaw/ros1_ws/src/local_planner/paths/startPaths.ply:ro
+  - ${CMU_ARE_LOCAL_PLANNER_PATH_LIST_SOURCE:-../../third_party/ros1/are/src/local_planner/paths/pathList.ply}:/opt/rosclaw/ros1_ws/src/local_planner/paths/pathList.ply:ro
+  - ${CMU_ARE_VEHICLE_SIMULATOR_MESHES_SOURCE:-../../third_party/ros1/are/src/vehicle_simulator/mesh}:/opt/rosclaw/ros1_ws/src/vehicle_simulator/mesh:ro
+  - /tmp/.X11-unix:/tmp/.X11-unix:rw
+  - /mnt/wslg:/mnt/wslg:rw
+  - /usr/lib/wsl:/usr/lib/wsl:ro
+
+x-cmu-are-environment: &cmu-are-environment
+  CMU_ARE_WORLD: ${CMU_ARE_WORLD:-campus}
+  ROSBRIDGE_PORT: ${ROSBRIDGE_PORT:-9090}
+  HEADLESS: ${HEADLESS:-true}
+  USE_RVIZ: ${USE_RVIZ:-false}
+  START_ARIADNE2: ${START_ARIADNE2:-true}
+  ARIADNE2_ACTIVE: ${ARIADNE2_ACTIVE:-false}
+  ARIADNE2_USE_RVIZ: ${ARIADNE2_USE_RVIZ:-false}
+  ARIADNE2_START_DELAY: ${ARIADNE2_START_DELAY:-12}
+  ARIADNE2_LAYERED_PROJECTION: ${ARIADNE2_LAYERED_PROJECTION:-false}
+  ARIADNE2_PROJECTION_Z_BELOW: ${ARIADNE2_PROJECTION_Z_BELOW:-1.0}
+  ARIADNE2_PROJECTION_Z_ABOVE: ${ARIADNE2_PROJECTION_Z_ABOVE:-1.6}
+  ARIADNE2_PROJECTION_MIN_KNOWN_CELLS: ${ARIADNE2_PROJECTION_MIN_KNOWN_CELLS:-80}
+  ARIADNE2_PROJECTION_ROBOT_CHECK_RADIUS: ${ARIADNE2_PROJECTION_ROBOT_CHECK_RADIUS:-1.5}
+  ARIADNE2_PROJECTION_MIN_ROBOT_FREE_CELLS: ${ARIADNE2_PROJECTION_MIN_ROBOT_FREE_CELLS:-4}
+  ARIADNE2_PROJECTION_OVERLAY_RADIUS: ${ARIADNE2_PROJECTION_OVERLAY_RADIUS:-8.0}
+  SPAWN_CAMERA: ${SPAWN_CAMERA:-false}
+  LIBGL_ALWAYS_SOFTWARE: ${LIBGL_ALWAYS_SOFTWARE:-1}
+  DISABLE_ROS1_EOL_WARNINGS: ${DISABLE_ROS1_EOL_WARNINGS:-1}
+  DISPLAY: ${DISPLAY:-:0}
+  WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-wayland-0}
+  ROSCLAW_XDG_RUNTIME_DIR: ${ROSCLAW_XDG_RUNTIME_DIR:-/tmp/runtime-root}
+  XDG_RUNTIME_DIR: ${ROSCLAW_XDG_RUNTIME_DIR:-/tmp/runtime-root}
+  QT_QPA_PLATFORM: ${QT_QPA_PLATFORM:-xcb}
+  QT_X11_NO_MITSHM: "1"
+  NO_AT_BRIDGE: "1"
+  PYTHONUNBUFFERED: "1"
+
 services:
   rosclaw:
     build:
       context: ../..
       dockerfile: docker/ros1/Dockerfile.noetic-are
+      args:
+        ROS_BASE_IMAGE: ${CMU_ARE_ROS_BASE_IMAGE:-osrf/ros:noetic-desktop-full}
     image: rosclaw/noetic-are:latest
-    container_name: rosclaw-noetic-are
+    # Keep the migrated simulation separate from the stopped legacy container
+    # that used the old rosclaw-noetic-are name.
+    container_name: rosclaw-cmu-are-sim
     restart: unless-stopped
-    network_mode: host
+    # Docker Desktop/WSL does not consistently expose host-mode listeners to
+    # the WSL host.  Publish only the fixed rosbridge port instead; all ROS1
+    # nodes and roscore remain inside this single container.
+    ports:
+      - "${ROSBRIDGE_PORT:-9090}:${ROSBRIDGE_PORT:-9090}"
     ipc: host
     stdin_open: true
     tty: true
-    volumes:
-      - ../../practice_data:/opt/rosclaw/practice_data
-      - ${CMU_ARE_ASSET_ROOT:-../../third_party}:/opt/rosclaw/third_party:ro
-      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/ariadne2/scripts/model/checkpoint.pth:/opt/rosclaw/ros1_ws/src/ariadne2/scripts/model/checkpoint.pth:ro
-      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/local_planner/paths/correspondences.txt:/opt/rosclaw/ros1_ws/src/local_planner/paths/correspondences.txt:ro
-      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/local_planner/paths/paths.ply:/opt/rosclaw/ros1_ws/src/local_planner/paths/paths.ply:ro
-      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/local_planner/paths/startPaths.ply:/opt/rosclaw/ros1_ws/src/local_planner/paths/startPaths.ply:ro
-      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/local_planner/paths/pathList.ply:/opt/rosclaw/ros1_ws/src/local_planner/paths/pathList.ply:ro
-      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/vehicle_simulator/mesh:/opt/rosclaw/ros1_ws/src/vehicle_simulator/mesh:ro
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - /mnt/wslg:/mnt/wslg:rw
-      - /usr/lib/wsl:/usr/lib/wsl:ro
-    environment:
-      CMU_ARE_WORLD: ${CMU_ARE_WORLD:-campus}
-      ROSBRIDGE_PORT: ${ROSBRIDGE_PORT:-9090}
-      HEADLESS: ${HEADLESS:-true}
-      USE_RVIZ: ${USE_RVIZ:-false}
-      START_ARIADNE2: ${START_ARIADNE2:-true}
-      ARIADNE2_ACTIVE: ${ARIADNE2_ACTIVE:-false}
-      ARIADNE2_USE_RVIZ: ${ARIADNE2_USE_RVIZ:-false}
-      ARIADNE2_START_DELAY: ${ARIADNE2_START_DELAY:-12}
-      ARIADNE2_LAYERED_PROJECTION: ${ARIADNE2_LAYERED_PROJECTION:-false}
-      ARIADNE2_PROJECTION_Z_BELOW: ${ARIADNE2_PROJECTION_Z_BELOW:-1.0}
-      ARIADNE2_PROJECTION_Z_ABOVE: ${ARIADNE2_PROJECTION_Z_ABOVE:-1.6}
-      ARIADNE2_PROJECTION_MIN_KNOWN_CELLS: ${ARIADNE2_PROJECTION_MIN_KNOWN_CELLS:-80}
-      ARIADNE2_PROJECTION_ROBOT_CHECK_RADIUS: ${ARIADNE2_PROJECTION_ROBOT_CHECK_RADIUS:-1.5}
-      ARIADNE2_PROJECTION_MIN_ROBOT_FREE_CELLS: ${ARIADNE2_PROJECTION_MIN_ROBOT_FREE_CELLS:-4}
-      ARIADNE2_PROJECTION_OVERLAY_RADIUS: ${ARIADNE2_PROJECTION_OVERLAY_RADIUS:-8.0}
-      SPAWN_CAMERA: ${SPAWN_CAMERA:-false}
-      LIBGL_ALWAYS_SOFTWARE: ${LIBGL_ALWAYS_SOFTWARE:-1}
-      DISABLE_ROS1_EOL_WARNINGS: ${DISABLE_ROS1_EOL_WARNINGS:-1}
-      DISPLAY: ${DISPLAY:-:0}
-      WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-wayland-0}
-      ROSCLAW_XDG_RUNTIME_DIR: ${ROSCLAW_XDG_RUNTIME_DIR:-/tmp/runtime-root}
-      XDG_RUNTIME_DIR: ${ROSCLAW_XDG_RUNTIME_DIR:-/tmp/runtime-root}
-      QT_QPA_PLATFORM: ${QT_QPA_PLATFORM:-xcb}
-      QT_X11_NO_MITSHM: "1"
-      NO_AT_BRIDGE: "1"
-      PYTHONUNBUFFERED: "1"
+    volumes: *cmu-are-asset-volumes
+    environment: *cmu-are-environment
     command: ["rosclaw-are-launch"]
     healthcheck:
-      test: ["CMD", "bash", "-lc", "source /opt/ros/noetic/setup.bash && source /opt/rosclaw/ros1_ws/devel/setup.bash && rostopic list >/dev/null && rosservice list | grep -q '^/rosapi/topics$'"]
+      test:
+        - CMD
+        - bash
+        - -lc
+        - >-
+          source /opt/ros/noetic/setup.bash &&
+          source /opt/rosclaw/ros1_ws/devel/setup.bash &&
+          for node in /gazebo /vehicleSimulator /localPlanner /pathFollower; do
+            rosnode list | grep -Fxq "$${node}" || exit 1;
+          done &&
+          rostopic info /cmd_vel | grep -A3 '^Publishers:' | grep -q '/pathFollower' &&
+          rosservice list | grep -q '^/rosapi/topics$'
       interval: 30s
       timeout: 10s
       retries: 5
@@ -71,49 +100,15 @@ services:
     build:
       context: ../..
       dockerfile: docker/ros1/Dockerfile.noetic-are
-    container_name: rosclaw-noetic-are-shell
-    network_mode: host
+      args:
+        ROS_BASE_IMAGE: ${CMU_ARE_ROS_BASE_IMAGE:-osrf/ros:noetic-desktop-full}
+    container_name: rosclaw-cmu-are-sim-shell
+    ports:
+      - "${ROSBRIDGE_PORT:-9090}:${ROSBRIDGE_PORT:-9090}"
     ipc: host
     profiles: ["shell"]
     stdin_open: true
     tty: true
-    volumes:
-      - ../../practice_data:/opt/rosclaw/practice_data
-      - ${CMU_ARE_ASSET_ROOT:-../../third_party}:/opt/rosclaw/third_party:ro
-      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/ariadne2/scripts/model/checkpoint.pth:/opt/rosclaw/ros1_ws/src/ariadne2/scripts/model/checkpoint.pth:ro
-      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/local_planner/paths/correspondences.txt:/opt/rosclaw/ros1_ws/src/local_planner/paths/correspondences.txt:ro
-      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/local_planner/paths/paths.ply:/opt/rosclaw/ros1_ws/src/local_planner/paths/paths.ply:ro
-      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/local_planner/paths/startPaths.ply:/opt/rosclaw/ros1_ws/src/local_planner/paths/startPaths.ply:ro
-      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/local_planner/paths/pathList.ply:/opt/rosclaw/ros1_ws/src/local_planner/paths/pathList.ply:ro
-      - ${CMU_ARE_ASSET_ROOT:-../../third_party}/ros1/are/src/vehicle_simulator/mesh:/opt/rosclaw/ros1_ws/src/vehicle_simulator/mesh:ro
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - /mnt/wslg:/mnt/wslg:rw
-      - /usr/lib/wsl:/usr/lib/wsl:ro
-    environment:
-      LIBGL_ALWAYS_SOFTWARE: ${LIBGL_ALWAYS_SOFTWARE:-1}
-      DISABLE_ROS1_EOL_WARNINGS: ${DISABLE_ROS1_EOL_WARNINGS:-1}
-      CMU_ARE_WORLD: ${CMU_ARE_WORLD:-campus}
-      ROSBRIDGE_PORT: ${ROSBRIDGE_PORT:-9090}
-      HEADLESS: ${HEADLESS:-true}
-      USE_RVIZ: ${USE_RVIZ:-false}
-      START_ARIADNE2: ${START_ARIADNE2:-true}
-      ARIADNE2_ACTIVE: ${ARIADNE2_ACTIVE:-false}
-      ARIADNE2_USE_RVIZ: ${ARIADNE2_USE_RVIZ:-false}
-      ARIADNE2_START_DELAY: ${ARIADNE2_START_DELAY:-12}
-      ARIADNE2_LAYERED_PROJECTION: ${ARIADNE2_LAYERED_PROJECTION:-false}
-      ARIADNE2_PROJECTION_Z_BELOW: ${ARIADNE2_PROJECTION_Z_BELOW:-1.0}
-      ARIADNE2_PROJECTION_Z_ABOVE: ${ARIADNE2_PROJECTION_Z_ABOVE:-1.6}
-      ARIADNE2_PROJECTION_MIN_KNOWN_CELLS: ${ARIADNE2_PROJECTION_MIN_KNOWN_CELLS:-80}
-      ARIADNE2_PROJECTION_ROBOT_CHECK_RADIUS: ${ARIADNE2_PROJECTION_ROBOT_CHECK_RADIUS:-1.5}
-      ARIADNE2_PROJECTION_MIN_ROBOT_FREE_CELLS: ${ARIADNE2_PROJECTION_MIN_ROBOT_FREE_CELLS:-4}
-      ARIADNE2_PROJECTION_OVERLAY_RADIUS: ${ARIADNE2_PROJECTION_OVERLAY_RADIUS:-8.0}
-      SPAWN_CAMERA: ${SPAWN_CAMERA:-false}
-      DISPLAY: ${DISPLAY:-:0}
-      WAYLAND_DISPLAY: ${WAYLAND_DISPLAY:-wayland-0}
-      ROSCLAW_XDG_RUNTIME_DIR: ${ROSCLAW_XDG_RUNTIME_DIR:-/tmp/runtime-root}
-      XDG_RUNTIME_DIR: ${ROSCLAW_XDG_RUNTIME_DIR:-/tmp/runtime-root}
-      QT_QPA_PLATFORM: ${QT_QPA_PLATFORM:-xcb}
-      QT_X11_NO_MITSHM: "1"
-      NO_AT_BRIDGE: "1"
-      PYTHONUNBUFFERED: "1"
+    volumes: *cmu-are-asset-volumes
+    environment: *cmu-are-environment
     command: ["bash"]

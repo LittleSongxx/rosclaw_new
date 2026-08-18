@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from rosclaw.connectors.ros.transport import (
@@ -71,6 +73,34 @@ def test_rosbridge_transport_close_is_idempotent():
     transport = RosbridgeTransport(dry_run=True)
     transport.close()
     transport.close()  # should not raise
+
+
+def test_rosbridge_advertise_is_fire_and_forget() -> None:
+    class _SendOnlySocket:
+        connected = True
+
+        def __init__(self) -> None:
+            self.messages: list[dict[str, object]] = []
+
+        def send(self, payload: str) -> None:
+            self.messages.append(json.loads(payload))
+
+    socket = _SendOnlySocket()
+    transport = RosbridgeTransport(max_retries=0)
+    transport._ws = socket
+
+    result = transport.advertise("/speed", "std_msgs/Float32", latch=True, queue_size=5)
+
+    assert result.ok is True
+    assert socket.messages == [
+        {
+            "op": "advertise",
+            "topic": "/speed",
+            "type": "std_msgs/Float32",
+            "latch": True,
+            "queue_size": 5,
+        }
+    ]
 
 
 def test_rosbridge_loopback_connection_bypasses_environment_proxy(monkeypatch):

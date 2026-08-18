@@ -5,7 +5,10 @@ source /opt/ros/noetic/setup.bash
 source /opt/rosclaw/ros1_ws/devel/setup.bash
 
 export PYTHONPATH="/opt/rosclaw/src:${PYTHONPATH:-}"
-export GAZEBO_MODEL_PATH="/opt/rosclaw/third_party/ros1/are/src/vehicle_simulator/mesh:${GAZEBO_MODEL_PATH:-}"
+# The simulator mesh is mounted at the package runtime path by Compose.  This
+# remains valid for both the canonical in-repository assets and the external
+# CMU ARE workspace layout.
+export GAZEBO_MODEL_PATH="/opt/rosclaw/ros1_ws/src/vehicle_simulator/mesh:${GAZEBO_MODEL_PATH:-}"
 export GAZEBO_MODEL_DATABASE_URI="${GAZEBO_MODEL_DATABASE_URI:-}"
 export MPLBACKEND="${MPLBACKEND:-Agg}"
 export DISABLE_ROS1_EOL_WARNINGS="${DISABLE_ROS1_EOL_WARNINGS:-1}"
@@ -31,6 +34,9 @@ ARIADNE2_PROJECTION_ROBOT_CHECK_RADIUS="${ARIADNE2_PROJECTION_ROBOT_CHECK_RADIUS
 ARIADNE2_PROJECTION_MIN_ROBOT_FREE_CELLS="${ARIADNE2_PROJECTION_MIN_ROBOT_FREE_CELLS:-4}"
 ARIADNE2_PROJECTION_OVERLAY_RADIUS="${ARIADNE2_PROJECTION_OVERLAY_RADIUS:-8.0}"
 ROSBRIDGE_PORT="${ROSBRIDGE_PORT:-9090}"
+ROS_MASTER_PORT="${ROS_MASTER_PORT:-11311}"
+ROS_MASTER_URI="${ROS_MASTER_URI:-http://127.0.0.1:${ROS_MASTER_PORT}}"
+export ROS_MASTER_URI
 
 if [[ "${HEADLESS}" == "true" ]]; then
   GAZEBO_GUI="false"
@@ -48,7 +54,69 @@ echo "[ROSClaw] Launch world=${WORLD} headless=${HEADLESS} cmu_rviz=${USE_RVIZ} 
 echo "[ROSClaw] ARiADNE2 local_height_overlay=${ARIADNE2_LAYERED_PROJECTION} z_below=${ARIADNE2_PROJECTION_Z_BELOW} z_above=${ARIADNE2_PROJECTION_Z_ABOVE} min_known_cells=${ARIADNE2_PROJECTION_MIN_KNOWN_CELLS} robot_check_radius=${ARIADNE2_PROJECTION_ROBOT_CHECK_RADIUS} min_robot_free_cells=${ARIADNE2_PROJECTION_MIN_ROBOT_FREE_CELLS} overlay_radius=${ARIADNE2_PROJECTION_OVERLAY_RADIUS}"
 echo "[ROSClaw] Display=${DISPLAY:-<unset>} Wayland=${WAYLAND_DISPLAY:-<unset>} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>}"
 
-roslaunch vehicle_simulator "system_${WORLD}.launch" \
+MASTER_PID=""
+SIM_PID=""
+ROSBRIDGE_PID=""
+ROSAPI_PID=""
+ARIADNE_PID=""
+
+wait_for_master() {
+  local timeout_sec="${1:-30}"
+  local deadline=$((SECONDS + timeout_sec))
+  while (( SECONDS < deadline )); do
+    if ! kill -0 "${MASTER_PID}" 2>/dev/null; then
+      echo "[ROSClaw] roscore exited before the ROS master became ready" >&2
+      return 1
+    fi
+    if rosparam get /run_id >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "[ROSClaw] timed out waiting for ROS master at ${ROS_MASTER_URI}" >&2
+  return 1
+}
+
+wait_for_nodes() {
+  local timeout_sec="${1:-120}"
+  shift
+  local deadline=$((SECONDS + timeout_sec))
+  local node
+  while (( SECONDS < deadline )); do
+    local nodes
+    nodes="$(rosnode list 2>/dev/null || true)"
+    local all_ready="true"
+    for node in "$@"; do
+      if ! grep -Fxq "${node}" <<<"${nodes}"; then
+        all_ready="false"
+        break
+      fi
+    done
+    if [[ "${all_ready}" == "true" ]]; then
+      return 0
+    fi
+    if [[ -n "${SIM_PID}" ]] && ! kill -0 "${SIM_PID}" 2>/dev/null; then
+      echo "[ROSClaw] vehicle simulator roslaunch exited while waiting for: $*" >&2
+      return 1
+    fi
+    sleep 2
+  done
+  echo "[ROSClaw] timed out waiting for ROS nodes: $*" >&2
+  return 1
+}
+
+# Start exactly one ROS master before any roslaunch process.  roslaunch starts
+# an implicit roscore when no master exists; starting the three launch files in
+# parallel used to race on /run_id and silently killed the simulator launch.
+roscore -p "${ROS_MASTER_PORT}" &
+MASTER_PID=$!
+wait_for_master 30
+
+# The simulator owns Gazebo, odometry, the local planner, and the path
+# follower.  rosbridge is started only after the master exists; its Noetic
+# launch file also starts the rosapi node, so there must not be a second
+# ``rosapi.launch`` process (that file is not shipped by ros-noetic-rosapi).
+roslaunch --wait vehicle_simulator "system_${WORLD}.launch" \
   gazebo_gui:="${GAZEBO_GUI}" \
   launch_rviz:="${USE_RVIZ}" \
   spawn_camera:="${SPAWN_CAMERA}" &
@@ -56,27 +124,27 @@ SIM_PID=$!
 
 # Southbound ROS1 access is exposed only through the fixed rosbridge endpoint;
 # the host rosclawd owns the WebSocket client and Agents never run rospy.
-roslaunch rosbridge_server rosbridge_websocket.launch port:="${ROSBRIDGE_PORT}" &
+roslaunch --wait rosbridge_server rosbridge_websocket.launch port:="${ROSBRIDGE_PORT}" &
 ROSBRIDGE_PID=$!
-roslaunch rosapi rosapi.launch &
-ROSAPI_PID=$!
+ROSAPI_PID=""
 
 cleanup() {
-  kill "${SIM_PID}" 2>/dev/null || true
-  if [[ -n "${ARIADNE_PID:-}" ]]; then
-    kill "${ARIADNE_PID}" 2>/dev/null || true
-  fi
-  if [[ -n "${ROSBRIDGE_PID:-}" ]]; then
-    kill "${ROSBRIDGE_PID}" 2>/dev/null || true
-  fi
-  if [[ -n "${ROSAPI_PID:-}" ]]; then
-    kill "${ROSAPI_PID}" 2>/dev/null || true
-  fi
+  trap - INT TERM EXIT
+  for pid in "${ARIADNE_PID}" "${ROSAPI_PID}" "${ROSBRIDGE_PID}" "${SIM_PID}" "${MASTER_PID}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -INT "${pid}" 2>/dev/null || true
+    fi
+  done
   wait || true
 }
 trap cleanup INT TERM EXIT
 
+wait_for_nodes 180 /gazebo /vehicleSimulator /localPlanner /pathFollower
+
 if [[ "${START_ARIADNE2}" == "true" ]]; then
+  # Wait for fresh simulator observations before loading the planner.  This
+  # avoids a planner launch racing Gazebo startup on large mesh workspaces.
+  wait_for_nodes 180 /vehicleSimulator
   sleep "${ARIADNE2_START_DELAY:-12}"
   roslaunch ariadne2 "ariadne2_${WORLD}.launch" \
     launch_rviz:="${ARIADNE2_USE_RVIZ}" \
@@ -91,4 +159,13 @@ if [[ "${START_ARIADNE2}" == "true" ]]; then
   ARIADNE_PID=$!
 fi
 
-wait
+while true; do
+  for pid_name in MASTER_PID SIM_PID ROSBRIDGE_PID ROSAPI_PID ARIADNE_PID; do
+    pid="${!pid_name:-}"
+    if [[ -n "${pid}" ]] && ! kill -0 "${pid}" 2>/dev/null; then
+      echo "[ROSClaw] ${pid_name} exited unexpectedly (pid=${pid})" >&2
+      exit 1
+    fi
+  done
+  sleep 2
+done

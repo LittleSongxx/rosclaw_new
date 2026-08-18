@@ -9,6 +9,7 @@ import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from rosclaw.daemon.client import DaemonClient, DaemonClientError
 from rosclaw.integrations.cmu_are.contracts import (
@@ -37,6 +38,14 @@ from rosclaw.kernel import (
 from rosclaw.sim.assets import verify_assets
 
 CMU_ARE_REQUIRED_ASSETS = frozenset({"gazebo_world", "local_planner", "ariadne2_exploration"})
+_CMU_ARE_ASSET_ENV = {
+    "ariadne2-model-checkpoint": "CMU_ARE_ARIADNE2_MODEL_CHECKPOINT_SOURCE",
+    "local-planner-correspondences": "CMU_ARE_LOCAL_PLANNER_CORRESPONDENCES_SOURCE",
+    "local-planner-paths": "CMU_ARE_LOCAL_PLANNER_PATHS_SOURCE",
+    "local-planner-start-paths": "CMU_ARE_LOCAL_PLANNER_START_PATHS_SOURCE",
+    "local-planner-path-list": "CMU_ARE_LOCAL_PLANNER_PATH_LIST_SOURCE",
+    "vehicle-simulator-meshes": "CMU_ARE_VEHICLE_SIMULATOR_MESHES_SOURCE",
+}
 
 
 def dispatch_sim_argv(argv: list[str]) -> int | None:
@@ -84,6 +93,7 @@ def _build_parser() -> argparse.ArgumentParser:
     launch = cmu_commands.add_parser("launch", help="Launch the fixed Docker Compose simulation")
     launch.add_argument("--compose-file", type=Path, default=None, help=argparse.SUPPRESS)
     launch.add_argument("--asset-root", type=Path, default=None)
+    launch.add_argument("--rosbridge-url", default=None)
     launch.add_argument("--json", action="store_true")
     launch.set_defaults(sim_handler=_cmd_launch)
 
@@ -152,6 +162,42 @@ def _emit(args: argparse.Namespace, payload: dict[str, Any], *, code: int = 0) -
 
 def _emit_error(args: argparse.Namespace, error_code: str, message: str, code: int) -> int:
     return _emit(args, {"ok": False, "error": {"code": error_code, "message": message}}, code=code)
+
+
+def _rosbridge_endpoint(value: str) -> tuple[str, int]:
+    """Validate and normalize the local-only rosbridge endpoint."""
+
+    parsed = urlparse(value)
+    if parsed.scheme not in {"ws", "wss"} or parsed.hostname is None:
+        raise CmuAreContractError("rosbridge URL must be ws:// or wss:// with a host")
+    if parsed.hostname.casefold() not in {"127.0.0.1", "localhost", "::1"}:
+        raise CmuAreContractError("CMU ARE rosbridge must stay on the local host")
+    try:
+        port = parsed.port or (443 if parsed.scheme == "wss" else 9090)
+    except ValueError as exc:
+        raise CmuAreContractError("rosbridge URL has an invalid port") from exc
+    if not 1 <= port <= 65535:
+        raise CmuAreContractError("rosbridge port must be in [1, 65535]")
+    return value, port
+
+
+def _set_asset_mount_environment(
+    environment: dict[str, str],
+    assets: dict[str, Any],
+    *,
+    asset_root: str | Path | None,
+) -> None:
+    """Pass verified host paths to Compose without copying large assets."""
+
+    if asset_root is not None:
+        environment["CMU_ARE_ASSET_ROOT"] = str(Path(asset_root).expanduser().resolve())
+    for entry in assets.get("assets", []):
+        if not isinstance(entry, dict) or entry.get("status") != "ok":
+            continue
+        env_name = _CMU_ARE_ASSET_ENV.get(str(entry.get("asset_id")))
+        resolved = entry.get("resolved_path")
+        if env_name and isinstance(resolved, str) and resolved:
+            environment[env_name] = resolved
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
@@ -241,8 +287,13 @@ def _cmd_launch(args: argparse.Namespace) -> int:
     if not compose.is_file():
         return _emit_error(args, "CMU_ARE_COMPOSE_MISSING", str(compose), 2)
     environment = os.environ.copy()
-    if asset_root is not None:
-        environment["CMU_ARE_ASSET_ROOT"] = str(Path(asset_root).expanduser().resolve())
+    _set_asset_mount_environment(environment, assets, asset_root=asset_root)
+    endpoint = args.rosbridge_url or environment.get(
+        "ROSCLAW_CMU_ARE_ROSBRIDGE_URL", "ws://127.0.0.1:9090"
+    )
+    endpoint, port = _rosbridge_endpoint(endpoint)
+    environment["ROSCLAW_CMU_ARE_ROSBRIDGE_URL"] = endpoint
+    environment["ROSBRIDGE_PORT"] = str(port)
     subprocess.run(
         ["docker", "compose", "-f", str(compose), "config", "--quiet"],
         check=True,
@@ -258,6 +309,8 @@ def _cmd_launch(args: argparse.Namespace) -> int:
     payload = {
         "ok": completed.returncode == 0,
         "compose_file": str(compose),
+        "rosbridge_url": endpoint,
+        "asset_root": environment.get("CMU_ARE_ASSET_ROOT"),
         "command": ["docker", "compose", "-f", str(compose), "up", "-d", "--build", "rosclaw"],
         "stdout": completed.stdout[-4000:],
         "stderr": completed.stderr[-4000:],

@@ -77,6 +77,44 @@ assets:
     assert report["asset_root"] == str(external.resolve())
 
 
+def test_asset_verifier_supports_explicit_are_workspace_layout(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    external = tmp_path / "ARE"
+    project.mkdir()
+    payload = b"checkpoint-compatible-fixture"
+    source = external / "src" / "ARiADNE2-ROS-Planner" / "src" / "scripts" / "model"
+    source.mkdir(parents=True)
+    checkpoint = source / "checkpoint.pth"
+    checkpoint.write_bytes(payload)
+    manifest = project / "assets.yaml"
+    manifest.write_text(
+        f"""
+schema_version: rosclaw.cmu_are.assets.v1
+assets:
+  - asset_id: checkpoint
+    relative_path: third_party/ros1/are/src/ariadne2/scripts/model/checkpoint.pth
+    external_relative_path: src/ARiADNE2-ROS-Planner/src/scripts/model/checkpoint.pth
+    source: fixture
+    upstream_version_or_commit: test
+    size_bytes: {len(payload)}
+    sha256: {hashlib.sha256(payload).hexdigest()}
+    license: test
+    mount_path: /opt/checkpoint.pth
+    required_for: [ariadne2_exploration]
+""",
+        encoding="utf-8",
+    )
+    report = verify_assets(
+        project_root=project,
+        manifest_path=manifest,
+        asset_root=external,
+        required_for={"ariadne2_exploration"},
+    )
+    assert report["ok"] is True
+    assert report["assets"][0]["source_relative_path"].startswith("src/ARiADNE2")
+    assert report["assets"][0]["resolved_path"].endswith("checkpoint.pth")
+
+
 def test_cmu_action_has_a_gateway_reusable_trace_id() -> None:
     action = _make_action(
         capability=CMU_STOP_CAPABILITY,
@@ -106,3 +144,9 @@ def test_compose_mounts_assets_at_ros_package_runtime_paths() -> None:
         "/opt/rosclaw/ros1_ws/src/vehicle_simulator/mesh:ro",
     ):
         assert target in compose
+    for variable in (
+        "CMU_ARE_ARIADNE2_MODEL_CHECKPOINT_SOURCE",
+        "CMU_ARE_LOCAL_PLANNER_CORRESPONDENCES_SOURCE",
+        "CMU_ARE_VEHICLE_SIMULATOR_MESHES_SOURCE",
+    ):
+        assert variable in compose

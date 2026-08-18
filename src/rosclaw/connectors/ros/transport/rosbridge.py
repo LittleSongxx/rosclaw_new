@@ -272,7 +272,10 @@ class RosbridgeTransport:
         latch: bool = False,
         queue_size: int = 1,
     ) -> RosTransportResult:
-        return self.request(
+        # rosbridge's ``advertise`` operation is fire-and-forget.  Waiting for
+        # an id-matched response here causes a false timeout even though the
+        # server accepted the publisher declaration.
+        return self.send(
             {
                 "op": "advertise",
                 "topic": topic,
@@ -283,7 +286,7 @@ class RosbridgeTransport:
         )
 
     def unadvertise(self, topic: str) -> RosTransportResult:
-        return self.request({"op": "unadvertise", "topic": topic})
+        return self.send({"op": "unadvertise", "topic": topic})
 
     def publish(
         self,

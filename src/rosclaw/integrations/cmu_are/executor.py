@@ -146,6 +146,57 @@ class CmuAreShadowExecutor:
         self.adapter = CmuAreRosbridgeAdapter(transport)
         return self.adapter
 
+    def emergency_stop(self) -> dict[str, Any]:
+        """Stop the simulated base for daemon watchdog/E-stop fan-out.
+
+        The Runtime emergency-stop path discovers drivers through an explicit
+        ``emergency_stop`` method.  Registering this SHADOW-only hook keeps a
+        timed-out CMU action from becoming an unverified ``NO_STOP_TARGETS``
+        result while preserving the same rosclawd-owned rosbridge boundary.
+        """
+
+        try:
+            adapter = self._get_adapter()
+            stop = getattr(adapter, "stop", None)
+            if not callable(stop):
+                return {
+                    "acknowledged": False,
+                    "physical_stop_observed": False,
+                    "execution_mode": ExecutionMode.SHADOW.value,
+                    "trust_level": "UNVERIFIED",
+                    "error": "CMU ARE adapter does not expose stop()",
+                }
+            # The safety card bounds action requests, while the watchdog stop
+            # itself uses a short fixed observation window.
+            result = stop(timeout_sec=5.0)
+            if not isinstance(result, dict):
+                result = {}
+            stopped = result.get("stop_confirmed") is True
+            return {
+                "acknowledged": stopped,
+                "physical_stop_observed": stopped,
+                "observed_velocity": (
+                    result.get("observed_velocity")
+                    if result.get("observed_velocity") is not None
+                    else 0.0
+                    if stopped
+                    else None
+                ),
+                "verification_source": "/cmd_vel",
+                "execution_mode": ExecutionMode.SHADOW.value,
+                "trust_level": "SIMULATED" if stopped else "UNVERIFIED",
+                "adapter_status": result.get("status"),
+                "transport_error": result.get("error"),
+            }
+        except Exception as exc:  # noqa: BLE001 - E-stop must report, never raise
+            return {
+                "acknowledged": False,
+                "physical_stop_observed": False,
+                "execution_mode": ExecutionMode.SHADOW.value,
+                "trust_level": "UNVERIFIED",
+                "error": str(exc),
+            }
+
     def __call__(self, action: ActionEnvelope) -> ActionExecutionResult:
         validation_error = self._validate_action(action)
         if validation_error is not None:

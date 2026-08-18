@@ -1,6 +1,11 @@
 # ROSClaw ROS1/CMU Autonomous Exploration image.
+#
+# Operators who already maintain a Noetic base (for example the local
+# ``my_ros_noetic:v3`` image) can reuse it without changing the runtime
+# contract.  The default remains the reproducible upstream desktop image.
 
-FROM osrf/ros:noetic-desktop-full
+ARG ROS_BASE_IMAGE=osrf/ros:noetic-desktop-full
+FROM ${ROS_BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV ROS_DISTRO=noetic
