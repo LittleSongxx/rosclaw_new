@@ -58,7 +58,8 @@
   ],
   "compute": [
    "ur5e.plan_cartesian_path",
-   "ur5e.verify_drawing"
+   "ur5e.verify_drawing",
+   "ur5e.render_trace_preview"
   ]
  }
 }
