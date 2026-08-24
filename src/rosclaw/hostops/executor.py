@@ -101,12 +101,17 @@ class HostOpsExecutor:
             completed = subprocess.run(  # noqa: S603 — shell=False by construction
                 argv, check=False, capture_output=True, text=True, timeout=1800
             )
-            return {
+            result = {
                 "type": op["type"],
                 "argv": argv,
                 "status": "OK" if completed.returncode == 0 else "FAILED",
                 "returncode": completed.returncode,
             }
+            if completed.returncode != 0:
+                # Honest failure reporting: the operator must see WHY an op
+                # failed without re-running anything by hand.
+                result["stderr"] = (completed.stderr or "")[-500:]
+            return result
         except HostOpsPolicyError as exc:
             return {"type": op["type"], "status": "FAILED", "error": str(exc)}
 

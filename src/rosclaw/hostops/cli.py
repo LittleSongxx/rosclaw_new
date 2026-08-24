@@ -40,6 +40,16 @@ def cmd_host_execute(args: argparse.Namespace) -> int:
         print(json.dumps(receipt, indent=2, ensure_ascii=False))
     else:
         print(f"[ROSClaw] Job {receipt['job_id']}: {receipt['result']}")
+        for op_result in receipt.get("operations", []):
+            status = op_result.get("status", "")
+            line = f"  {op_result.get('type')}: {status}"
+            if op_result.get("returncode") not in (None, 0):
+                line += f" (rc={op_result['returncode']})"
+            print(line)
+            detail = op_result.get("error") or op_result.get("stderr")
+            if detail:
+                print(f"    {str(detail).strip()[:300]}")
         for check, verdict in (receipt.get("verification") or {}).items():
-            print(f"  {check}: {verdict}")
+            if check != "details":
+                print(f"  {check}: {verdict}")
     return 0 if receipt["result"] == "VERIFIED" else 1
