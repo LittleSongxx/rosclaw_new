@@ -1,22 +1,13 @@
-"""PR-1 RED — deterministic CapabilityResolver (doc §4/§5/§6).
+"""PR-2 GREEN — deterministic CapabilityResolver (doc §4/§5/§6).
 
-The agent must never have to guess a skill name, and resolution must work
-without an LLM: intent → capability → skill implementation, ranked by
-deterministic signals (intent match, compatibility, trust, evidence).
-These tests pin the PR-2 contract.
+The agent never guesses a skill name, and resolution works without an
+LLM: intent → capability → skill implementation, ranked by deterministic
+signals (intent match, compatibility, trust, evidence).
 
-Imports of the not-yet-existing modules live inside test bodies so the
-suite collects cleanly and each test fails RED (xfail strict) until PR-2.
+(Was PR-1 RED; PR-2 implements ``rosclaw.skill.resolver``.)
 """
 
 from __future__ import annotations
-
-import pytest
-
-pytestmark = pytest.mark.xfail(
-    strict=True,
-    reason="RED (skill-runtime-2.0 PR-1): CapabilityResolver missing; unmark in PR-2",
-)
 
 
 def _resolver():

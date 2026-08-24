@@ -449,7 +449,15 @@ def cmd_skill_rollback(args: argparse.Namespace) -> int:
 
 
 def cmd_skill_search(args: argparse.Namespace) -> int:
-    """List builtin skills and local skill-hub packages."""
+    """Search the unified catalog, or (no query) list builtin + local skills.
+
+    Skill Runtime 2.0 (doc §10): with a query this searches across
+    builtin/installed/official/workspace sources — the official
+    ``ros-claw/skills`` registry included (fetched once, then cached).
+    """
+    query = getattr(args, "query", None)
+    if query:
+        return _cmd_skill_search_catalog(args, query)
     builtins = list_builtin_skills()
     registry = SkillLocalRegistry()
     local = registry.list_skills()
@@ -462,6 +470,37 @@ def cmd_skill_search(args: argparse.Namespace) -> int:
     print("[ROSClaw] Local skill-hub packages")
     for s in local:
         print(f"  {s.get('name', 'unknown')}")
+    return 0
+
+
+def _cmd_skill_search_catalog(args: argparse.Namespace, query: str) -> int:
+    from rosclaw.skill.catalog_service import SkillCatalogService
+
+    hits = SkillCatalogService.default().search(query)
+    if args.json:
+        print(
+            json.dumps(
+                {"results": [h.to_dict() for h in hits]}, indent=2, ensure_ascii=False
+            )
+        )
+        return 0
+    print(f'[ROSClaw] Skill catalog results for "{query}"')
+    if not hits:
+        print("  (no matching skills)")
+        return 0
+    for h in hits:
+        badges = []
+        if h.official:
+            badges.append("official")
+        if h.installed:
+            badges.append("installed")
+        badge = f"  [{', '.join(badges)}]" if badges else ""
+        version = f"@{h.version}" if h.version else ""
+        print(f"  {h.name}{version}{badge}")
+        if h.description:
+            print(f"      {h.description}")
+        status = h.verification_status or "unverified"
+        print(f"      source={h.source} installed={'yes' if h.installed else 'no'} status={status}")
     return 0
 
 
@@ -526,7 +565,16 @@ def cmd_skill_inspect(args: argparse.Namespace) -> int:
 
 
 def add_skill_hub_parsers(skill_subparsers: Any) -> None:
-    search_parser = skill_subparsers.add_parser("search", help="Search builtin and local skills")
+    search_parser = skill_subparsers.add_parser(
+        "search",
+        help="Search skills across builtin/installed/official/workspace catalogs",
+    )
+    search_parser.add_argument(
+        "query",
+        nargs="?",
+        default=None,
+        help="Intent or keywords (e.g. \"install ros2\"); omit to list builtin+local",
+    )
     search_parser.add_argument("--json", action="store_true", help="Output as JSON")
     search_parser.set_defaults(func=cmd_skill_search)
 

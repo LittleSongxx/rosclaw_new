@@ -1,14 +1,7 @@
-"""PR-1 RED — the official catalog must be a real runtime source (doc §9/§10).
+"""PR-2 GREEN — the official catalog is a real runtime source (doc §9/§10).
 
-Today ``rosclaw skill search`` only lists builtin + local-hub skills, does
-not accept a query argument, and never consults the official
-``ros-claw/skills`` registry — even though that registry marks
-``ros-claw/ros_install`` as ``official`` and ``installable``. Catalog
-existing ≠ runtime knowing the catalog. These tests pin the PR-2 contract
-(Unified Catalog + ``SkillCatalogService``).
-
-xfail is strict: when PR-2 lands and a test passes, the suite fails loudly
-until the mark is removed.
+(Was PR-1 RED: ``skill search`` had no query and never consulted the
+official ``ros-claw/skills`` registry. PR-2 wires the unified catalog.)
 """
 
 from __future__ import annotations
@@ -18,12 +11,7 @@ import json
 
 import pytest
 
-pytestmark = pytest.mark.xfail(
-    strict=True,
-    reason="RED (skill-runtime-2.0 PR-1): official catalog not wired; unmark in PR-2",
-)
-
-from rosclaw.skill.cli import add_skill_hub_parsers, cmd_skill_search  # noqa: E402
+from rosclaw.skill.cli import add_skill_hub_parsers, cmd_skill_search
 
 
 def _search_cli(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str]:
