@@ -112,16 +112,9 @@ class SkillPlanError(Exception):
     """The skill's plan could not be built or is malformed."""
 
 
-def build_skill_plan(home: Path, ref: str, skill_args: dict) -> dict:
-    """Load an installed skill's planner entrypoint and produce the plan.
-
-    Trust basis: the package was digest-pinned at install time; its
-    *output* is policy-checked by the HostOps gate before anything runs.
-    """
+def load_installed_skill(home: Path, ref: str) -> tuple[dict, Path, str]:
+    """Return (manifest, install_dir, version) for an installed skill."""
     import yaml
-
-    from rosclaw.hostops.models import make_plan
-    from rosclaw.skill.resolver import detect_host_context
 
     lockfile = home / "skills" / "installed.lock.json"
     installed: dict = {}
@@ -140,24 +133,52 @@ def build_skill_plan(home: Path, ref: str, skill_args: dict) -> dict:
     if not manifest_path.exists():
         raise SkillPlanError(f"installed skill {ref}@{version} has no skill.yaml")
     manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+    return manifest, install_dir, version
+
+
+def load_skill_callable(home: Path, ref: str, section: str) -> tuple[object, dict, str]:
+    """Load a callable from an installed skill manifest section.
+
+    ``section`` is e.g. ``"planner"`` or ``"verifier"`` under
+    ``execution.<section>.entrypoint`` (``"entrypoint.py:plan"``).
+    Returns (callable, manifest, version). Trust basis: the package was
+    digest-pinned at install time; plan *output* is policy-checked before
+    anything runs.
+    """
+    manifest, install_dir, version = load_installed_skill(home, ref)
     execution = manifest.get("execution", {}) or {}
-    planner_spec = (execution.get("planner", {}) or {}).get("entrypoint")
-    if not planner_spec:
-        raise SkillPlanError(f"skill {ref} declares no execution.planner entrypoint")
-    module_name, _, func_name = planner_spec.partition(":")
+    spec_text = (execution.get(section, {}) or {}).get("entrypoint")
+    if not spec_text:
+        raise SkillPlanError(f"skill {ref} declares no execution.{section} entrypoint")
+    module_name, _, func_name = spec_text.partition(":")
     if not module_name or not func_name:
-        raise SkillPlanError(f"invalid planner entrypoint {planner_spec!r}")
+        raise SkillPlanError(f"invalid {section} entrypoint {spec_text!r}")
     entrypoint_path = install_dir / module_name
     if not entrypoint_path.exists():
-        raise SkillPlanError(f"planner module {module_name} missing in {install_dir}")
+        raise SkillPlanError(f"{section} module {module_name} missing in {install_dir}")
 
-    spec = importlib.util.spec_from_file_location(f"rosclaw_skill_{ref}", entrypoint_path)
+    spec = importlib.util.spec_from_file_location(
+        f"rosclaw_skill_{ref}_{section}", entrypoint_path
+    )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    planner_fn = getattr(module, func_name, None)
-    if not callable(planner_fn):
-        raise SkillPlanError(f"planner {planner_spec} is not callable")
+    fn = getattr(module, func_name, None)
+    if not callable(fn):
+        raise SkillPlanError(f"{section} {spec_text} is not callable")
+    return fn, manifest, version
 
+
+def build_skill_plan(home: Path, ref: str, skill_args: dict) -> dict:
+    """Load an installed skill's planner entrypoint and produce the plan.
+
+    Trust basis: the package was digest-pinned at install time; its
+    *output* is policy-checked by the HostOps gate before anything runs.
+    """
+    from rosclaw.hostops.models import make_plan
+    from rosclaw.skill.resolver import detect_host_context
+
+    planner_fn, manifest, version = load_skill_callable(home, ref, "planner")
+    execution = manifest.get("execution", {}) or {}
     context = detect_host_context()
     raw_plan = planner_fn(context, skill_args)
     if not isinstance(raw_plan, dict) or not isinstance(raw_plan.get("operations"), list):

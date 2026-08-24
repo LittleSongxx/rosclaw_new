@@ -621,14 +621,58 @@ def cmd_skill_run(args: argparse.Namespace) -> int:
         print(f"[ROSClaw] {exc}")
         return 2
 
-    from rosclaw.hostops.auth import begin_local_authorization
-    from rosclaw.hostops.receipt import new_job_id
+    from rosclaw.firstboot.workspace import get_rosclaw_home
+    from rosclaw.skill.jobs import SkillJobStore
 
-    auth_request = begin_local_authorization(new_job_id())
+    # Persist the job so the operator can authorize it on a local TTY
+    # (doc §23): the sudo prompt belongs to sudo, never to the agent.
+    job = SkillJobStore(get_rosclaw_home()).create(
+        skill=ref,
+        capability=None,
+        status="AUTHENTICATION_REQUIRED",
+        plan_hash=plan["plan_hash"],
+        plan=plan,
+    )
+    instruction = (
+        f"run `rosclaw host authorize {job['job_id']}` on the host to "
+        f"authenticate with sudo locally and execute"
+    )
     if args.json:
-        print(json.dumps({**auth_request, "plan": plan}, indent=2, ensure_ascii=False))
+        print(
+            json.dumps(
+                {
+                    "status": "AUTHENTICATION_REQUIRED",
+                    "job_id": job["job_id"],
+                    "channel": "local_tty",
+                    "instruction": instruction,
+                    "plan": plan,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
     else:
-        print(f"[ROSClaw] {auth_request['status']}: {auth_request['instruction']}")
+        print(f"[ROSClaw] AUTHENTICATION_REQUIRED: {instruction}")
+    return 0
+
+
+def cmd_skill_job(args: argparse.Namespace) -> int:
+    """Show a skill job record (doc §16/§24)."""
+    from rosclaw.firstboot.workspace import get_rosclaw_home
+    from rosclaw.skill.jobs import SkillJobStore
+
+    job = SkillJobStore(get_rosclaw_home()).get(args.job_id)
+    if job is None:
+        print(f"[ROSClaw] Skill job not found: {args.job_id}")
+        return 1
+    if args.json:
+        print(json.dumps(job, indent=2, ensure_ascii=False))
+    else:
+        print(f"[ROSClaw] Job {job['job_id']}: {job['status']}")
+        print(f"  skill:     {job.get('skill')}")
+        print(f"  plan_hash: {job.get('plan_hash', '')[:16]}…")
+        if job.get("receipt_path"):
+            print(f"  receipt:   {job['receipt_path']}")
     return 0
 
 
@@ -730,6 +774,11 @@ def add_skill_hub_parsers(skill_subparsers: Any) -> None:
     )
     run_parser.add_argument("--json", action="store_true", help="Output as JSON")
     run_parser.set_defaults(func=cmd_skill_run)
+
+    job_parser = skill_subparsers.add_parser("job", help="Show a skill job record")
+    job_parser.add_argument("job_id", help="Job ID (e.g. job-abc123)")
+    job_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    job_parser.set_defaults(func=cmd_skill_job)
 
     inspect_parser = skill_subparsers.add_parser("inspect", help="Inspect a skill")
     inspect_parser.add_argument("name", help="Skill name")

@@ -10,8 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 
-# Reuse the hermetic skill fixtures (local file:// registry + tmp home).
-from tests.skill.conftest import official_registry, rosclaw_home  # noqa: F401
+# Reuse the hermetic official-registry fixture (local file:// registry);
+# rosclaw_home comes from the root tests/conftest.py.
+from tests.skill.conftest import official_registry  # noqa: F401
 
 
 def _call(tool, **kwargs) -> dict:

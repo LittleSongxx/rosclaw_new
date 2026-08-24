@@ -8020,6 +8020,23 @@ def main() -> int:
     skill_subparsers = skill_parser.add_subparsers(dest="skill_command")
     skill_subparsers.add_parser("list", help="List available skills")
 
+    # host subcommand: HostOps privileged operations on the operator TTY
+    # (doc §23). `authorize` authenticates locally via sudo; `execute` is
+    # the internal root phase it re-launches.
+    host_parser = subparsers.add_parser(
+        "host", help="HostOps privileged operations (operator TTY)"
+    )
+    host_subparsers = host_parser.add_subparsers(dest="host_command")
+    host_authorize_parser = host_subparsers.add_parser(
+        "authorize", help="Authorize a pending skill job with local sudo"
+    )
+    host_authorize_parser.add_argument("job_id", help="Skill job ID")
+    host_execute_parser = host_subparsers.add_parser(
+        "execute", help="Internal: execute an authorized job (invoked via sudo)"
+    )
+    host_execute_parser.add_argument("job_id", help="Skill job ID")
+    host_execute_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
     skill_check_parser = skill_subparsers.add_parser(
         "check", help="Check skill availability and body compatibility"
     )
@@ -9125,6 +9142,15 @@ def main() -> int:
             else:
                 setup_parser.print_help()
                 return 1
+        elif args.command == "host":
+            from rosclaw.hostops.cli import cmd_host_authorize, cmd_host_execute
+
+            if args.host_command == "authorize":
+                return cmd_host_authorize(args)
+            if args.host_command == "execute":
+                return cmd_host_execute(args)
+            host_parser.print_help()
+            return 1
         elif args.command == "skill":
             if getattr(args, "func", None):
                 return args.func(args)
