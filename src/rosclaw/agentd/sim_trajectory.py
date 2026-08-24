@@ -322,21 +322,18 @@ class SimTrajectoryService:
         self._runtime_manager = runtime_manager
 
     def _import_pil(self):
-        """PIL 导入：宿主环境优先；缺失 → 托管 rosclaw-simulation
-        runtime ensure+activate 后重试；托管也不可用 → RuntimeNotReadyError
-        （诚实——调用方映射 BLOCKED，不是裸 ModuleNotFoundError）。"""
+        """PIL 导入（P0-F）：Pillow 是主包依赖（安装阶段闭包）——
+        任务期间绝不安装；缺失 → RENDER_DEPS_MISSING 诚实失败
+        （安装损坏，重装一致构建，不是任务期 pip install）。"""
         try:
             from PIL import Image, ImageDraw
 
             return Image, ImageDraw
-        except ImportError:
-            if self._runtime_manager is None:
-                raise
-            handle = self._runtime_manager.ensure("rosclaw-simulation")
-            self._runtime_manager.activate(handle)
-            from PIL import Image, ImageDraw
-
-            return Image, ImageDraw
+        except ImportError as exc:
+            raise ValueError(
+                "RENDER_DEPS_MISSING: Pillow 不可用——安装阶段依赖"
+                "闭包破损（请重新安装一致构建；任务期间不安装依赖）"
+            ) from exc
 
     # --------------------------------------------------------------
     # 1. trajectory.generate_planar_path
@@ -513,7 +510,7 @@ class SimTrajectoryService:
                 RolloutRequest(
                     scenario=scenario,
                     trajectory=joint_trajectory,
-                    max_joint_delta_rad=0.0005,
+                    max_joint_delta_rad=0.0003,
                     artifact_dir=out_dir,
                 )
             )
@@ -607,11 +604,13 @@ class SimTrajectoryService:
         *,
         desired_tool_z: list[float] | None = None,
     ) -> dict:
-        """实际 eef 到规划路径（最近点）的跟踪误差——剔除转场段
-        （从首次进入路径邻域起算，到最后一次离开邻域为止；WP-5 的
-        lift 抬升段刻意离开接触路径，不计入接触跟踪误差）。WP-5：
-        朝向误差（实际工具轴 vs 期望工具轴，度）同段统计。"""
+        """实际 eef 到规划路径（最近点）的跟踪误差——只统计接触段
+        （|z - 接触平面| ≤ 2cm 且在路径邻域内；approach 降下与 lift
+        抬升的过渡采样会被 5cm 邻域误纳——它们在平面上方 ≈5cm 处，
+        是转场不是接触跟踪）。WP-5：朝向误差同段统计。"""
         window = 0.05
+        plane_tol = 0.02
+        plane_z = float(planned[0]["z"]) if planned else 0.0
 
         def _near(a: dict) -> float:
             return min(
@@ -619,14 +618,17 @@ class SimTrajectoryService:
                 for p in planned
             )
 
+        def _on_plane(a: dict) -> bool:
+            return abs(float(a["z"]) - plane_z) <= plane_tol
+
         start = 0
         for idx, a in enumerate(actual):
-            if _near(a) < window:
+            if _near(a) < window and _on_plane(a):
                 start = idx
                 break
         end = len(actual)
         for idx in range(len(actual) - 1, -1, -1):
-            if _near(actual[idx]) < window:
+            if _near(actual[idx]) < window and _on_plane(actual[idx]):
                 end = idx + 1
                 break
         actual = actual[start:end]
