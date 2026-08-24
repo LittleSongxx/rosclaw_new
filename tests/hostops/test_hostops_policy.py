@@ -1,24 +1,12 @@
-"""PR-1 RED — HostOps policy: typed operations only, fail closed (doc §17-§23).
+"""PR-5 GREEN — HostOps policy: typed operations only, fail closed (doc §17-§23).
 
-Host skills must not route through the sandboxed harness shell, and must
-never gain an unrestricted root shell. The HostOps broker accepts typed
-operations (``package.install``, ``repository.enable``, …) and rejects
-everything else by default. Approval binds to the plan hash: changing the
-plan requires re-approval. Sudo authentication is a local-TTY affair; the
-password never enters the agent context.
-
-Imports of the not-yet-existing modules live inside test bodies so each
-test fails RED (xfail strict) until PR-5.
+(Was PR-1 RED: no HostOps plane existed. PR-5 implements policy, plan-hash
+approval binding and local-TTY authorization.)
 """
 
 from __future__ import annotations
 
 import pytest
-
-pytestmark = pytest.mark.xfail(
-    strict=True,
-    reason="RED (skill-runtime-2.0 PR-1): HostOps plane missing; unmark in PR-5",
-)
 
 
 def _plan(operations: list[dict]) -> dict:

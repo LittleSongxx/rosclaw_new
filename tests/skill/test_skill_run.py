@@ -1,17 +1,8 @@
-"""PR-1 RED — `rosclaw skill run` must become a real capability (doc §16).
+"""PR-5 GREEN — `rosclaw skill run` is a real capability (doc §16).
 
-The ros_install README already documents ``rosclaw skill run ... --action
-plan|install`` but the CLI has no ``run`` subcommand — specification ahead
-of implementation. These tests pin the contract shared by PR-4 (service),
-PR-5 (HostOps) and PR-7 (golden ros_install):
-
-- ``--action plan`` produces a typed ExecutionPlan (domain=host).
-- Executing without an approval bound to the plan hash must be refused.
-- A skill whose plan contains arbitrary root shell must be rejected by
-  policy before anything executes.
-
-Imports of the not-yet-existing modules live inside test bodies so each
-test fails RED (xfail strict) until PR-4/PR-5.
+(Was PR-1 RED: no ``run`` subcommand existed although the ros_install
+README documented it. PR-4/PR-5 implement plan building, HostOps policy
+gating and plan-hash approval.)
 """
 
 from __future__ import annotations
@@ -21,12 +12,7 @@ import json
 
 import pytest
 
-pytestmark = pytest.mark.xfail(
-    strict=True,
-    reason="RED (skill-runtime-2.0 PR-1): no `skill run`; unmark in PR-4/PR-5",
-)
-
-from rosclaw.skill.cli import add_skill_hub_parsers  # noqa: E402
+from rosclaw.skill.cli import add_skill_hub_parsers
 
 
 def _run_cli(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str, str]:
