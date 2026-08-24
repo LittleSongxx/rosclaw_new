@@ -505,12 +505,12 @@ def _cmd_skill_search_catalog(args: argparse.Namespace, query: str) -> int:
 
 
 def cmd_skill_install(args: argparse.Namespace) -> int:
-    """Install a builtin skill reference into the local registry.
-
-    For builtin skills this is effectively a no-op registration; the skill
-    remains in-package and is executed from ``rosclaw.skill.builtins``.
+    """Install a skill: namespaced refs install from catalogs (doc §11),
+    bare names keep the legacy builtin-registration behavior.
     """
     name = args.name
+    if "/" in name:
+        return _cmd_skill_install_remote(args, name)
     entry = get_builtin_skill(name)
     if entry is None:
         print(f"[ROSClaw] Builtin skill not found: {name}")
@@ -528,6 +528,24 @@ def cmd_skill_install(args: argparse.Namespace) -> int:
     registry._data["skills"][name] = data
     registry._save()
     print(f"[ROSClaw] Installed builtin skill: {name}@{entry.version}")
+    return 0
+
+
+def _cmd_skill_install_remote(args: argparse.Namespace, ref: str) -> int:
+    from rosclaw.skill.installer import SkillInstaller, SkillInstallError
+
+    try:
+        receipt = SkillInstaller().install(ref)
+    except SkillInstallError as exc:
+        print(f"[ROSClaw] Install failed: {exc}")
+        return 1
+    if args.json:
+        print(json.dumps(receipt.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(f"[ROSClaw] Installed {receipt.name}@{receipt.version}")
+        print(f"  digest: {receipt.package_digest}")
+        print(f"  trust:  {receipt.trust}")
+        print(f"  path:   {receipt.install_dir}")
     return 0
 
 

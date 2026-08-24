@@ -1,13 +1,7 @@
-"""PR-1 RED — installing remote official skills must actually work (doc §11/§12).
+"""PR-3 GREEN — installing remote official skills actually works (doc §11/§12).
 
-Today ``rosclaw skill install ros-claw/ros_install`` fails with
-"Builtin skill not found" because the installer only knows in-package
-builtins. These tests pin the PR-3 contract: resolve → fetch → verify
-digest → atomic extract → validate → lockfile, with
-``~/.rosclaw/skills/<namespace>/<name>/<version>/`` layout.
-
-Imports of the not-yet-existing modules live inside test bodies so each
-test fails RED (xfail strict) until PR-3.
+(Was PR-1 RED: ``skill install ros-claw/ros_install`` failed with
+"Builtin skill not found". PR-3 implements the real installer.)
 """
 
 from __future__ import annotations
@@ -17,12 +11,7 @@ import json
 
 import pytest
 
-pytestmark = pytest.mark.xfail(
-    strict=True,
-    reason="RED (skill-runtime-2.0 PR-1): remote installer missing; unmark in PR-3",
-)
-
-from rosclaw.skill.cli import add_skill_hub_parsers, cmd_skill_install  # noqa: E402
+from rosclaw.skill.cli import add_skill_hub_parsers, cmd_skill_install
 
 
 class TestSkillInstaller:
