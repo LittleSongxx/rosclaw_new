@@ -147,12 +147,3 @@ def official_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     monkeypatch.setenv("ROSCLAW_SKILLS_REGISTRY_URL", registry_path.as_uri())
     return registry_path
-
-
-@pytest.fixture
-def rosclaw_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect all ROSClaw persistent state into a tmp home."""
-    home = tmp_path / "rosclaw-home"
-    home.mkdir()
-    monkeypatch.setenv("ROSCLAW_HOME", str(home))
-    return home

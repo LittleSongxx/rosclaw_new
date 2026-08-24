@@ -66,14 +66,36 @@ class HostOpsPolicy:
         for key, value in op.items():
             if key == "type":
                 continue
+            if op_type == "file.managed_write" and key == "content":
+                # File content is data written verbatim to the managed file;
+                # it is never executed, so it is not token-validated.
+                if not isinstance(value, str):
+                    raise HostOpsPolicyError(
+                        f"{where}.content must be a string"
+                    )
+                continue
+            if op_type == "file.managed_write" and key == "path":
+                # Absolute managed path: no traversal, no whitespace (the
+                # executor additionally confines it to managed roots).
+                if (
+                    not isinstance(value, str)
+                    or not value.startswith("/")
+                    or ".." in value
+                    or any(c.isspace() for c in value)
+                ):
+                    raise HostOpsPolicyError(
+                        f"{where}.path must be an absolute path without "
+                        f"traversal or whitespace, got {value!r}"
+                    )
+                continue
             self._validate_value(f"{where}.{key}", value)
 
     def _validate_value(self, where: str, value: object) -> None:
         if isinstance(value, str):
-            if not _SAFE_TOKEN.match(value):
+            if not _SAFE_TOKEN.match(value) or ".." in value:
                 raise HostOpsPolicyError(
                     f"{where} value {value!r} is not a safe token "
-                    f"(no flags, whitespace or shell metacharacters)"
+                    f"(no flags, whitespace, path traversal or shell metacharacters)"
                 )
         elif isinstance(value, list):
             if not value:

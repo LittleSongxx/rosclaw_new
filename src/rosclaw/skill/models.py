@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 # ---------------------------------------------------------------------------
 
 SUPPORTED_SKILL_SCHEMA = "rosclaw.skill.v1"
+SUPPORTED_SKILL_SCHEMA_V2 = "rosclaw.skill.v2"
 SUPPORTED_POLICY_SCHEMA = "rosclaw.policy.v1"
 SUPPORTED_PROVIDERS_SCHEMA = "rosclaw.providers.v1"
 SUPPORTED_EURDF_COMPAT_SCHEMA = "rosclaw.eurdf_compat.v1"
@@ -237,8 +238,23 @@ class StatusSpec(BaseModel):
     recommended_runtime_mode: str = "sandbox_first"
 
 
+class SkillCapabilitySpec(BaseModel):
+    """Skill Runtime 2.0 capability declaration (doc §4/§7)."""
+
+    id: str = ""
+    intents: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class SkillSafetySpec(BaseModel):
+    """Skill Runtime 2.0 host-safety declaration (doc §7)."""
+
+    approval_scope: str = "transaction"
+    privilege: str = "admin"
+    arbitrary_root_shell: bool = False
+
+
 class SkillYaml(BaseModel):
-    schema_version: Literal["rosclaw.skill.v1"] = SUPPORTED_SKILL_SCHEMA
+    schema_version: Literal["rosclaw.skill.v1", "rosclaw.skill.v2"] = SUPPORTED_SKILL_SCHEMA
     kind: Literal["Skill"] = "Skill"
     metadata: SkillMetadata = Field(default_factory=SkillMetadata)
     identity: SkillIdentity = Field(default_factory=SkillIdentity)
@@ -249,6 +265,10 @@ class SkillYaml(BaseModel):
     lineage: LineageRef = Field(default_factory=LineageRef)
     evidence: EvidenceSpec = Field(default_factory=EvidenceSpec)
     status: StatusSpec = Field(default_factory=StatusSpec)
+    # Skill Runtime 2.0 sections (doc §7; optional for v1 packages).
+    capability: SkillCapabilitySpec | None = None
+    permissions: list[str] = Field(default_factory=list)
+    safety: SkillSafetySpec | None = None
 
 
 class CapabilityRoute(BaseModel):

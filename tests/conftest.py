@@ -354,3 +354,12 @@ def fake_realsense_skill(monkeypatch, dummy_png):
     plugin = get_runtime_plugin()
     plugin.register("realsense_capture_rgbd", _fake_run)
     monkeypatch.setattr(plugin, "discover_handlers", lambda *_args, **_kwargs: None)
+
+
+@pytest.fixture
+def rosclaw_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect all ROSClaw persistent state into a tmp home."""
+    home = tmp_path / "rosclaw-home"
+    home.mkdir()
+    monkeypatch.setenv("ROSCLAW_HOME", str(home))
+    return home

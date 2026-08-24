@@ -14,6 +14,7 @@ ALLOWED_OPERATION_TYPES: frozenset[str] = frozenset(
         "package.install",
         "package.remove",
         "package.install_deb",
+        "package.update",
         "repository.add",
         "repository.remove",
         "repository.enable",
