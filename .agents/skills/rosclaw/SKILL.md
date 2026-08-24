@@ -24,6 +24,26 @@ it with a different `rosclaw` found on `PATH`.
   capability- and action-intent-bound permit, and a registered verified REAL
   executor. Refuse direct ROS, DDS, serial, CAN, SDK, or motor commands.
 
+## Capability First (Skill Runtime 2.0)
+
+Before solving a system, robot, environment, device, perception, navigation
+or manipulation task ad-hoc:
+
+1. Call MCP `resolve_capability(intent)` (or
+   `.venv/bin/python -m rosclaw.entrypoint skill search "<intent>"`).
+2. Prefer an applicable verified capability/skill over hand-rolled commands.
+3. Use generic tools only when no capability exists, the capability is
+   incompatible, or it failed after its recovery path.
+
+Never guess skill names: state the goal ("帮我安装 ROS2") and let the
+resolver pick the implementation. Host-domain skills execute only through
+typed HostOps plans with plan-hash approval — never improvise
+`sudo apt install ...` / `curl ... | bash` in a shell. When the sandboxed
+shell refuses a host mutation, treat it as a signal to call
+`resolve_capability` first, not as a prompt to work around the sandbox.
+Sudo authentication is a local-TTY operator step; never ask for, accept, or
+log a sudo password.
+
 ## First Checks
 
 ```bash

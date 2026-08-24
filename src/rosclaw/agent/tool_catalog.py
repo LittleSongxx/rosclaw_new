@@ -39,8 +39,21 @@ P0_PRODUCT_TOOLS: tuple[str, ...] = (
     "explain_execution",
 )
 
+# Skill Runtime 2.0 capability tools (doc §26): agents resolve/invoke
+# capabilities without guessing skill names.
+P0_CAPABILITY_TOOLS: tuple[str, ...] = (
+    "resolve_capability",
+    "invoke_capability",
+    "get_skill_job",
+    "cancel_skill_job",
+)
+
 P0_AGENT_MCP_TOOLS: tuple[str, ...] = (
-    P0_CORE_TOOLS + P0_BODY_CONTEXT_TOOLS + P0_CONTROL_PLANE_TOOLS + P0_PRODUCT_TOOLS
+    P0_CORE_TOOLS
+    + P0_BODY_CONTEXT_TOOLS
+    + P0_CONTROL_PLANE_TOOLS
+    + P0_PRODUCT_TOOLS
+    + P0_CAPABILITY_TOOLS
 )
 
 MCP_TOOL_SAFETY_LEVELS: dict[str, str] = {
@@ -81,6 +94,13 @@ MCP_TOOL_SAFETY_LEVELS: dict[str, str] = {
     "rosclaw_know_build_reference_pack": "S0_READ_ONLY",
     "rosclaw_know_open_reference_pack": "S0_READ_ONLY",
     "rosclaw_how_advice": "S0_ADVISORY",
+    # Skill Runtime 2.0 capability tools (doc §26): resolution is read-only;
+    # invoke only ever creates an AWAITING_APPROVAL job — execution needs a
+    # plan-hash approval plus local-TTY authorization (§21/§23).
+    "resolve_capability": "S0_READ_ONLY",
+    "get_skill_job": "S0_READ_ONLY",
+    "invoke_capability": "S3_GUARDED_ACTION",
+    "cancel_skill_job": "S3_GUARDED_ACTION",
 }
 
 

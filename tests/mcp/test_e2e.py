@@ -135,10 +135,22 @@ P0_TOOL_CALLS: list[tuple[str, dict[str, Any]]] = [
     ("get_calibration_status", {"component": "head_rgb_camera"}),
     ("get_product_status", {}),
     ("list_product_demos", {}),
+    # Skill Runtime 2.0 capability tools (doc §26). resolve succeeds even
+    # with no catalog match; invoke/get/cancel fail closed with honest
+    # error envelopes (no capable skill / no such job in this workspace).
+    ("resolve_capability", {"intent": "install ROS2"}),
+    ("invoke_capability", {"capability_id": "environment.install.ros"}),
+    ("get_skill_job", {"job_id": "job-e2e-nonexistent"}),
+    ("cancel_skill_job", {"job_id": "job-e2e-nonexistent"}),
 ]
 
 EXPECTED_TOOLS = set(P0_AGENT_MCP_TOOLS)
-EXPECTED_ERROR_TOOLS = {"get_robot_state"}
+EXPECTED_ERROR_TOOLS = {
+    "get_robot_state",
+    "invoke_capability",
+    "get_skill_job",
+    "cancel_skill_job",
+}
 
 
 def _prepare_server_workspace(tmp_path: Path) -> tuple[Path, Path]:

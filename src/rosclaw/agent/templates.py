@@ -56,6 +56,10 @@ def _tool_table(tool_names: tuple[str, ...]) -> str:
         "run_product_demo": "Run an official simulation and persist its receipt",
         "get_execution_receipt": "Read and integrity-check a receipt",
         "explain_execution": "Explain policy, execution, observation, and evidence",
+        "resolve_capability": "Resolve an intent to a verified capability/skill",
+        "invoke_capability": "Plan a capability; creates an approval-gated job only",
+        "get_skill_job": "Read a skill job state machine record",
+        "cancel_skill_job": "Cancel a non-terminal skill job",
     }
     lines = ["| Tool | Safety level | Purpose |", "|------|--------------|---------|"]
     for tool in tool_names:

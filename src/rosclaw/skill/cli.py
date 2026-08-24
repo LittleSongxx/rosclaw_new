@@ -449,7 +449,15 @@ def cmd_skill_rollback(args: argparse.Namespace) -> int:
 
 
 def cmd_skill_search(args: argparse.Namespace) -> int:
-    """List builtin skills and local skill-hub packages."""
+    """Search the unified catalog, or (no query) list builtin + local skills.
+
+    Skill Runtime 2.0 (doc §10): with a query this searches across
+    builtin/installed/official/workspace sources — the official
+    ``ros-claw/skills`` registry included (fetched once, then cached).
+    """
+    query = getattr(args, "query", None)
+    if query:
+        return _cmd_skill_search_catalog(args, query)
     builtins = list_builtin_skills()
     registry = SkillLocalRegistry()
     local = registry.list_skills()
@@ -465,13 +473,44 @@ def cmd_skill_search(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_skill_install(args: argparse.Namespace) -> int:
-    """Install a builtin skill reference into the local registry.
+def _cmd_skill_search_catalog(args: argparse.Namespace, query: str) -> int:
+    from rosclaw.skill.catalog_service import SkillCatalogService
 
-    For builtin skills this is effectively a no-op registration; the skill
-    remains in-package and is executed from ``rosclaw.skill.builtins``.
+    hits = SkillCatalogService.default().search(query)
+    if args.json:
+        print(
+            json.dumps(
+                {"results": [h.to_dict() for h in hits]}, indent=2, ensure_ascii=False
+            )
+        )
+        return 0
+    print(f'[ROSClaw] Skill catalog results for "{query}"')
+    if not hits:
+        print("  (no matching skills)")
+        return 0
+    for h in hits:
+        badges = []
+        if h.official:
+            badges.append("official")
+        if h.installed:
+            badges.append("installed")
+        badge = f"  [{', '.join(badges)}]" if badges else ""
+        version = f"@{h.version}" if h.version else ""
+        print(f"  {h.name}{version}{badge}")
+        if h.description:
+            print(f"      {h.description}")
+        status = h.verification_status or "unverified"
+        print(f"      source={h.source} installed={'yes' if h.installed else 'no'} status={status}")
+    return 0
+
+
+def cmd_skill_install(args: argparse.Namespace) -> int:
+    """Install a skill: namespaced refs install from catalogs (doc §11),
+    bare names keep the legacy builtin-registration behavior.
     """
     name = args.name
+    if "/" in name:
+        return _cmd_skill_install_remote(args, name)
     entry = get_builtin_skill(name)
     if entry is None:
         print(f"[ROSClaw] Builtin skill not found: {name}")
@@ -490,6 +529,123 @@ def cmd_skill_install(args: argparse.Namespace) -> int:
     registry._save()
     print(f"[ROSClaw] Installed builtin skill: {name}@{entry.version}")
     return 0
+
+
+def _cmd_skill_install_remote(args: argparse.Namespace, ref: str) -> int:
+    from rosclaw.skill.installer import SkillInstaller, SkillInstallError
+
+    try:
+        receipt = SkillInstaller().install(ref)
+    except SkillInstallError as exc:
+        print(f"[ROSClaw] Install failed: {exc}")
+        return 1
+    if args.json:
+        print(json.dumps(receipt.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(f"[ROSClaw] Installed {receipt.name}@{receipt.version}")
+        print(f"  digest: {receipt.package_digest}")
+        print(f"  trust:  {receipt.trust}")
+        print(f"  path:   {receipt.install_dir}")
+    return 0
+
+
+def cmd_skill_run(args: argparse.Namespace) -> int:
+    """Run an installed host skill action (doc §16).
+
+    ``--action plan`` loads the skill's planner entrypoint, computes a
+    typed ExecutionPlan from the detected host state, validates it
+    against HostOps policy and prints it (with its plan hash).
+    ``--action install`` requires ``--approve <plan_hash>`` matching the
+    exact plan (doc §21) and then enters the local-TTY authorization
+    flow (doc §23) — the agent never sees credentials.
+    """
+    ref = args.name
+    if "/" not in ref:
+        # Backward compatibility: `skill run <bare_name> [input]` was an
+        # alias for `skill invoke`. Forward to the legacy handler.
+        import types
+
+        from rosclaw.cli import cmd_skill_invoke
+
+        legacy_args = types.SimpleNamespace(
+            skill_id=ref,
+            input=getattr(args, "input", None) or getattr(args, "args", None) or "{}",
+            body_id=None,
+            output_dir=None,
+            workspace=None,
+            trace_id=None,
+            json=getattr(args, "json", False),
+        )
+        return cmd_skill_invoke(legacy_args)
+    try:
+        plan = _build_skill_plan(ref, args)
+    except _SkillRunError as exc:
+        print(f"[ROSClaw] {exc}")
+        return 1
+
+    from rosclaw.hostops.planner import plan_hash
+    from rosclaw.hostops.policy import HostOpsPolicy, HostOpsPolicyError
+
+    policy = HostOpsPolicy()
+    try:
+        policy.validate_plan(plan)
+    except HostOpsPolicyError as exc:
+        print(f"[ROSClaw] Plan rejected by HostOps policy: {exc}")
+        return 1
+    plan["plan_hash"] = plan_hash(plan)
+
+    if args.action == "plan":
+        if args.json:
+            print(json.dumps(plan, indent=2, ensure_ascii=False))
+        else:
+            print(f"[ROSClaw] Execution plan for {plan['skill']}")
+            print(f"  domain: {plan['domain']}  plan_hash: {plan['plan_hash'][:16]}…")
+            for op in plan["operations"]:
+                print(f"  - {op['type']}")
+            print("[ROSClaw] Approve with: rosclaw skill run "
+                  f"{ref} --action install --approve {plan['plan_hash']}")
+        return 0
+
+    # --action install: approval bound to the exact plan hash (doc §21).
+    if not args.approve or args.approve != plan["plan_hash"]:
+        print("[ROSClaw] Execution requires an approval bound to this plan.")
+        print(f"  plan_hash: {plan['plan_hash']}")
+        print(f"  approve with: rosclaw skill run {ref} --action install "
+              f"--approve {plan['plan_hash']}")
+        return 2
+
+    approval = policy.approve(plan["plan_hash"])
+    try:
+        policy.require_approval(plan, approval)
+    except HostOpsPolicyError as exc:
+        print(f"[ROSClaw] {exc}")
+        return 2
+
+    from rosclaw.hostops.auth import begin_local_authorization
+    from rosclaw.hostops.receipt import new_job_id
+
+    auth_request = begin_local_authorization(new_job_id())
+    if args.json:
+        print(json.dumps({**auth_request, "plan": plan}, indent=2, ensure_ascii=False))
+    else:
+        print(f"[ROSClaw] {auth_request['status']}: {auth_request['instruction']}")
+    return 0
+
+
+class _SkillRunError(Exception):
+    pass
+
+
+def _build_skill_plan(ref: str, args: argparse.Namespace) -> dict:
+    """Delegate to the shared SkillService plan builder (doc §15)."""
+    from rosclaw.firstboot.workspace import get_rosclaw_home
+    from rosclaw.skill.service import SkillPlanError, build_skill_plan
+
+    skill_args = json.loads(args.args) if getattr(args, "args", None) else {}
+    try:
+        return build_skill_plan(get_rosclaw_home(), ref, skill_args)
+    except SkillPlanError as exc:
+        raise _SkillRunError(str(exc)) from exc
 
 
 def cmd_skill_inspect(args: argparse.Namespace) -> int:
@@ -526,7 +682,16 @@ def cmd_skill_inspect(args: argparse.Namespace) -> int:
 
 
 def add_skill_hub_parsers(skill_subparsers: Any) -> None:
-    search_parser = skill_subparsers.add_parser("search", help="Search builtin and local skills")
+    search_parser = skill_subparsers.add_parser(
+        "search",
+        help="Search skills across builtin/installed/official/workspace catalogs",
+    )
+    search_parser.add_argument(
+        "query",
+        nargs="?",
+        default=None,
+        help="Intent or keywords (e.g. \"install ros2\"); omit to list builtin+local",
+    )
     search_parser.add_argument("--json", action="store_true", help="Output as JSON")
     search_parser.set_defaults(func=cmd_skill_search)
 
@@ -536,6 +701,35 @@ def add_skill_hub_parsers(skill_subparsers: Any) -> None:
     install_parser.add_argument("name", help="Skill name")
     install_parser.add_argument("--json", action="store_true", help="Output as JSON")
     install_parser.set_defaults(func=cmd_skill_install)
+
+    run_parser = skill_subparsers.add_parser(
+        "run", help="Run an installed skill action (plan/install)"
+    )
+    run_parser.add_argument("name", help="Namespaced skill ref (e.g. ros-claw/ros_install)")
+    run_parser.add_argument(
+        "input",
+        nargs="?",
+        default=None,
+        help="Legacy invoke input JSON (bare skill names only)",
+    )
+    run_parser.add_argument(
+        "--action",
+        choices=["plan", "install"],
+        default="plan",
+        help="plan: compute and validate the ExecutionPlan; install: execute it",
+    )
+    run_parser.add_argument(
+        "--approve",
+        default=None,
+        help="Approval token: the plan_hash shown by --action plan",
+    )
+    run_parser.add_argument(
+        "--args",
+        default=None,
+        help="JSON object passed to the skill planner as args",
+    )
+    run_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    run_parser.set_defaults(func=cmd_skill_run)
 
     inspect_parser = skill_subparsers.add_parser("inspect", help="Inspect a skill")
     inspect_parser.add_argument("name", help="Skill name")
