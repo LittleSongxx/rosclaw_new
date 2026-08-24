@@ -80,6 +80,9 @@ def authorize_job(
 
     # 2. Re-launch the execution phase as root. ``sudo -n`` rides the
     #    cached credentials from step 1; ROSCLAW_HOME is passed explicitly.
+    #    Python/venv env of the *caller's* toolchain must NOT leak into the
+    #    root phase: a foreign PYTHONPATH/LD_LIBRARY_PATH breaks system
+    #    Python applications (e.g. the ros2 CLI's importlib.metadata).
     entrypoint = [
         sys.executable,
         "-m",
@@ -88,7 +91,24 @@ def authorize_job(
         "execute",
         job_id,
     ]
-    rc = runner(["sudo", "-n", "env", f"ROSCLAW_HOME={home}", *entrypoint], home)
+    rc = runner(
+        [
+            "sudo",
+            "-n",
+            "env",
+            "-u",
+            "PYTHONPATH",
+            "-u",
+            "PYTHONHOME",
+            "-u",
+            "VIRTUAL_ENV",
+            "-u",
+            "LD_LIBRARY_PATH",
+            f"ROSCLAW_HOME={home}",
+            *entrypoint,
+        ],
+        home,
+    )
     if rc != 0:
         fresh = store.get(job_id)
         state = fresh["status"] if fresh else f"unreadable (check {home}/skills/jobs permissions)"
