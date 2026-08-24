@@ -8050,13 +8050,9 @@ def main() -> int:
     skill_invoke_parser.add_argument("--trace-id", default=None, help="Trace ID for the invocation")
     skill_invoke_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
-    # `run` is a backward-compatible alias for `invoke`.
-    skill_subparsers.add_parser(
-        "run",
-        parents=[skill_invoke_parser],
-        add_help=False,
-        help="Run a skill (alias for invoke)",
-    )
+    # NOTE: `skill run` is now the Skill Runtime 2.0 planner/executor entry
+    # (registered by add_skill_hub_parsers below); bare-name invocations are
+    # forwarded to cmd_skill_invoke for backward compatibility.
 
     # skill champions subcommand
     skill_champions_parser = skill_subparsers.add_parser(

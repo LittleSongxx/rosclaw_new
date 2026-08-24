@@ -549,6 +549,121 @@ async def _fleet_skill_compatibility() -> dict[str, Any]:
     return await _client().fleet_skill_compatibility()
 
 
+# ---------------------------------------------------------------------------
+# Capability tools (Skill Runtime 2.0, doc §26)
+#
+# These deliberately bypass the runtime client: capability resolution must
+# see the *whole skill ecosystem* (catalog), not just the runtime registry.
+# ---------------------------------------------------------------------------
+
+
+def _capability_error(code: str, message: str) -> MCPError:
+    """Error envelope that honest clients can trust-read (UNAVAILABLE)."""
+    return MCPError(
+        code,
+        message,
+        details={"trust_level": "UNAVAILABLE", "usable_for_real_execution": False},
+    )
+
+
+async def _resolve_capability(intent: str) -> dict[str, Any]:
+    """Resolve a natural-language intent to a capability + skill implementation.
+
+    The agent never guesses skill names (doc §27): it states the goal and
+    ROSClaw answers with the capability id, the selected skill, trust and
+    compatibility — deterministically, no LLM required (doc §6).
+    """
+    from rosclaw.skill.resolver import CapabilityResolver
+
+    resolution = await asyncio.to_thread(CapabilityResolver().resolve, intent)
+    return resolution.to_dict()
+
+
+async def _invoke_capability(capability_id: str, args: dict | None = None) -> dict[str, Any]:
+    """Invoke a capability: resolve → auto-acquire (official only) → plan
+    → AWAITING_APPROVAL job (doc §28/§29).
+
+    Host-domain execution never happens here: the job waits for an
+    approval bound to the plan hash (doc §21) and local-TTY authorization
+    (doc §23). Third-party skills are never auto-installed (doc §29).
+    """
+    return await asyncio.to_thread(_invoke_capability_sync, capability_id, args)
+
+
+def _invoke_capability_sync(capability_id: str, args: dict | None) -> dict[str, Any]:
+    from rosclaw.hostops.planner import plan_hash
+    from rosclaw.hostops.policy import HostOpsPolicy, HostOpsPolicyError
+    from rosclaw.skill.jobs import SkillJobStore
+    from rosclaw.skill.service import SkillPlanError, SkillService
+
+    service = SkillService()
+    hit = service.find_by_capability(capability_id)
+    if hit is None:
+        raise _capability_error(
+            "CAPABILITY_NOT_FOUND",
+            f"no skill implements capability {capability_id!r} in any catalog",
+        )
+    if not hit.installed:
+        if not hit.official:
+            # doc §29: third-party skills require an explicit operator install.
+            return {
+                "status": "INSTALL_REQUIRES_OPERATOR",
+                "capability": capability_id,
+                "selected_skill": hit.name,
+                "executed": False,
+                "instruction": f"run `rosclaw skill install {hit.name}` to proceed",
+            }
+        # doc §28: official (T1) skills may auto-acquire.
+        service.ensure_installed(hit.name)
+    try:
+        plan = service.plan(hit.name, args or {})
+        HostOpsPolicy().validate_plan(plan)
+    except (SkillPlanError, HostOpsPolicyError) as exc:
+        raise _capability_error(
+            "PLAN_REJECTED", f"plan for {hit.name} rejected: {exc}"
+        ) from exc
+    job = SkillJobStore().create(
+        skill=hit.name,
+        capability=capability_id,
+        status="AWAITING_APPROVAL",
+        plan_hash=plan_hash(plan),
+        plan=plan,
+    )
+    return {
+        "status": "AWAITING_APPROVAL",
+        "job_id": job["job_id"],
+        "capability": capability_id,
+        "selected_skill": hit.name,
+        "plan_hash": job["plan_hash"],
+        "operations": [op["type"] for op in plan["operations"]],
+        "executed": False,
+        "instruction": (
+            f"approve with `rosclaw skill run {hit.name} --action install "
+            f"--approve {job['plan_hash']}`"
+        ),
+    }
+
+
+async def _get_skill_job(job_id: str) -> dict[str, Any]:
+    """Read a skill job record (doc §24 stable /job semantics)."""
+    from rosclaw.skill.jobs import SkillJobStore
+
+    job = await asyncio.to_thread(SkillJobStore().get, job_id)
+    if job is None:
+        raise _capability_error("JOB_NOT_FOUND", f"skill job {job_id!r} not found")
+    return job
+
+
+async def _cancel_skill_job(job_id: str) -> dict[str, Any]:
+    """Cancel a non-terminal skill job (doc §24/§26)."""
+    from rosclaw.skill.jobs import SkillJobStore
+
+    try:
+        return await asyncio.to_thread(SkillJobStore().cancel, job_id)
+    except KeyError as exc:
+        raise _capability_error("JOB_NOT_FOUND", str(exc)) from exc
+
+
 # Expose wrapped tool functions for FastMCP registration.
 get_robot_state = _tool_wrapper("get_robot_state", _get_robot_state)
 list_skills = _tool_wrapper("list_skills", _list_skills)
@@ -581,6 +696,10 @@ switch_body = _tool_wrapper("switch_body", _switch_body)
 list_body_history = _tool_wrapper("list_body_history", _list_body_history)
 check_skill_compatibility = _tool_wrapper("check_skill_compatibility", _check_skill_compatibility)
 fleet_skill_compatibility = _tool_wrapper("fleet_skill_compatibility", _fleet_skill_compatibility)
+resolve_capability = _tool_wrapper("resolve_capability", _resolve_capability)
+invoke_capability = _tool_wrapper("invoke_capability", _invoke_capability)
+get_skill_job = _tool_wrapper("get_skill_job", _get_skill_job)
+cancel_skill_job = _tool_wrapper("cancel_skill_job", _cancel_skill_job)
 
 P0_TOOLS: list[ToolFunc] = [
     get_robot_state,
@@ -608,6 +727,11 @@ P0_TOOLS: list[ToolFunc] = [
     run_product_demo,
     get_execution_receipt,
     explain_execution,
+    # Skill Runtime 2.0 capability tools (doc §26).
+    resolve_capability,
+    invoke_capability,
+    get_skill_job,
+    cancel_skill_job,
 ]
 
 BODY_TOOLS: list[ToolFunc] = [
@@ -619,12 +743,26 @@ BODY_TOOLS: list[ToolFunc] = [
     fleet_skill_compatibility,
 ]
 
+# Capability tools (Skill Runtime 2.0, doc §26), wrapped like all P0 tools.
+CAPABILITY_TOOLS: list[ToolFunc] = [
+    resolve_capability,
+    invoke_capability,
+    get_skill_job,
+    cancel_skill_job,
+]
+
 __all__ = [
     "P0_TOOLS",
     "BODY_TOOLS",
+    "CAPABILITY_TOOLS",
     "set_client",
     "set_context",
     "ToolFunc",
+    # Capability tools (Skill Runtime 2.0, doc §26).
+    "resolve_capability",
+    "invoke_capability",
+    "get_skill_job",
+    "cancel_skill_job",
     # Expose individual wrapped tools for tests and P2 registration.
     "get_robot_state",
     "list_skills",

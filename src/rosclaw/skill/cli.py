@@ -561,8 +561,22 @@ def cmd_skill_run(args: argparse.Namespace) -> int:
     """
     ref = args.name
     if "/" not in ref:
-        print(f"[ROSClaw] `skill run` expects a namespaced ref, got: {ref}")
-        return 1
+        # Backward compatibility: `skill run <bare_name> [input]` was an
+        # alias for `skill invoke`. Forward to the legacy handler.
+        import types
+
+        from rosclaw.cli import cmd_skill_invoke
+
+        legacy_args = types.SimpleNamespace(
+            skill_id=ref,
+            input=getattr(args, "input", None) or getattr(args, "args", None) or "{}",
+            body_id=None,
+            output_dir=None,
+            workspace=None,
+            trace_id=None,
+            json=getattr(args, "json", False),
+        )
+        return cmd_skill_invoke(legacy_args)
     try:
         plan = _build_skill_plan(ref, args)
     except _SkillRunError as exc:
@@ -623,70 +637,15 @@ class _SkillRunError(Exception):
 
 
 def _build_skill_plan(ref: str, args: argparse.Namespace) -> dict:
-    """Load the installed skill's planner and produce the ExecutionPlan."""
-    import importlib.util
-
-    import yaml
-
+    """Delegate to the shared SkillService plan builder (doc §15)."""
     from rosclaw.firstboot.workspace import get_rosclaw_home
-    from rosclaw.hostops.models import make_plan
-    from rosclaw.skill.resolver import detect_host_context
+    from rosclaw.skill.service import SkillPlanError, build_skill_plan
 
-    home = get_rosclaw_home()
-    lockfile = home / "skills" / "installed.lock.json"
-    installed = {}
-    if lockfile.exists():
-        try:
-            installed = json.loads(lockfile.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            installed = {}
-    if ref not in installed:
-        raise _SkillRunError(
-            f"skill {ref} is not installed; run `rosclaw skill install {ref}` first"
-        )
-    version = str(installed[ref].get("version", ""))
-    install_dir = home / "skills" / ref / version
-    manifest_path = install_dir / "skill.yaml"
-    if not manifest_path.exists():
-        raise _SkillRunError(f"installed skill {ref}@{version} has no skill.yaml")
-    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
-    execution = manifest.get("execution", {}) or {}
-    planner_spec = (execution.get("planner", {}) or {}).get("entrypoint")
-    if not planner_spec:
-        raise _SkillRunError(f"skill {ref} declares no execution.planner entrypoint")
-    module_name, _, func_name = planner_spec.partition(":")
-    if not module_name or not func_name:
-        raise _SkillRunError(f"invalid planner entrypoint {planner_spec!r}")
-    entrypoint_path = install_dir / module_name
-    if not entrypoint_path.exists():
-        raise _SkillRunError(f"planner module {module_name} missing in {install_dir}")
-
-    # Import the skill's planner. Trust basis: the package was digest-pinned
-    # at install time; its *output* is policy-checked before anything runs.
-    spec = importlib.util.spec_from_file_location(f"rosclaw_skill_{ref}", entrypoint_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    planner_fn = getattr(module, func_name, None)
-    if not callable(planner_fn):
-        raise _SkillRunError(f"planner {planner_spec} is not callable")
-
-    context = detect_host_context()
     skill_args = json.loads(args.args) if getattr(args, "args", None) else {}
-    raw_plan = planner_fn(context, skill_args)
-    if not isinstance(raw_plan, dict) or not isinstance(raw_plan.get("operations"), list):
-        raise _SkillRunError("planner must return a dict with an operations list")
-
-    host_target = {
-        "os": context.get("os", ""),
-        "version": context.get("os_version", ""),
-        "arch": context.get("arch", ""),
-    }
-    return make_plan(
-        skill=raw_plan.get("skill") or f"{ref}@{version}",
-        domain=raw_plan.get("domain") or execution.get("domain", "host"),
-        target=raw_plan.get("target") or host_target,
-        operations=raw_plan["operations"],
-    )
+    try:
+        return build_skill_plan(get_rosclaw_home(), ref, skill_args)
+    except SkillPlanError as exc:
+        raise _SkillRunError(str(exc)) from exc
 
 
 def cmd_skill_inspect(args: argparse.Namespace) -> int:
@@ -747,6 +706,12 @@ def add_skill_hub_parsers(skill_subparsers: Any) -> None:
         "run", help="Run an installed skill action (plan/install)"
     )
     run_parser.add_argument("name", help="Namespaced skill ref (e.g. ros-claw/ros_install)")
+    run_parser.add_argument(
+        "input",
+        nargs="?",
+        default=None,
+        help="Legacy invoke input JSON (bare skill names only)",
+    )
     run_parser.add_argument(
         "--action",
         choices=["plan", "install"],
