@@ -90,10 +90,11 @@ def authorize_job(
     ]
     rc = runner(["sudo", "-n", "env", f"ROSCLAW_HOME={home}", *entrypoint], home)
     if rc != 0:
-        job = store.get(job_id) or job
+        fresh = store.get(job_id)
+        state = fresh["status"] if fresh else f"unreadable (check {home}/skills/jobs permissions)"
         raise AuthorizationError(
             f"execution phase exited with code {rc}; job {job_id} is "
-            f"{job['status']} (see `rosclaw skill job {job_id}`)"
+            f"{state} (see `rosclaw skill job {job_id}`)"
         )
     return store.get(job_id)
 
@@ -217,6 +218,8 @@ def _write_receipt(home: Path, job_id: str, receipt: dict) -> None:
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".rcpt-", suffix=".tmp")
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(receipt, fh, indent=2, ensure_ascii=False)
+    # Written as root during execution; must remain operator-readable.
+    os.chmod(tmp, 0o644)
     os.replace(tmp, path)
 
 

@@ -126,6 +126,9 @@ class SkillJobStore:
         fd, tmp = tempfile.mkstemp(dir=self.jobs_dir, prefix=".job-", suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(job, fh, indent=2, ensure_ascii=False)
+        # mkstemp is 0600; job records must stay readable when the root
+        # execution phase updates them and the operator reads them back.
+        os.chmod(tmp, 0o644)
         os.replace(tmp, self.jobs_dir / f"{job['job_id']}.json")
 
 

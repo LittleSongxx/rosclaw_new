@@ -261,6 +261,16 @@ class TestAuthorizeFlow:
             authorize_job(job["job_id"], home=rosclaw_home, sudo_runner=lambda a, h: 1)
         assert store.get(job["job_id"])["status"] == "FAILED"
 
+    def test_job_files_are_operator_readable(self, rosclaw_home):
+        """Root-phase job/receipt updates must stay readable by the operator
+        (mkstemp defaults to 0600 — the root child would lock the user out)."""
+        import stat
+
+        store = SkillJobStore(rosclaw_home)
+        job = store.create(skill="test/flow_skill", capability=None, status="PLANNED")
+        mode = stat.S_IMODE((rosclaw_home / "skills" / "jobs" / f"{job['job_id']}.json").stat().st_mode)
+        assert mode == 0o644
+
 
 class TestExecuteAuthorizedJob:
     def _authorized_job(self, home: Path, plan: dict) -> dict:
