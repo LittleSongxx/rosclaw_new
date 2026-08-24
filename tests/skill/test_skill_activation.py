@@ -1,31 +1,16 @@
-"""PR-1 RED — installed skills must reach the runtime registry (doc §14).
+"""PR-4 GREEN — installed skills reach the runtime registry (doc §14).
 
-Today there are two disconnected registries: ``SkillLocalRegistry``
-(persistent, ``~/.rosclaw/registry/skills.yaml``) and the runtime
-``SkillManager.SkillRegistry`` (in-memory). Nothing loads an installed
-skill package into the runtime, so a freshly installed official skill is
-invisible to the executor and to MCP. These tests pin the PR-4 contract:
-``SkillLoader`` bridges Installed → ActiveRuntimeRegistry, surviving
-runtime restarts.
-
-Imports of the not-yet-existing modules live inside test bodies so each
-test fails RED (xfail strict) until PR-4.
+(Was PR-1 RED: two disconnected registries, nothing loaded an installed
+skill package into the runtime. PR-4 adds SkillLoader + SkillService.)
 """
 
 from __future__ import annotations
 
-import pytest
-
-pytestmark = pytest.mark.xfail(
-    strict=True,
-    reason="RED (skill-runtime-2.0 PR-1): no activation/loader; unmark in PR-4",
-)
-
-from rosclaw.skill_manager.registry import SkillRegistry  # noqa: E402
+from rosclaw.skill_manager.registry import SkillRegistry
 
 
 def _runtime_skill_names(registry: SkillRegistry) -> set[str]:
-    return {e.name for e in registry.list_skills()}
+    return {e.name for e in registry.list_skills(return_entries=True)}
 
 
 class TestSkillActivation:
