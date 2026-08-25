@@ -14,6 +14,18 @@ BUNDLE="rosclaw-${VERSION}-linux-${ARCH_NAME}"
 DIST_DIR="${REPO_ROOT}/dist"
 STAGE="${DIST_DIR}/${BUNDLE}"
 
+# issue #229：uv 创建的 .venv 默认不带 pip——解析一个确定带 pip 的解释器，
+# 必要时用 stdlib ensurepip 引导；引导失败则诚实失败（离线包缺 wheels 是硬失败）。
+PYBIN="$REPO_ROOT/.venv/bin/python"
+if [ ! -x "$PYBIN" ]; then PYBIN="$(command -v python3)"; fi
+if ! "$PYBIN" -m pip --version >/dev/null 2>&1; then
+  "$PYBIN" -m ensurepip --upgrade >/dev/null 2>&1 || true
+fi
+if ! "$PYBIN" -m pip --version >/dev/null 2>&1; then
+  echo "FAIL: $PYBIN 无 pip 且 ensurepip 引导失败——无法构建离线 wheels。" >&2
+  exit 1
+fi
+
 echo "==> building ${BUNDLE}"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
@@ -46,7 +58,7 @@ chmod +x "$STAGE/install.sh" "$STAGE/rollback.sh"
 
 # 4. SBOM（审计 P0-05.2 + R6）：CycloneDX 1.5 JSON（pip freeze/npm ls
 # 只是依赖快照，不是 SBOM——保留快照作调试参考，正式 SBOM 用 CycloneDX）。
-"$REPO_ROOT/.venv/bin/python" -m pip freeze --disable-pip-version-check 2>/dev/null   > "$STAGE/sbom-python.txt" || true
+"$PYBIN" -m pip freeze --disable-pip-version-check 2>/dev/null   > "$STAGE/sbom-python.txt" || true
 for pkg in rosclaw-tui rosclaw-modeld rosclaw-agent; do
   (cd "$REPO_ROOT/packages/$pkg" && npm ls --omit=dev --depth=2 2>/dev/null)     > "$STAGE/sbom-$pkg.txt" || true
 done
@@ -103,12 +115,12 @@ mkdir -p "$STAGE/vendor/wheels" "$STAGE/vendor/node_modules_pack"
 # 需要它（R6/PNA-10：缺 wheel 已在安装侧硬失败，这里补齐来源）。
 # rosclaw 自身打成 wheel 进 vendor（force-include 数据随 wheel 走；
 # 安装侧离线不再从源码目录跑 hatch 构建）。
-"$REPO_ROOT/.venv/bin/python" -m pip wheel --no-deps --quiet \
+"$PYBIN" -m pip wheel --no-deps --quiet \
   --wheel-dir "$STAGE/vendor/wheels" "$REPO_ROOT" || {
     echo "FAIL: rosclaw wheel 构建失败，拒绝产出。" >&2
     exit 1
   }
-"$REPO_ROOT/.venv/bin/python" -m pip download   --disable-pip-version-check --quiet --dest "$STAGE/vendor/wheels"   "$REPO_ROOT" hatchling setuptools wheel || {
+"$PYBIN" -m pip download   --disable-pip-version-check --quiet --dest "$STAGE/vendor/wheels"   "$REPO_ROOT" hatchling setuptools wheel || {
     echo "FAIL: pip download 不完整——离线包将缺 wheels，拒绝产出。" >&2
     exit 1
   }
