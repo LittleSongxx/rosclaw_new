@@ -46,6 +46,8 @@ import { guardInput } from "./input-guard.js";
 import { materializeCapabilityTools, type CapabilitySnapshot } from "../tools/materialize.js";
 import { MODEL_TOOL_NAMES } from "../tools/surface.js";
 import { fetchEmbodiedContext, renderTrustedContext } from "./context-injection.js";
+import { registerCompactAnchor } from "./compact-anchor.js";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { phaseWorkingMessage } from "./activity.js";
 import { ROSCLAW_SHORTCUTS } from "./shortcuts.js";
 import { StableIdDeduper } from "./dedup.js";
@@ -473,6 +475,27 @@ export function createRosclawExtension(options: RosclawExtensionOptions): Extens
 				},
 			};
 		});
+
+		// P1-A4（0824 总纲）：任何 compaction 完成后从内核权威账本把
+		// TaskRefs 锚回 LLM 上下文——compact 后 task/artifact refs 不丢。
+		registerCompactAnchor(pi as never, {
+			call: (method: string, params: unknown) =>
+				center.call(method, params as Record<string, unknown>) as never,
+			missionId: () => options.active.current.missionId,
+			sessionRef: () => options.active.current.sessionId,
+			log: (message: string) => {
+				// 诊断先行：compact 锚决策日志（小文件，随 logs 轮转）。
+				try {
+					const dir = `${options.rosclawHome}/logs`;
+					mkdirSync(dir, { recursive: true });
+					appendFileSync(
+						`${dir}/compact-anchor.log`,
+						`${new Date().toISOString()} ${message}
+`,
+					);
+				} catch { /* 诊断不阻塞 */ }
+			},
+		} as never);
 
 		// -- 全量 ROSClaw 命令（NA-FIX-6，P0-8：InputGuard 允许的必须真实注册） --
 		for (const [name, spec] of Object.entries(
