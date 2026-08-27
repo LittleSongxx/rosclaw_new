@@ -25,6 +25,14 @@ import math
 from pathlib import Path
 from typing import Any
 
+#: R0-1.5（金丝雀实证：模型传 'xz'/'vertical' 被拒）——命名平面
+#: xy/xz/yz 映射为法向（任意法向走 plane_normal_xyz）。
+_NAMED_PLANE_NORMALS = {
+    "xy": [0.0, 0.0, 1.0],
+    "xz": [0.0, 1.0, 0.0],
+    "yz": [1.0, 0.0, 0.0],
+}
+
 #: 与 ur5e_mcp 一致的安全工作空间（规划即拒越界）。
 _SAFE_RADIUS = (0.10, 0.80)
 _SAFE_Z = (0.02, 1.20)
@@ -378,7 +386,20 @@ class SimTrajectoryService:
         if shape not in _SHAPES:
             raise ValueError(f"unsupported shape {shape!r} (supported: {', '.join(_SHAPES)})")
         if plane != "xy" and plane_normal_xyz is None:
-            raise ValueError(f"unsupported plane {plane!r} (supported: xy)")
+            normal = _NAMED_PLANE_NORMALS.get(plane)
+            if normal is None:
+                raise ValueError(
+                    f"unsupported plane {plane!r} (supported: "
+                    f"{', '.join(_NAMED_PLANE_NORMALS)} 或 plane_normal_xyz)"
+                )
+            plane_normal_xyz = normal
+            if plane_offset_m is None:
+                # 命名竖直面的 offset = 中心在法向轴上的投影
+                # （axis = 不在面名中的那个轴，xyz 轴序索引）。
+                axis = "xyz".index(
+                    next(c for c in "xyz" if c not in plane)
+                )
+                plane_offset_m = float(list(center_m)[axis])
         if not isinstance(center_m, list | tuple) or len(center_m) != 3:
             raise ValueError("center_m must be [x, y, z]")
         if not (0.02 <= float(scale_m) <= 0.35):
