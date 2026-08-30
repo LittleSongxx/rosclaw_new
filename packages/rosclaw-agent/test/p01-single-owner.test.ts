@@ -86,6 +86,14 @@ test("终态呈现器：PASS 带交付命令；PARTIAL 诚实无完成宣称", a
 	});
 	assert.match(degraded, /任务完成/);
 	assert.match(degraded, /投影退化/);
+	// P0-5：PASS_NEAR_LIMIT 诚实标注（接近阈值 ≠ 干净 PASS）。
+	const nearLimit = renderTerminalReply({
+		verification: "PASS_NEAR_LIMIT",
+		delivery: "DELIVERED",
+		artifact_refs: [],
+	});
+	assert.match(nearLimit, /PASS_NEAR_LIMIT/);
+	assert.match(nearLimit, /接近阈值/);
 });
 
 test("watcher 终态：确定性呈现一次（display, 无 triggerTurn）+ 重放不重发", async () => {
@@ -144,4 +152,52 @@ test("watcher 终态：确定性呈现一次（display, 无 triggerTurn）+ 重�
 	// 重放不重发（不重不漏）。
 	await (watcher as never as { tick(): Promise<void> }).tick();
 	assert.equal(sent.length, 1, "重放重复发布了终态");
+});
+
+test("watcher 修订重跑：同 task 新 revision 再执行 → 终态再次呈现", async () => {
+	// h2 PTY 实证：deliveredTasks 不清除 → "改成画圆形"（revision 2）
+	// 的 verification.completed 被吞——修订重跑没有终态回复。
+	const { OperationWatcher } = await import("../src/native/operation-watcher.js");
+	const events = [
+		{ seq: 1, event_type: "verification.completed", payload: { status: "PASS" } },
+	];
+	const sent: string[] = [];
+	const watcher = new OperationWatcher({
+		call: async (method: string, params: Record<string, unknown>) => {
+			if (method === "pi.kernel.events") {
+				const after = Number((params as { last_seq?: number }).last_seq ?? 0);
+				return { ok: true, events: events.filter((e) => e.seq > after) };
+			}
+			if (method === "pi.coordinator.consider") {
+				return {
+					ok: true,
+					outcome: {
+						lifecycle: "COMPLETED", verification: "PASS",
+						delivery: "DELIVERED", artifact_refs: [],
+					},
+				};
+			}
+			return { ok: true };
+		},
+		sink: () => ({
+			api: {
+				sendMessage: (message: { content: string }) => {
+					sent.push(message.content);
+				},
+			},
+			isIdle: true,
+			setWidget: () => undefined,
+		}),
+	} as never);
+	watcher.trackTask("task_rev");
+	await (watcher as never as { tick(): Promise<void> }).tick();
+	assert.equal(sent.length, 1, "首轮终态未呈现");
+	// 修订重跑：再次 trackTask（新执行周期）→ 新终态事件到达后
+	// 必须再次呈现。
+	watcher.trackTask("task_rev");
+	events.push({
+		seq: 2, event_type: "verification.completed", payload: { status: "PASS" },
+	});
+	await (watcher as never as { tick(): Promise<void> }).tick();
+	assert.equal(sent.length, 2, "修订重跑的终态被吞（deliveredTasks 未按执行周期清理）");
 });
